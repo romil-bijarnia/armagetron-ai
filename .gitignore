@@ -118,3 +118,7 @@ src/nTrueVersion.h
 .changetag
 fingerprint
 wget-log*
+
+# local build trees
+/build/
+/build-dedicated/

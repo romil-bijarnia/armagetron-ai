@@ -23,7 +23,10 @@ import numpy as np
 
 from . import protocol as P
 
-ENGINE_ROOT = Path.home() / "Documents/armagetronad/build-dedicated/stage/usr/local"
+# The patched engine is the rest of this repository (this package lives in <repo>/ai/arma_ai);
+# build it into build-dedicated/stage (see ai/README.md). ARMA_ENGINE_ROOT points elsewhere if needed.
+REPO_ROOT = Path(__file__).resolve().parents[2]
+ENGINE_ROOT = Path(os.environ.get("ARMA_ENGINE_ROOT", REPO_ROOT / "build-dedicated/stage/usr/local"))
 ENGINE_BIN = ENGINE_ROOT / "bin/armagetronad-dedicated"
 ENGINE_DATA = ENGINE_ROOT / "share/games/armagetronad-dedicated"
 ENGINE_CONFIG = ENGINE_ROOT / "etc/games/armagetronad-dedicated"

@@ -2,7 +2,7 @@
 
 A deep reinforcement learning agent for Armagetron Advanced that learns by playing against itself inside the real game engine.
 
-The game itself does the simulation. A patched build of Armagetron (branch `neural-ai` in `~/Documents/armagetronad`) adds a neural network bridge: chosen AI cycles stop using the built-in bot logic and instead send what they see to this Python project over a Unix socket every 0.05 s of game time, then execute the turn or brake the network picks. For training, the dedicated server runs headless in lockstep, so game time only advances when the network has answered and dozens of arenas run far faster than real time. The physics (rubber, wall acceleration, turn delay, brakes) are exactly the game's, because they are the game.
+The game itself does the simulation. The patched Armagetron engine in the rest of this repository adds a neural network bridge: chosen AI cycles stop using the built-in bot logic and instead send what they see to this Python project over a Unix socket every 0.05 s of game time, then execute the turn or brake the network picks. For training, the dedicated server runs headless in lockstep, so game time only advances when the network has answered and dozens of arenas run far faster than real time. The physics (rubber, wall acceleration, turn delay, brakes) are exactly the game's, because they are the game.
 
 ## What the network sees
 
@@ -43,11 +43,18 @@ Greedy duels against the strongest built-in AI or another checkpoint; results ar
 
 The full system design, including planned changes and the test plan, is in [docs/DESIGN.md](docs/DESIGN.md).
 
-## Rebuilding the engine
+## Building the engine
+
+The engine has to live in a path without spaces (autotools breaks on them). From the repository root, the first time:
 
 ```bash
-cd ~/Documents/armagetronad/build-dedicated
-make -j12 && make install DESTDIR=$HOME/Documents/armagetronad/build-dedicated/stage
+./bootstrap.sh && mkdir -p build-dedicated && cd build-dedicated && ../configure --enable-dedicated --with-boost=/opt/homebrew --disable-sysinstall --disable-useradd --disable-initscripts --disable-etc PKG_CONFIG_PATH=/opt/homebrew/opt/libxml2/lib/pkgconfig:/opt/homebrew/lib/pkgconfig LDFLAGS=-L/opt/homebrew/lib CPPFLAGS=-I/opt/homebrew/include
+```
+
+After that, and after every engine change:
+
+```bash
+cd build-dedicated && make -j12 && make install DESTDIR=$PWD/stage
 ```
 
 Don't reinstall while training is running; a replaced binary can take the running engines down with it.

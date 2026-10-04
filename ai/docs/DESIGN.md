@@ -11,7 +11,7 @@ Current state: the full pipeline is built and has been run. The latest checkpoin
 ## 2. Architecture overview
 
 ```
- Armagetron AI (Python)                                   Patched Armagetron (branch neural-ai)
+ ai/ (Python)                                             Patched Armagetron (repository root)
  +----------------------------------+                     +---------------------------------------+
  | Learner process                  |                     | armagetronad-dedicated  x N engines    |
  |   PPO updates on the GPU         |                     |   lockstep clock, runs without humans |
@@ -205,13 +205,13 @@ These are in priority order. None of them has been run yet.
 
 | Path | Purpose |
 |---|---|
-| `arma_ai/protocol.py` | wire format constants and structs |
-| `arma_ai/engine.py` | `ArenaConfig` (engine settings) and `EnginePool` (process and socket management) |
-| `arma_ai/model.py` | `PolicyNet` |
-| `arma_ai/train.py` | `Actor`, `Learner`, PPO, arena mix |
-| `arma_ai/play.py` | `Brain` and the play server |
-| `arma_ai/evaluate.py`, `arma_ai/league.py` | strength measurement |
-| `arma_ai/smoke.py` | engine throughput check and observation image dumps |
-| `tests/` | fake engine and pipeline tests |
-| `runs/main/` | `latest.pt`, `actor.pt`, past-self `pool/`, `metrics.jsonl`, `train.log` |
-| `~/Documents/armagetronad` (branch `neural-ai`) | patched engine: `gNeural.cpp/.h`, lockstep and no-human changes in `gGame.cpp`, `tSysTime.cpp`, `nSocket.cpp`, accessors in `gCycleMovement` |
+| `ai/arma_ai/protocol.py` | wire format constants and structs |
+| `ai/arma_ai/engine.py` | `ArenaConfig` (engine settings) and `EnginePool` (process and socket management) |
+| `ai/arma_ai/model.py` | `PolicyNet` |
+| `ai/arma_ai/train.py` | `Actor`, `Learner`, PPO, arena mix |
+| `ai/arma_ai/play.py` | `Brain` and the play server |
+| `ai/arma_ai/evaluate.py`, `ai/arma_ai/league.py` | strength measurement |
+| `ai/arma_ai/smoke.py` | engine throughput check and observation image dumps |
+| `ai/tests/` | fake engine and pipeline tests |
+| `ai/runs/main/` (not in git) | `latest.pt`, `actor.pt`, past-self `pool/`, `metrics.jsonl`, `train.log` |
+| repository root (`src/`, `config/`, ...) | the patched Armagetron engine: `src/tron/gNeural.cpp/.h`, lockstep and no-human changes in `gGame.cpp`, `tSysTime.cpp`, `nSocket.cpp`, accessors in `gCycleMovement` |
