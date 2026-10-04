@@ -19,8 +19,10 @@ enemy gives a small bonus.
 from __future__ import annotations
 
 import argparse
+import fcntl
 import json
 import multiprocessing as mp
+import os
 import queue
 import random
 import signal
@@ -352,20 +354,26 @@ class Actor:
     def run(self, blocks: list[Store], full_q, free_q, stop) -> None:
         arenas = [a for _, a in self.mix]
         workdir = PROJECT / "runtime" / self.run_dir.name
+        parent = os.getppid()
+
+        def finished() -> bool:
+            # stop when asked, or when the learner died without asking (we'd be orphaned)
+            return stop.is_set() or os.getppid() != parent
+
         with EnginePool(arenas, workdir=workdir, command=self.engine_command) as pool:
-            while not stop.is_set():
+            while not finished():
                 t0 = time.time()
                 steps_taken = 0
-                while self.store.resolved < self.cfg.rollout and not stop.is_set():
+                while self.store.resolved < self.cfg.rollout and not finished():
                     steps_taken += self.act(pool, pool.poll(max_wait=0.003))
-                if stop.is_set():
+                if finished():
                     break
                 while True:  # wait for a free buffer; engines simply pause meanwhile
                     try:
                         b = free_q.get(timeout=1.0)
                         break
                     except queue.Empty:
-                        if stop.is_set():
+                        if finished():
                             return
                 stats = self.hand_over(blocks[b])
                 stats.update(steps=steps_taken, collect_s=time.time() - t0)
@@ -393,6 +401,12 @@ class Learner:
         self.run_dir = (PROJECT / cfg.run).resolve()
         self.run_dir.mkdir(parents=True, exist_ok=True)
         (self.run_dir / "pool").mkdir(exist_ok=True)
+        # two trainers on one run folder would overwrite each other's checkpoints
+        self._lock = open(self.run_dir / ".lock", "w")
+        try:
+            fcntl.flock(self._lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            raise SystemExit(f"another training process is already using {cfg.run}") from None
         random.seed(cfg.seed)
         np.random.seed(cfg.seed)
         torch.manual_seed(cfg.seed)

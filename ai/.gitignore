@@ -5,3 +5,6 @@ runtime/
 runs/
 checkpoints/
 .venv
+.lock
+trainctl.pid
+trainctl.stop

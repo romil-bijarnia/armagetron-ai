@@ -25,8 +25,10 @@ uv venv --python 3.13 ~/.venvs/armagetron-ai && ln -s ~/.venvs/armagetron-ai .ve
 ## Training
 
 ```bash
-uv run arma-train --run runs/main
+./trainctl start
 ```
+
+`./trainctl start` trains in the background with the Mac kept awake and restarts itself from the last checkpoint if it ever crashes. `./trainctl gentle` does the same with 6 engines at low priority, for when you're using the laptop. `./trainctl status` shows whether it's running and how far it has got, `./trainctl log` follows the log, and `./trainctl stop` stops it after saving a checkpoint. Any extra flags go to the trainer, for example `./trainctl start --lr 1e-4`; `uv run arma-train --help` lists them all. To run the trainer in the foreground instead, use `uv run arma-train` (Ctrl-C stops it and saves).
 
 An actor process runs 24 engines and picks moves; a learner process runs PPO on the GPU; rollouts move between them through shared memory. Arenas are mixed: self-play duels in three arena sizes, four-player free-for-alls, and matches against the game's strongest built-in AI. Some self-play opponents are frozen snapshots of earlier versions (saved to `runs/main/pool/`) so the policy can't forget how to beat old strategies. Training resumes from `runs/main/latest.pt` automatically. Progress goes to `runs/main/train.log` and `runs/main/metrics.jsonl`; the `win_vs_ai_*` columns are the share of rounds won against the built-in AI.
 

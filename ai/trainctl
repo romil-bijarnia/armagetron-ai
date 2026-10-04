@@ -1,0 +1,131 @@
+#!/bin/sh
+# trainctl: start, stop and watch Armagetron AI training from any terminal.
+#
+#   ./trainctl start [flags]    train in the background with the Mac kept awake;
+#                               restarts itself from the last checkpoint if it crashes
+#   ./trainctl gentle [flags]   same, but 6 engines at low priority so the laptop stays usable
+#   ./trainctl stop             stop training (it saves a checkpoint on the way out)
+#   ./trainctl status           is it running, latest progress, when the last checkpoint was saved
+#   ./trainctl log              follow the training log (Ctrl-C stops watching, not training)
+#
+# Extra flags go straight to arma-train, e.g. ./trainctl start --lr 1e-4 or --run runs/exp1.
+# Checkpoints are saved automatically every few minutes and whenever training stops.
+
+set -u
+self="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"
+cd "$(dirname "$self")" || exit 1
+
+cmd="${1:-help}"
+[ $# -gt 0 ] && shift
+
+# the run folder is the value after --run, runs/main by default
+run=runs/main
+prev=""
+for a in "$@"; do
+    [ "$prev" = "--run" ] && run="$a"
+    prev="$a"
+done
+mkdir -p "$run"
+pidfile="$run/trainctl.pid"
+stopflag="$run/trainctl.stop"
+log="$run/train.log"
+
+running() { [ -f "$pidfile" ] && kill -0 "$(cat "$pidfile")" 2>/dev/null; }
+trainer_pids() { pgrep -f "bin/arma-train"; }
+stamp() { date '+%Y-%m-%d %H:%M:%S'; }
+
+case "$cmd" in
+start | gentle)
+    if running; then
+        echo "already training (pid $(cat "$pidfile")); ./trainctl status shows progress"
+        exit 0
+    fi
+    if [ -n "$(trainer_pids)" ]; then
+        echo "a training process started some other way is already running; stop it first (pkill -f arma-train)"
+        exit 1
+    fi
+    command -v uv >/dev/null || { echo "uv not found on PATH"; exit 1; }
+    rm -f "$stopflag"
+    if [ "$cmd" = gentle ]; then
+        set -- --engines 6 "$@"
+        nohup nice -n 15 "$self" _supervise "$@" >> "$log" 2>&1 &
+    else
+        nohup caffeinate -i "$self" _supervise "$@" >> "$log" 2>&1 &
+    fi
+    echo $! > "$pidfile"
+    echo "training started ($cmd) in $run; ./trainctl log to watch, ./trainctl stop to stop"
+    ;;
+
+_supervise)
+    quick=0
+    first=1
+    while :; do
+        started=$(date +%s)
+        if [ "$first" = 1 ]; then
+            uv run arma-train "$@"
+        else
+            uv run arma-train "$@" --resume true  # a restart always continues from the checkpoint
+        fi
+        code=$?
+        first=0
+        # engines of a crashed trainer exit on their own; make sure none linger before restarting
+        pkill -f "/runtime/$(basename "$run")/engine" 2>/dev/null
+        [ -f "$stopflag" ] && break
+        [ "$code" -eq 0 ] && break
+        if [ $(( $(date +%s) - started )) -lt 120 ]; then quick=$((quick + 1)); else quick=0; fi
+        if [ "$quick" -ge 3 ]; then
+            echo "$(stamp) trainctl: training failed three times right after starting, giving up (see the errors above)"
+            break
+        fi
+        echo "$(stamp) trainctl: training exited with code $code, restarting from the last checkpoint in 15 s"
+        sleep 15
+    done
+    rm -f "$pidfile" "$stopflag"
+    ;;
+
+stop)
+    if ! running && [ -z "$(trainer_pids)" ]; then
+        echo "not training"
+        pkill -f "/runtime/$(basename "$run")/engine" 2>/dev/null
+        rm -f "$pidfile" "$stopflag"
+        exit 0
+    fi
+    touch "$stopflag"
+    pids=$(trainer_pids)
+    [ -n "$pids" ] && kill -TERM $pids
+    echo "stopping and saving a checkpoint..."
+    i=0
+    while { running || [ -n "$(trainer_pids)" ]; } && [ $i -lt 120 ]; do
+        sleep 1
+        i=$((i + 1))
+    done
+    if running || [ -n "$(trainer_pids)" ]; then
+        echo "still shutting down after 2 minutes; check again with ./trainctl status"
+    else
+        pkill -f "/runtime/$(basename "$run")/engine" 2>/dev/null
+        rm -f "$pidfile" "$stopflag"
+        echo "stopped; checkpoint saved in $run/latest.pt"
+    fi
+    ;;
+
+status)
+    if running; then
+        echo "training (pid $(cat "$pidfile")), run folder $run"
+    elif [ -n "$(trainer_pids)" ]; then
+        echo "training (started without trainctl)"
+    else
+        echo "not training"
+    fi
+    [ -f "$log" ] && grep '^u[0-9]' "$log" | tail -1
+    [ -f "$run/latest.pt" ] && echo "last checkpoint saved $(date -r "$run/latest.pt" '+%Y-%m-%d %H:%M:%S')"
+    ;;
+
+log)
+    touch "$log"
+    tail -n 20 -f "$log"
+    ;;
+
+*)
+    sed -n '2,12p' "$self" | sed 's/^# \{0,1\}//'
+    ;;
+esac
