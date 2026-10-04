@@ -34,6 +34,14 @@ An actor process runs 24 engines and picks moves; a learner process runs PPO on 
 
 Reward is +1 for winning a round, up to −1 for dying (scaled by how many opponents were still alive) and +0.1 per kill.
 
+## Watching it play
+
+```bash
+./trainctl show
+```
+
+Runs a real match in a headless engine and draws it live in the terminal: every cycle's trail in its own colour, with a scoreboard of wins. `--bots 1 --ais 1` pits it against the game's best bot, `--ais 2 --bots 2` makes a four-player game, `--size 0` uses the full-size arena and `--speed 4` plays at four times real speed. Ctrl-C quits.
+
 ## Playing against it
 
 ```bash

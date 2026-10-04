@@ -59,7 +59,7 @@ namespace
 // wire protocol; keep in sync with arma_ai/protocol.py
 const uint32_t kMagic = 0x414D5241;
 const uint32_t kProtocol = 1;
-const uint32_t kMsgHello = 1, kMsgStep = 2, kMsgActions = 3;
+const uint32_t kMsgHello = 1, kMsgStep = 2, kMsgActions = 3, kMsgWorld = 4;
 const int kGrid = 64;
 const int kLocalPlanes = 8, kGlobalPlanes = 8, kScalars = 96;
 const int kAgentRow = 40;  // rows of the local map that lie in front of the cycle
@@ -89,6 +89,8 @@ int sg_debug = 0;
 tSettingItem<int> sg_debugConf( "NEURAL_DEBUG", sg_debug );
 bool sg_controlAfterRound = false;
 tSettingItem<bool> sg_controlAfterRoundConf( "NEURAL_CONTROL_AFTER_ROUND", sg_controlAfterRound );
+bool sg_spectate = false; // also send every cycle's position each tick, for a match viewer
+tSettingItem<bool> sg_spectateConf( "NEURAL_SPECTATE", sg_spectate );
 
 // ------------------------------------------------------------------ socket
 int sg_fd = -1;
@@ -685,6 +687,64 @@ void gNeural::Timestep( REAL time )
         bool alive = c && c->Alive();
         slotAlive = slotAlive || alive;
         report = report || alive || sg_slots[k].wasAlive || kills[k] > 0;
+    }
+
+    if ( sg_spectate )
+    {
+        // WORLD: arena bounds and every cycle, sent before the STEP (if one follows) so a viewer can
+        // draw the match; without a STEP the viewer acknowledges, which also lets it pace the game
+        tRectangle const & bounds = eWallRim::GetBounds();
+        std::vector< std::pair< ePlayerNetID *, gCycle * > > cycles;
+        for ( int i = 0; i < se_PlayerNetIDs.Len(); ++i )
+        {
+            gCycle * c = dynamic_cast< gCycle * >( se_PlayerNetIDs( i )->Object() );
+            if ( c )
+                cycles.push_back( std::make_pair( se_PlayerNetIDs( i ), c ) );
+        }
+        Buffer w;
+        w.U32( sg_roundID );
+        w.F32( time );
+        w.U8( over ? 1 : 0 );
+        w.U8( report ? 1 : 0 );
+        w.F32( bounds.GetLow().x );
+        w.F32( bounds.GetLow().y );
+        w.F32( bounds.GetHigh().x );
+        w.F32( bounds.GetHigh().y );
+        w.U8( uint8_t( std::min< size_t >( cycles.size(), 255 ) ) );
+        for ( size_t i = 0; i < cycles.size() && i < 255; ++i )
+        {
+            ePlayerNetID * p = cycles[i].first;
+            gCycle * c = cycles[i].second;
+            uint8_t slot = 255;
+            for ( size_t k = 0; k < sg_slots.size(); ++k )
+                if ( sg_slots[k].player == p )
+                    slot = uint8_t( k );
+            uint16_t id = p->ID();
+            w.Raw( &id, 2 );
+            w.U8( slot );
+            w.U8( c->Alive() ? 1 : 0 );
+            eCoord pos = c->Position(), dir = Unit( c->Direction() );
+            w.F32( pos.x );
+            w.F32( pos.y );
+            w.F32( dir.x );
+            w.F32( dir.y );
+            w.F32( c->Speed() );
+            char name[16];
+            memset( name, 0, sizeof( name ) );
+            strncpy( name, p->GetLogName().c_str(), sizeof( name ) - 1 );
+            w.Raw( name, sizeof( name ) );
+        }
+        SendMessage( kMsgWorld, w );
+        if ( !report )
+        {
+            uint32_t header[3];
+            ReadAll( header, sizeof( header ) );
+            if ( header[0] != kMagic || header[2] > 1024 )
+                Fail( "malformed acknowledgement" );
+            std::vector< uint8_t > ack( header[2] );
+            if ( header[2] )
+                ReadAll( &ack[0], header[2] );
+        }
     }
 
     if ( report )

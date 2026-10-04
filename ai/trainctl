@@ -7,6 +7,7 @@
 #   ./trainctl stop             stop training (it saves a checkpoint on the way out)
 #   ./trainctl status           is it running, latest progress, when the last checkpoint was saved
 #   ./trainctl watch            live charts of how training is going (Ctrl-C closes them, not training)
+#   ./trainctl show [flags]     watch the AI play a match, drawn in the terminal (Ctrl-C quits)
 #   ./trainctl log              follow the training log (Ctrl-C stops watching, not training)
 #
 # Extra flags go straight to arma-train, e.g. ./trainctl start --lr 1e-4 or --run runs/exp1.
@@ -135,12 +136,16 @@ watch)
     dashboard
     ;;
 
+show)
+    exec uv run -q arma-show "$@"
+    ;;
+
 log)
     touch "$log"
     tail -n 20 -f "$log"
     ;;
 
 *)
-    sed -n '2,13p' "$self" | sed 's/^# \{0,1\}//'
+    sed -n '2,14p' "$self" | sed 's/^# \{0,1\}//'
     ;;
 esac

@@ -29,6 +29,7 @@ MAGIC = 0x414D5241  # b"ARMA" little-endian
 MSG_HELLO = 1
 MSG_STEP = 2
 MSG_ACTIONS = 3
+MSG_WORLD = 4  # only with NEURAL_SPECTATE: every cycle's position, before each tick's STEP
 
 GRID = 64
 N_LOCAL_PLANES = 8
@@ -54,3 +55,10 @@ STEP_HEAD = struct.Struct("<IIfBBBB")
 SLOT_HEAD = struct.Struct("<BBBB")
 
 OBS_BYTES = GRID * GRID * 2 + N_SCALARS * 4
+
+# WORLD: u32 round_id, f32 round_time, u8 round_over, u8 step_follows, f32 x 4 arena bounds (low x, low y,
+# high x, high y), u8 n, then per cycle: u16 player id, u8 slot (255 = built-in AI), u8 alive,
+# f32 x, y, dir x, dir y, speed, 16-byte name. Without a following STEP the viewer answers with an
+# empty ACTIONS message.
+WORLD_HEAD = struct.Struct("<IfBB4fB")
+WORLD_CYCLE = struct.Struct("<HBB5f16s")
