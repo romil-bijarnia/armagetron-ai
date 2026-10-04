@@ -49,7 +49,7 @@ class Chart:
         yield from self.render(width, height)
 
     def render(self, width: int, height: int) -> list[Text]:
-        legend = Text()
+        legend = Text(no_wrap=True, overflow="ellipsis")
         for label, _, color in self.series:
             legend.append("● ", style=color)
             legend.append(label + "   ", style="dim")
@@ -190,7 +190,7 @@ def pct(v: float | None) -> str:
     return "–" if v is None else f"{100 * v:.0f}%"
 
 
-def build(run_dir: Path, recs: list[dict]) -> Layout:
+def build(run_dir: Path, recs: list[dict], height: int = 50) -> Layout:
     running, state = training_status(run_dir)
     latest_ck = run_dir / "latest.pt"
     xs = [r["update"] for r in recs]
@@ -218,35 +218,37 @@ def build(run_dir: Path, recs: list[dict]) -> Layout:
     vs_self = [("duels", [avg(r, duel_keys) for r in recs], "green"),
                ("4-player", [r.get("win_ffa4") for r in recs], "cyan")]
     health = [("decisiveness", [1 - r["ent"] / math.log(4) if "ent" in r else None for r in recs], "blue"),
-              ("outcome prediction", [max(r["value_explained"], 0) if "value_explained" in r else None
-                                      for r in recs], "bright_magenta")]
+              ("prediction", [max(r["value_explained"], 0) if "value_explained" in r else None
+                              for r in recs], "bright_magenta")]
+    dec = 1 - last["ent"] / math.log(4) if "ent" in last else None
+    pred = max(last["value_explained"], 0) if "value_explained" in last else None
+    surv_now = f"{survival[-1]:.0f} s" if recs else "–"
 
     def panel(title: str, chart: Chart) -> Panel:
         return Panel(chart, title=title, title_align="left", border_style="grey35", padding=(0, 1))
 
+    # every chart title carries its latest value, so the charts alone tell the story in a small window
     charts = Layout()
     top, bottom = Layout(name="top"), Layout(name="bottom")
     top.split_row(
-        Layout(panel("Survival time per round (seconds)",
-                     Chart([("average", survival, "bright_cyan")], xs, ymin=0, fmt="{:.0f}"))),
-        Layout(panel("Win rate vs the game's best bot",
+        Layout(panel(f"Survival per round: {surv_now}",
+                     Chart([("average seconds", survival, "bright_cyan")], xs, ymin=0, fmt="{:.0f}"))),
+        Layout(panel(f"vs best bot: {pct(last.get('win_vs_ai_small'))} small, {pct(last.get('win_vs_ai_std'))} full",
                      Chart(vs_bot, xs, ymin=0, ymax=1, fmt="{:.0%}", baseline=0.5))),
     )
     bottom.split_row(
-        Layout(panel("Win rate vs its past self",
+        Layout(panel(f"vs past self: {pct(avg(last, duel_keys))} duels",
                      Chart(vs_self, xs, ymin=0, ymax=1, fmt="{:.0%}", baseline=0.5))),
-        Layout(panel("Learning health",
+        Layout(panel(f"Learning health: {pct(dec)} / {pct(pred)}",
                      Chart(health, xs, ymin=0, ymax=1, fmt="{:.0%}"))),
     )
     charts.split_column(top, bottom)
 
     guide = Table.grid(expand=True, padding=(0, 2))
-    guide.add_column(style="bold", no_wrap=True)
-    guide.add_column(justify="right", no_wrap=True)
-    guide.add_column(style="dim", no_wrap=True, overflow="ellipsis")
-    dec = 1 - last["ent"] / math.log(4) if "ent" in last else None
-    pred = max(last["value_explained"], 0) if "value_explained" in last else None
-    guide.add_row("Survival", f"{survival[-1]:.0f} s" if recs else "–", "rising = it is learning to stay alive")
+    guide.add_column(style="bold", no_wrap=True, width=12)
+    guide.add_column(justify="right", no_wrap=True, width=11)
+    guide.add_column(style="dim", no_wrap=True, overflow="ellipsis", ratio=1)
+    guide.add_row("Survival", surv_now, "rising = it is learning to stay alive")
     guide.add_row("vs best bot", f"{pct(last.get('win_vs_ai_small'))} / {pct(last.get('win_vs_ai_std'))}",
                   "small / full-size arena; should climb towards 100%")
     guide.add_row("vs past self", pct(avg(last, duel_keys)), "above 50% = it beats its older versions")
@@ -255,13 +257,17 @@ def build(run_dir: Path, recs: list[dict]) -> Layout:
     guide.add_row("Speed", f"{last.get('sps', 0):,}/s" if recs else "–", "decisions per second; more = faster progress")
 
     layout = Layout()
-    layout.split_column(
-        Layout(Panel(head, border_style="green" if running else "red", padding=(0, 1)), size=4),
-        Layout(charts, name="charts"),
-        Layout(Panel(guide, title="Latest", title_align="left", border_style="grey35", padding=(0, 1)), size=8),
-        Layout(Text(f" Ctrl-C closes this view; training keeps running.\n To stop training: {TRAINCTL} stop",
-                    style="dim", no_wrap=True, overflow="ellipsis"), size=2),
-    )
+    parts = [Layout(Panel(head, border_style="green" if running else "red", padding=(0, 1)), size=4),
+             Layout(charts, name="charts")]
+    if height >= 42:  # room for the explained summary under the charts
+        parts.append(Layout(Panel(guide, title="Latest", title_align="left", border_style="grey35",
+                                  padding=(0, 1)), size=8))
+        parts.append(Layout(Text(f" Ctrl-C closes this view; training keeps running.\n To stop training: {TRAINCTL} stop",
+                                 style="dim", no_wrap=True, overflow="ellipsis"), size=2))
+    else:
+        parts.append(Layout(Text(f" Ctrl-C closes this · stop training: {TRAINCTL} stop",
+                                 style="dim", no_wrap=True, overflow="ellipsis"), size=1))
+    layout.split_column(*parts)
     return layout
 
 
@@ -276,14 +282,15 @@ def main() -> None:
     state: dict = {}
     console = Console(width=args.width, height=args.height)
     if args.once:
-        console.print(build(run_dir, read_metrics(run_dir / "metrics.jsonl", state)), height=args.height or 40)
+        h = args.height or 40
+        console.print(build(run_dir, read_metrics(run_dir / "metrics.jsonl", state), h), height=h)
         return
     try:
-        with Live(build(run_dir, read_metrics(run_dir / "metrics.jsonl", state)), console=console,
-                  screen=True, refresh_per_second=1) as live:
+        frame = lambda: build(run_dir, read_metrics(run_dir / "metrics.jsonl", state), console.size.height)  # noqa: E731
+        with Live(frame(), console=console, screen=True, refresh_per_second=1) as live:
             while True:
                 time.sleep(2)
-                live.update(build(run_dir, read_metrics(run_dir / "metrics.jsonl", state)))
+                live.update(frame())
     except KeyboardInterrupt:
         pass
 
