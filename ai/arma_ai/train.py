@@ -401,8 +401,13 @@ class Learner:
         self.opt = torch.optim.Adam(self.net.parameters(), lr=cfg.lr, eps=1e-5)
         self.update = 0
         self.total_steps = 0
-        if cfg.resume and (self.run_dir / "latest.pt").exists():
-            ck = torch.load(self.run_dir / "latest.pt", map_location=self.device, weights_only=True)
+        # previous.pt only matters if a crash hit the instant between the two renames in save()
+        saved = next((f for f in (self.run_dir / "latest.pt", self.run_dir / "previous.pt") if f.exists()), None)
+        if saved and not cfg.resume:
+            raise SystemExit(f"{cfg.run} already holds a trained AI ({saved.name}). Starting from scratch there would "
+                             f"overwrite it, so pick a new --run folder for a fresh start.")
+        if saved:
+            ck = torch.load(saved, map_location=self.device, weights_only=True)
             self.net.load_state_dict(ck["model"])
             self.opt.load_state_dict(ck["opt"])
             for group in self.opt.param_groups:  # a --lr flag wins over the learning rate saved with the optimiser
@@ -424,9 +429,11 @@ class Learner:
     def save(self) -> None:
         ck = {"model": self.net.state_dict(), "opt": self.opt.state_dict(), "update": self.update,
               "total_steps": self.total_steps, "config": asdict(self.cfg)}
-        tmp = self.run_dir / "latest.pt.tmp"
+        tmp, latest = self.run_dir / "latest.pt.tmp", self.run_dir / "latest.pt"
         torch.save(ck, tmp)
-        tmp.replace(self.run_dir / "latest.pt")
+        if latest.exists():
+            latest.replace(self.run_dir / "previous.pt")  # the checkpoint before, as a fallback
+        tmp.replace(latest)
         if self.update % self.cfg.snapshot_every == 0:
             torch.save({"model": self.net.state_dict(), "update": self.update},
                        self.run_dir / "pool" / f"u{self.update:06d}.pt")
