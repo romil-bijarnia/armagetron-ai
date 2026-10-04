@@ -4,5 +4,4 @@ __pycache__/
 runtime/
 runs/
 checkpoints/
-.venv.nosync/
 .venv

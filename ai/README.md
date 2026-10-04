@@ -14,6 +14,14 @@ Every decision gets three inputs, all rotated so the cycle always faces up:
 
 It answers with one of four actions: straight, left, right, brake. Turns are masked while the game's turn delay is running, so the network only ever issues moves a human could.
 
+## Setting up
+
+Install the Python environment once, from this folder. If the repository sits in an iCloud-synced folder (Desktop or Documents), keep the environment outside it: iCloud marks files it manages as hidden, and Python 3.13 ignores hidden `.pth` files, which breaks the `arma-*` commands.
+
+```bash
+uv venv --python 3.13 ~/.venvs/armagetron-ai && ln -s ~/.venvs/armagetron-ai .venv && uv sync
+```
+
 ## Training
 
 ```bash
