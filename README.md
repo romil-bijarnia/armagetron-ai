@@ -41,6 +41,8 @@ uv run arma-eval --opponent runs/main/pool/u000100.pt
 
 Greedy duels against the strongest built-in AI or another checkpoint; results are appended to `runs/main/eval.jsonl`.
 
+The full system design, including planned changes and the test plan, is in [docs/DESIGN.md](docs/DESIGN.md).
+
 ## Rebuilding the engine
 
 ```bash

@@ -16,6 +16,8 @@ dependencies = [
 arma-train = "arma_ai.train:main"
 arma-eval = "arma_ai.evaluate:main"
 arma-play = "arma_ai.play:main"
+arma-league = "arma_ai.league:main"
+arma-smoke = "arma_ai.smoke:main"
 
 [dependency-groups]
 dev = ["pytest>=8,<10"]

@@ -67,19 +67,20 @@ class Config:
 
 def arena_mix(n: int) -> list[tuple[str, ArenaConfig]]:
     """The arenas each engine runs. Mixed sizes and player counts so the policy generalises."""
+    # mostly self-play now that the built-in AI is beaten; a few built-in arenas stay as a sanity anchor
     templates = [
         ("duel_small", ArenaConfig(slots=2, size_factor=-3)),
         ("duel_mid", ArenaConfig(slots=2, size_factor=-1.5)),
+        ("ffa4", ArenaConfig(slots=4, size_factor=-1)),
+        ("duel_std", ArenaConfig(slots=2, size_factor=0)),
         ("vs_ai_small", ArenaConfig(slots=1, builtin_ais=1, size_factor=-3)),
+        ("duel_small", ArenaConfig(slots=2, size_factor=-3)),
+        ("duel_mid", ArenaConfig(slots=2, size_factor=-1.5)),
+        ("mixed_ffa", ArenaConfig(slots=2, builtin_ais=2, size_factor=-1)),
+        ("duel_small", ArenaConfig(slots=2, size_factor=-3)),
         ("ffa4", ArenaConfig(slots=4, size_factor=-1)),
         ("duel_std", ArenaConfig(slots=2, size_factor=0)),
         ("vs_ai_std", ArenaConfig(slots=1, builtin_ais=1, size_factor=0)),
-        ("mixed_ffa", ArenaConfig(slots=2, builtin_ais=2, size_factor=-1)),
-        ("duel_small", ArenaConfig(slots=2, size_factor=-3)),
-        ("vs_ai_ffa", ArenaConfig(slots=1, builtin_ais=3, size_factor=-1)),
-        ("duel_mid", ArenaConfig(slots=2, size_factor=-1.5)),
-        ("ffa4", ArenaConfig(slots=4, size_factor=-1)),
-        ("vs_ai_small", ArenaConfig(slots=1, builtin_ais=1, size_factor=-3)),
     ]
     return [templates[i % len(templates)] for i in range(n)]
 
