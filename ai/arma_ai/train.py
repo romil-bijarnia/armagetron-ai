@@ -405,6 +405,8 @@ class Learner:
             ck = torch.load(self.run_dir / "latest.pt", map_location=self.device, weights_only=True)
             self.net.load_state_dict(ck["model"])
             self.opt.load_state_dict(ck["opt"])
+            for group in self.opt.param_groups:  # a --lr flag wins over the learning rate saved with the optimiser
+                group["lr"] = cfg.lr
             self.update = ck["update"]
             self.total_steps = ck["total_steps"]
             print(f"resumed {self.run_dir.name} at update {self.update} ({self.total_steps:,} steps)")
