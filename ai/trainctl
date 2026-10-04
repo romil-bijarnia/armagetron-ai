@@ -6,6 +6,7 @@
 #   ./trainctl gentle [flags]   same, but 6 engines at low priority so the laptop stays usable
 #   ./trainctl stop             stop training (it saves a checkpoint on the way out)
 #   ./trainctl status           is it running, latest progress, when the last checkpoint was saved
+#   ./trainctl watch            live charts of how training is going (Ctrl-C closes them, not training)
 #   ./trainctl log              follow the training log (Ctrl-C stops watching, not training)
 #
 # Extra flags go straight to arma-train, e.g. ./trainctl start --lr 1e-4 or --run runs/exp1.
@@ -120,12 +121,16 @@ status)
     [ -f "$run/latest.pt" ] && echo "last checkpoint saved $(date -r "$run/latest.pt" '+%Y-%m-%d %H:%M:%S')"
     ;;
 
+watch)
+    exec uv run arma-dash --run "$run"
+    ;;
+
 log)
     touch "$log"
     tail -n 20 -f "$log"
     ;;
 
 *)
-    sed -n '2,12p' "$self" | sed 's/^# \{0,1\}//'
+    sed -n '2,13p' "$self" | sed 's/^# \{0,1\}//'
     ;;
 esac
