@@ -778,6 +778,21 @@ float gCycleMovement::SpeedMultiplier( void )
 
 // *******************************************************************************************
 // *
+// *	BaseSpeed
+// *
+// *******************************************************************************************
+//!
+//!		@return		CYCLE_SPEED times the current speed multiplier
+//!
+// *******************************************************************************************
+
+float gCycleMovement::BaseSpeed( void )
+{
+    return sg_speedCycle * SpeedMultiplier();
+}
+
+// *******************************************************************************************
+// *
 // *	SetSpeedMultiplier
 // *
 // *******************************************************************************************
@@ -962,6 +977,15 @@ eCoord gCycleMovement::SpawnDirection() const {
 //!		@return	the potential killer of this cycle
 //!
 // *******************************************************************************************
+
+ePlayerNetID const * gCycleMovement::Hunter() const
+{
+    // same rule gCycle::KillAt() uses to hand out kill points
+    ePlayerNetID const * hunter = enemyInfluence.GetEnemy();
+    if ( !hunter || LastTime() - enemyInfluence.GetTime() > sg_suicideTimeout )
+        return NULL;
+    return hunter;
+}
 
 eGameObject const * gCycleMovement::Killer() const
 {

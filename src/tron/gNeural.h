@@ -20,21 +20,37 @@ GNU General Public License for more details.
 You should have received a copy of the GNU General Public License
 along with this program; if not, write to the Free Software
 Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
-  
+
 ***************************************************************************
 
 */
 
-#ifndef ArmageTron_SysTime_H
-#define ArmageTron_SysTime_H
+#ifndef ArmageTron_gNEURAL_H
+#define ArmageTron_gNEURAL_H
 
-bool tTimerIsAccurate();                      //! returns true if a timer with more than millisecond accuracy is available
-double tSysTimeFloat();                       //! returns the current frame's time ( from the playback )
-double tRealSysTimeFloat();                   //! returns the current frame's time ( from the real system )
-void tAdvanceFrame( int usecdelay = 0);       //! andvances one frame: updates the system time
-void tSetLockstep( double dt );               //! lockstep mode (dt > 0): every frame advances time by exactly dt, ignoring the wall clock
-bool tLockstepActive();                       //! returns whether lockstep mode is on
-void tDelay( int usecdelay );                 //! delays for the specified number of microseconds
-void tDelayForce( int usecdelay );            //! delays for the specified number of microseconds, even when playing back
+#include "defs.h"
+
+class gAIPlayer;
+
+//! Bridge that lets an external process (a neural network) drive some of the AI players.
+//! Configured with NEURAL_SOCKET (unix socket path) and NEURAL_SLOTS (how many AI players
+//! it controls); see the Armagetron AI project for the wire protocol.
+namespace gNeural
+{
+    //! true if neural control is configured
+    bool Active();
+
+    //! true if the given AI player is driven by the external brain
+    bool Controls( gAIPlayer const * player );
+
+    //! called after every world timestep on the server; makes decisions at fixed intervals
+    void Timestep( REAL time );
+
+    //! called after the cycles of a new round have been spawned
+    void NewRound();
+
+    //! the lockstep frame time; 0 means the game runs in real time
+    REAL LockstepDT();
+}
 
 #endif

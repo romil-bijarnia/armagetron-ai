@@ -28,6 +28,7 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 #include "aa_config.h"
 
 #include "tSysTime.h"
+#include <math.h>
 #include "tRecorder.h"
 #include "tError.h"
 #include "tConsole.h"
@@ -398,10 +399,14 @@ void tAdvanceFrameSys( tTime & start, tTime & relative )
 }
 
 static bool s_delayedInPlayback = false;
+static bool st_lockstep = false;
+static double st_lockstepTime = 0;
+static double st_lockstepDT = 0;
+
 void tDelay( int usecdelay )
 {
-    // delay a bit if we're not playing back
-    if ( ! tRecorder::IsPlayingBack() )
+    // delay a bit if we're not playing back (or simulating time in lockstep)
+    if ( ! tRecorder::IsPlayingBack() && ! st_lockstep )
         usleep( usecdelay );
     else
         s_delayedInPlayback = true;
@@ -424,8 +429,41 @@ void tDelayForce( int usecdelay )
     s_delayedInPlayback = false;
 }
 
+
+static void st_SetRelative( tTime & t, double seconds )
+{
+    t.seconds = int( floor( seconds ) );
+    t.microseconds = int( ( seconds - t.seconds ) * 1E6 );
+}
+
+void tSetLockstep( double dt )
+{
+    if ( dt > 0 && !st_lockstep )
+    {
+        // continue from the current frame time so game time does not jump
+        st_lockstepTime = timeRelative.seconds + timeRelative.microseconds * 1E-6;
+    }
+    st_lockstep = dt > 0;
+    st_lockstepDT = dt;
+}
+
+bool tLockstepActive()
+{
+    return st_lockstep;
+}
+
+
 void tAdvanceFrame( int usecdelay )
 {
+    if ( st_lockstep )
+    {
+        // simulated clock: every frame advances game time by the same fixed amount,
+        // no matter how much wall clock time passed
+        st_lockstepTime += st_lockstepDT;
+        st_SetRelative( timeRelative, st_lockstepTime );
+        return;
+    }
+
     // delay a bit if we're not playing back
     if ( usecdelay > 0 )
         tDelay( usecdelay );

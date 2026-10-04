@@ -3019,6 +3019,10 @@ nSocket * nBasicNetworkSystem::Init()
 
 bool nBasicNetworkSystem::Select( REAL dt )
 {
+    // in lockstep mode, waiting for wall clock time makes no sense; just poll
+    if ( tLockstepActive() )
+        dt = 0;
+
     int retval = 0;
     static char const * section = "NETSELECT";
     if ( !tRecorder::PlaybackStrict( section, retval ) )

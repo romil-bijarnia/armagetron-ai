@@ -26,6 +26,7 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 */
 
 #include "gAIBase.h"
+#include "gNeural.h"
 #include "gArena.h"
 #include "eGrid.h"
 #include "ePath.h"
@@ -2713,6 +2714,10 @@ void gAIPlayer::RightBeforeDeath(int triesLeft) // is called right before the ve
     if ( nCLIENT == sn_GetNetState() )
         return;
 
+    // cycles driven by the neural network get no emergency help
+    if ( gNeural::Controls( this ) )
+        return;
+
     if ( simpleAI_ )
         return;
 
@@ -3112,6 +3117,10 @@ void gAIPlayer::Timestep(REAL time){
         st_Breakpoint();
         return;
     }
+
+    // the neural network bridge does the thinking for these
+    if ( gNeural::Controls( this ) )
+        return;
 
     // don't think if the object is not up to date
     if ( Object() && Object()->LastTime() < time - EPS )

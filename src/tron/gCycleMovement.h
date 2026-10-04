@@ -80,6 +80,7 @@ public:
     static float            SpeedMultiplier         ()                                              ;   //!< returns the current speed multiplier
     static void             SetSpeedMultiplier      ( REAL                  mult        )           ;   //!< sets the current speed multiplier
     static float            MaximalSpeed            ()                                              ;   //!< returns the maximal speed a cycle can reach on its own
+    static float            BaseSpeed               ()                                              ;   //!< returns CYCLE_SPEED times the current speed multiplier
 
     // AI info
     int    	                WindingNumber           ()                                    const     ;   //!< returns the current winding number
@@ -95,7 +96,10 @@ public:
 
     //! returns a guess about which other object killed this cycle (provided it is dead)
     virtual eGameObject const * Killer() const;
+    //! returns the enemy the scoring blames for this cycle's death, NULL for a suicide
+    ePlayerNetID const *    Hunter                  ()                                    const     ;
 
+    size_t                  PendingTurnCount        (                                   ) const     { return pendingTurns.size(); } //!< returns the number of ordered turns not yet executed
     bool                    CanMakeTurn             (int direction                      ) const     ;   //!< returns whether a turn is currently possible
     bool                    CanMakeTurn             ( REAL time, int direction          ) const     ;   //!< returns whether a turn is possible at the given time
     inline  REAL            GetDistanceSinceLastTurn(                                   ) const     ;   //!< returns the distance since the last turn

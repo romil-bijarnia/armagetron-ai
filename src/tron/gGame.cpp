@@ -39,6 +39,7 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 #include "eCoord.h"
 #include "eTimer.h"
 #include "gAIBase.h"
+#include "gNeural.h"
 #include "gTutorial.h"
 #include "rSysdep.h"
 #include "rFont.h"
@@ -325,6 +326,10 @@ void sg_Timestamp()
 
 static REAL ded_idle=24;
 static tSettingItem<REAL> dedicaded_idle("DEDICATED_IDLE",ded_idle);
+
+// keep hosting rounds even if no human is connected (used for headless AI training)
+bool sg_playWithoutHumans=false;
+static tSettingItem<bool> sg_playWithoutHumansConf("PLAY_WITHOUT_HUMANS",sg_playWithoutHumans);
 
 static float sg_gameTimeInterval=-1;
 static tSettingItem<float> sggti("LADDERLOG_GAME_TIME_INTERVAL",
@@ -1024,7 +1029,7 @@ void update_settings( bool const * goon )
             }
         }
 
-        if ( sg_NumUsers() <= 0 && bool( sg_currentGame ) )
+        if ( sg_NumUsers() <= 0 && bool( sg_currentGame ) && !sg_playWithoutHumans )
         {
             sg_currentGame->NoLongerGoOn();
         }
@@ -1368,6 +1373,9 @@ void s_Timestep(eGrid *grid, REAL time,bool cam){
             if (ai && think)
                 ai->Timestep(time);
         }
+
+        // let the neural network make its decisions
+        gNeural::Timestep(time);
     }
 
     lastTimeTimestep=time;
@@ -1554,7 +1562,7 @@ void sg_HostGame(){
 #ifdef DEDICATED
     static double startTime=tSysTimeFloat();
 
-    if ( sg_NumUsers() == 0)
+    if ( sg_NumUsers() == 0 && !sg_playWithoutHumans )
     {
         cp();
         con << tOutput("$online_activity_napping") << "\n";
@@ -3199,6 +3207,7 @@ void gGame::StateUpdate(){
                 ePlayerNetID::Update();
 
             init_game_objects(grid);
+            gNeural::NewRound();
 
             eTeam::WriteOnlinePlayers();
 
@@ -3343,7 +3352,7 @@ void gGame::StateUpdate(){
                 // save current players into a file
                 cp();
 
-                if ( sg_NumUsers() <= 0 )
+                if ( sg_NumUsers() <= 0 && !sg_playWithoutHumans )
                     goon = 0;
 
                 Analysis(0);
@@ -3810,7 +3819,7 @@ void gGame::Analysis(REAL time){
 
 #ifdef DEDICATED
     //activeHumans
-    if (sg_NumUsers() <= 0)
+    if (sg_NumUsers() <= 0 && !sg_playWithoutHumans)
         goon = false;
 #endif
 
@@ -4893,7 +4902,12 @@ void sg_EnterGameCore( nNetState enter_state ){
 #ifdef DEDICATED // read input
         sr_Read_stdin();
 
-        if ( sn_BasicNetworkSystem.Select( 1.0 / ( sg_dedicatedFPSIdleFactor * sg_dedicatedFPS )  ) )
+        // lockstep: a simulated clock advances by a fixed amount per frame and we never sleep
+        REAL lockstepDT = gNeural::LockstepDT();
+        if ( lockstepDT > 0 && !tLockstepActive() )
+            tSetLockstep( lockstepDT );
+
+        if ( sn_BasicNetworkSystem.Select( lockstepDT > 0 ? 0 : 1.0 / ( sg_dedicatedFPSIdleFactor * sg_dedicatedFPS )  ) )
         {
             // new network data arrived, do the most urgent work now
             tAdvanceFrame();
