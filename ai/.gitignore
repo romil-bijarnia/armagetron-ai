@@ -5,3 +5,4 @@ runtime/
 runs/
 checkpoints/
 .venv.nosync/
+.venv
