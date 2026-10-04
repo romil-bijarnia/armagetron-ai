@@ -5,23 +5,33 @@ experience. Most streams are driven by the current learner; some are driven by f
 versions of it (so it can't forget how to beat old strategies) and some arenas also contain the
 game's built-in AI. Only learner decisions are trained on.
 
+Two processes share the work so neither the engines nor the GPU sit idle: an actor process runs
+the engines and picks moves with a copy of the network, a learner process runs PPO updates. They
+hand rollouts over through two shared-memory buffers and the actor reloads the learner's weights
+after every rollout (so its policy lags the learner by at most two updates; PPO's clipped
+importance ratio is computed against the policy that actually picked the moves).
+
 Reward: dying costs up to -1 (scaled by how many opponents were still alive, so finishing second
-in a free-for-all is better than dying first), surviving to win the round gives +1.
+in a free-for-all is better than dying first), surviving to win the round gives +1, killing an
+enemy gives a small bonus.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import multiprocessing as mp
+import queue
 import random
+import signal
 import time
 from collections import defaultdict, deque
 from dataclasses import asdict, dataclass
+from multiprocessing import shared_memory
 from pathlib import Path
 
 import numpy as np
 import torch
-import torch.nn.functional as F
 
 from . import protocol as P
 from .engine import ArenaConfig, EnginePool, Step
@@ -33,9 +43,9 @@ PROJECT = Path(__file__).resolve().parent.parent
 @dataclass
 class Config:
     run: str = "runs/main"
-    engines: int = 12
+    engines: int = 24
     rollout: int = 32768  # learner transitions per PPO update
-    epochs: int = 3
+    epochs: int = 2  # data is cheap with async collection; fresher data beats more reuse
     minibatch: int = 4096
     lr: float = 2.5e-4
     gamma: float = 0.995
@@ -74,23 +84,42 @@ def arena_mix(n: int) -> list[tuple[str, ArenaConfig]]:
     return [templates[i % len(templates)] for i in range(n)]
 
 
+MASK_TABLE = np.array([[(m >> a) & 1 for a in range(P.N_ACTIONS)] for m in range(1 << P.N_ACTIONS)], np.float32)
+
+FIELDS = (
+    ("maps", np.uint8, (2, P.GRID, P.GRID)),  # local and global map
+    ("feats", np.float32, (P.N_SCALARS + P.N_ACTIONS,)),  # scalars, then the action mask as 0/1
+    ("action", np.int64, ()),
+    ("logp", np.float32, ()),
+    ("value", np.float32, ()),
+    ("reward", np.float32, ()),
+    ("done", np.bool_, ()),
+    ("next", np.int64, ()),  # index of the same stream's next transition, -1 if not known yet
+)
+
+
 class Store:
-    """Flat transition storage with per-stream linkage (next index) for GAE.
+    """Transition arrays with per-stream linkage (next index) for GAE.
 
-    maps holds the local and global map of each observation, feats the scalars followed by the
-    action mask (as 0/1), so one observation moves to the GPU in two transfers."""
+    Private numpy memory by default; with ``shm`` the arrays live in a named shared-memory block
+    so the actor can hand a finished rollout to the learner without pickling."""
 
-    def __init__(self, cap: int):
-        g = P.GRID
+    def __init__(self, cap: int, shm_name: str | None = None, create: bool = False):
         self.cap = cap
-        self.maps = np.empty((cap, 2, g, g), np.uint8)
-        self.feats = np.empty((cap, P.N_SCALARS + P.N_ACTIONS), np.float32)
-        self.action = np.empty(cap, np.int64)
-        self.logp = np.empty(cap, np.float32)
-        self.value = np.empty(cap, np.float32)
-        self.reward = np.zeros(cap, np.float32)
-        self.done = np.zeros(cap, bool)
-        self.next = np.full(cap, -1, np.int64)
+        self.shm = None
+        if shm_name is not None or create:
+            total = sum(-(-cap * int(np.prod(s, dtype=np.int64)) * np.dtype(t).itemsize // 64) * 64
+                        for _, t, s in FIELDS)
+            self.shm = shared_memory.SharedMemory(name=shm_name, create=create, size=total)
+        off = 0
+        for name, dtype, shape in FIELDS:
+            if self.shm is None:
+                arr = np.zeros((cap, *shape), dtype)
+            else:
+                nbytes = cap * int(np.prod(shape, dtype=np.int64)) * np.dtype(dtype).itemsize
+                arr = np.ndarray((cap, *shape), dtype, buffer=self.shm.buf, offset=off)
+                off += -(-nbytes // 64) * 64
+            setattr(self, name, arr)
         self.n = 0
         self.resolved = 0
 
@@ -108,83 +137,119 @@ class Store:
         self.n += 1
         return i
 
+    def copy_to(self, other: Store) -> None:
+        n = self.n
+        for name, _, _ in FIELDS:
+            getattr(other, name)[:n] = getattr(self, name)[:n]
+        other.n = n
+
     def compact(self, keep: list[int]) -> dict[int, int]:
         """Move the still-open transitions to the front; return old->new index map."""
         remap = {}
         for new, old in enumerate(keep):
             remap[old] = new
-            for arr in (self.maps, self.feats, self.action, self.logp, self.value, self.reward, self.done):
+            for name, _, _ in FIELDS:
+                arr = getattr(self, name)
                 arr[new] = arr[old]
             self.next[new] = -1
         self.n = len(keep)
         self.resolved = 0
         return remap
 
+    def close(self, unlink: bool = False) -> None:
+        if self.shm is not None:
+            for name, _, _ in FIELDS:
+                setattr(self, name, None)
+            self.shm.close()
+            if unlink:
+                self.shm.unlink()
 
-MASK_TABLE = np.array([[(m >> a) & 1 for a in range(P.N_ACTIONS)] for m in range(1 << P.N_ACTIONS)], np.float32)
+
+def gae(store: Store, n: int, gamma: float, lam: float):
+    """Advantages for the resolved transitions among the first n. Successors always have larger
+    indices than their predecessors, so a single reverse sweep works."""
+    done, nxt, rew, val = store.done[:n], store.next[:n], store.reward[:n], store.value[:n]
+    adv = np.zeros(n, np.float32)
+    for i in range(n - 1, -1, -1):
+        if done[i]:
+            adv[i] = rew[i] - val[i]
+        elif nxt[i] >= 0:
+            j = nxt[i]
+            adv[i] = rew[i] + gamma * val[j] - val[i] + gamma * lam * adv[j]
+    train = np.flatnonzero(done | (nxt >= 0))
+    return train, adv[train], adv[train] + val[train]
 
 
-class Trainer:
-    engine_command = None  # tests swap in a fake engine
+# ====================================================================== actor
+class Actor:
+    """Runs the engines, picks moves, keeps the reward bookkeeping."""
 
-    def __init__(self, cfg: Config):
+    def __init__(self, cfg: Config, run_dir: Path, engine_command=None):
         self.cfg = cfg
-        self.run_dir = (PROJECT / cfg.run).resolve()
-        self.run_dir.mkdir(parents=True, exist_ok=True)
-        (self.run_dir / "pool").mkdir(exist_ok=True)
-        random.seed(cfg.seed)
-        np.random.seed(cfg.seed)
-        torch.manual_seed(cfg.seed)
+        self.run_dir = run_dir
+        self.engine_command = engine_command
         self.device = torch.device(cfg.device)
-        self.net = PolicyNet().to(self.device)
-        self.opt = torch.optim.Adam(self.net.parameters(), lr=cfg.lr, eps=1e-5)
-        self.update = 0
-        self.total_steps = 0
-        if cfg.resume and (self.run_dir / "latest.pt").exists():
-            ck = torch.load(self.run_dir / "latest.pt", map_location=self.device, weights_only=True)
-            self.net.load_state_dict(ck["model"])
-            self.opt.load_state_dict(ck["opt"])
-            self.update = ck["update"]
-            self.total_steps = ck["total_steps"]
-            print(f"resumed {self.run_dir.name} at update {self.update} ({self.total_steps:,} steps)")
+        random.seed(cfg.seed + 1)
+        torch.manual_seed(cfg.seed + 1)
+        self.net = PolicyNet().to(self.device).eval()
+        self.weights_mtime = 0.0
+        self.weights_update = 0
+        self.reload_weights()
         self.past_nets: list[PolicyNet] = []
-        self._load_past()
-
+        self.pool_listing: tuple = ()
+        self.reload_pool()
         self.mix = arena_mix(cfg.engines)
         self.store = Store(cfg.rollout + 8192)
         self.open: dict[tuple[int, int], int] = {}  # stream -> index of its unresolved transition
         self.controller: dict[tuple[int, int], int] = {}  # stream -> -1 learner, k past net
         self.round_of: dict[int, int] = {}
         self.ep_len: dict[tuple[int, int], int] = defaultdict(int)
-        self.results: dict[str, deque] = defaultdict(lambda: deque(maxlen=400))
-        self.lengths: deque = deque(maxlen=400)
-        self.log = open(self.run_dir / "metrics.jsonl", "a")
+        self.results: dict[str, list] = defaultdict(list)
+        self.lengths: list = []
 
-    # ------------------------------------------------------------------ opponents
-    def _load_past(self) -> None:
+    # ---------------------------------------------------------------- weights
+    def reload_weights(self) -> None:
+        f = self.run_dir / "actor.pt"
+        if not f.exists():
+            return
+        m = f.stat().st_mtime
+        if m == self.weights_mtime:
+            return
+        try:
+            ck = torch.load(f, map_location=self.device, weights_only=True)
+        except Exception:
+            return  # being replaced right now; next time
+        self.net.load_state_dict(ck["model"])
+        self.weights_mtime = m
+        self.weights_update = ck.get("update", 0)
+
+    def reload_pool(self) -> None:
         files = sorted((self.run_dir / "pool").glob("*.pt"))
+        listing = tuple(f.name for f in files)
+        if listing == self.pool_listing:
+            return
+        self.pool_listing = listing
         if not files:
             self.past_nets = []
             return
-        # Recent snapshots are more relevant, but keep some old ones in the mix.
+        # recent snapshots matter most, but keep some old ones in the mix
         picks = set(files[-2:])
         picks.update(random.sample(files, min(2, len(files))))
         nets = []
         for f in sorted(picks):
-            n = PolicyNet().to(self.device)
+            n = PolicyNet().to(self.device).eval()
             n.load_state_dict(torch.load(f, map_location=self.device, weights_only=True)["model"])
-            n.eval()
             nets.append(n)
         self.past_nets = nets
 
+    # ---------------------------------------------------------------- bookkeeping
     def _assign_controllers(self, engine: int, n_slots: int) -> None:
-        name, arena = self.mix[engine]
+        _, arena = self.mix[engine]
         for k in range(n_slots):
             use_past = (k > 0 and arena.builtin_ais == 0 and self.past_nets
                         and random.random() < self.cfg.past_prob)
             self.controller[(engine, k)] = random.randrange(len(self.past_nets)) if use_past else -1
 
-    # ------------------------------------------------------------------ reward bookkeeping
     def _resolve(self, key, reward: float, done: bool) -> None:
         i = self.open.get(key)
         if i is None:
@@ -199,9 +264,10 @@ class Trainer:
         """Apply rewards from a STEP; return (stream, store_index or -1) rows needing actions."""
         e = step.engine
         if self.round_of.get(e) != step.round_id:
-            # New round: anything still open from the old round ends without further reward.
+            # new round: anything still open from the old round ends without further reward
             for k in range(len(step.slots)):
                 self._resolve((e, k), 0.0, True)
+                self.ep_len.pop((e, k), None)
             self.round_of[e] = step.round_id
             self._assign_controllers(e, len(step.slots))
         name = self.mix[e][0]
@@ -212,8 +278,7 @@ class Trainer:
             r = self.cfg.kill_bonus * s.kills
             terminal = False
             if s.flags & P.FLAG_DIED:
-                others = max(step.n_total - 1, 1)
-                r -= step.n_alive / others  # n_alive excludes us now that we're dead
+                r -= step.n_alive / max(step.n_total - 1, 1)  # n_alive no longer counts us
                 terminal = True
                 if learner:
                     self.results[name].append(0.0 if step.n_alive else 0.5)
@@ -241,9 +306,8 @@ class Trainer:
                     rows.append((key, -1))
         return rows
 
-    # ------------------------------------------------------------------ acting
     @torch.no_grad()
-    def _act(self, pool: EnginePool, steps: list[Step]) -> None:
+    def act(self, pool: EnginePool, steps: list[Step]) -> int:
         per_engine_actions = {st.engine: [0] * len(st.slots) for st in steps}
         learner_rows, past_rows = [], defaultdict(list)
         for st in steps:
@@ -271,27 +335,102 @@ class Trainer:
                 per_engine_actions[key[0]][key[1]] = int(act)
         for e, acts in per_engine_actions.items():
             pool.act(e, acts)
+        return len(learner_rows)
 
-    # ------------------------------------------------------------------ learning
-    def _gae(self, n: int) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-        s, g, lam = self.store, self.cfg.gamma, self.cfg.lam
-        train = np.array([i for i in range(n) if s.done[i] or s.next[i] >= 0], np.int64)
-        adv = np.zeros(n, np.float32)
-        # Every resolved transition's successor has a larger index, so a reverse sweep works.
-        for i in reversed(range(n)):
-            if s.done[i]:
-                adv[i] = s.reward[i] - s.value[i]
-            elif s.next[i] >= 0:
-                j = s.next[i]
-                delta = s.reward[i] + g * s.value[j] - s.value[i]
-                adv[i] = delta + g * lam * adv[j]
-        ret = adv + s.value[:n]
-        return train, adv[train], ret[train]
+    def hand_over(self, block: Store) -> dict:
+        """Copy the rollout into a shared block, keep the open transitions, return stats."""
+        self.store.copy_to(block)
+        keep = sorted(self.open.values())
+        remap = self.store.compact(keep)
+        self.open = {k: remap[i] for k, i in self.open.items()}
+        stats = {"results": dict(self.results), "lengths": self.lengths, "policy_update": self.weights_update}
+        self.results = defaultdict(list)
+        self.lengths = []
+        return stats
 
-    def _learn(self) -> dict:
-        s, cfg, d = self.store, self.cfg, self.device
-        n = s.n
-        train, adv, ret = self._gae(n)
+    def run(self, blocks: list[Store], full_q, free_q, stop) -> None:
+        arenas = [a for _, a in self.mix]
+        workdir = PROJECT / "runtime" / self.run_dir.name
+        with EnginePool(arenas, workdir=workdir, command=self.engine_command) as pool:
+            while not stop.is_set():
+                t0 = time.time()
+                steps_taken = 0
+                while self.store.resolved < self.cfg.rollout and not stop.is_set():
+                    steps_taken += self.act(pool, pool.poll(max_wait=0.003))
+                if stop.is_set():
+                    break
+                while True:  # wait for a free buffer; engines simply pause meanwhile
+                    try:
+                        b = free_q.get(timeout=1.0)
+                        break
+                    except queue.Empty:
+                        if stop.is_set():
+                            return
+                stats = self.hand_over(blocks[b])
+                stats.update(steps=steps_taken, collect_s=time.time() - t0)
+                full_q.put((b, blocks[b].n, stats))
+                self.reload_weights()
+                self.reload_pool()
+
+
+def actor_main(cfg_dict: dict, run_dir: str, shm_names: list[str], cap: int, full_q, free_q, stop,
+               engine_command=None) -> None:
+    signal.signal(signal.SIGINT, signal.SIG_IGN)  # the learner coordinates shutdown
+    cfg = Config(**cfg_dict)
+    blocks = [Store(cap, shm_name=n) for n in shm_names]
+    try:
+        Actor(cfg, Path(run_dir), engine_command).run(blocks, full_q, free_q, stop)
+    finally:
+        for b in blocks:
+            b.close()
+
+
+# ====================================================================== learner
+class Learner:
+    def __init__(self, cfg: Config):
+        self.cfg = cfg
+        self.run_dir = (PROJECT / cfg.run).resolve()
+        self.run_dir.mkdir(parents=True, exist_ok=True)
+        (self.run_dir / "pool").mkdir(exist_ok=True)
+        random.seed(cfg.seed)
+        np.random.seed(cfg.seed)
+        torch.manual_seed(cfg.seed)
+        self.device = torch.device(cfg.device)
+        self.net = PolicyNet().to(self.device)
+        self.opt = torch.optim.Adam(self.net.parameters(), lr=cfg.lr, eps=1e-5)
+        self.update = 0
+        self.total_steps = 0
+        if cfg.resume and (self.run_dir / "latest.pt").exists():
+            ck = torch.load(self.run_dir / "latest.pt", map_location=self.device, weights_only=True)
+            self.net.load_state_dict(ck["model"])
+            self.opt.load_state_dict(ck["opt"])
+            self.update = ck["update"]
+            self.total_steps = ck["total_steps"]
+            print(f"resumed {self.run_dir.name} at update {self.update} ({self.total_steps:,} steps)")
+        self.results: dict[str, deque] = defaultdict(lambda: deque(maxlen=400))
+        self.lengths: deque = deque(maxlen=400)
+        self.log = open(self.run_dir / "metrics.jsonl", "a")
+        self.publish()
+
+    def publish(self) -> None:
+        """Weights for the actor (written atomically; the actor polls the file)."""
+        tmp = self.run_dir / "actor.pt.tmp"
+        torch.save({"model": self.net.state_dict(), "update": self.update}, tmp)
+        tmp.replace(self.run_dir / "actor.pt")
+
+    def save(self) -> None:
+        ck = {"model": self.net.state_dict(), "opt": self.opt.state_dict(), "update": self.update,
+              "total_steps": self.total_steps, "config": asdict(self.cfg)}
+        tmp = self.run_dir / "latest.pt.tmp"
+        torch.save(ck, tmp)
+        tmp.replace(self.run_dir / "latest.pt")
+        if self.update % self.cfg.snapshot_every == 0:
+            torch.save({"model": self.net.state_dict(), "update": self.update},
+                       self.run_dir / "pool" / f"u{self.update:06d}.pt")
+
+    def learn(self, s: Store, n: int) -> dict:
+        cfg, d = self.cfg, self.device
+        train, adv, ret = gae(s, n, cfg.gamma, cfg.lam)
         explained = float(1 - np.var(ret - s.value[train]) / (np.var(ret) + 1e-8)) if len(train) else 0.0
         T = lambda a: torch.from_numpy(np.ascontiguousarray(a)).to(d)  # noqa: E731
         maps, feats, act = T(s.maps[train]), T(s.feats[train]), T(s.action[train])
@@ -331,69 +470,85 @@ class Trainer:
             # one GPU sync per epoch: stop early if the policy moved too far
             if (epoch_kl / max(batches, 1)).item() > cfg.target_kl:
                 break
-        vals = (sums / max(count, 1)).tolist()
-        # Keep unresolved transitions for the next rollout.
-        keep = sorted(self.open.values())
-        remap = s.compact(keep)
-        self.open = {k: remap[i] for k, i in self.open.items()}
-        out = dict(zip(("pg", "vf", "ent", "kl", "clipfrac"), vals))
+        out = dict(zip(("pg", "vf", "ent", "kl", "clipfrac"), (sums / max(count, 1)).tolist()))
         out["samples"] = m
         out["value_explained"] = explained
         return out
 
-    def save(self) -> None:
-        ck = {"model": self.net.state_dict(), "opt": self.opt.state_dict(), "update": self.update,
-              "total_steps": self.total_steps, "config": asdict(self.cfg)}
-        tmp = self.run_dir / "latest.pt.tmp"
-        torch.save(ck, tmp)
-        tmp.replace(self.run_dir / "latest.pt")
-        if self.update % self.cfg.snapshot_every == 0:
-            torch.save({"model": self.net.state_dict(), "update": self.update},
-                       self.run_dir / "pool" / f"u{self.update:06d}.pt")
-            self._load_past()
-
-    # ------------------------------------------------------------------ main loop
-    def run(self) -> None:
-        arenas = [a for _, a in self.mix]
-        workdir = PROJECT / "runtime" / self.run_dir.name
-        with EnginePool(arenas, workdir=workdir, command=self.engine_command) as pool:
-            print(f"{len(arenas)} engines up; training on {self.device}")
-            t_last, steps_last = time.time(), self.total_steps
-            while self.update < self.cfg.updates:
-                t0 = time.time()
-                while self.store.resolved < self.cfg.rollout:
-                    steps = pool.poll(max_wait=0.003)
-                    before = self.store.n
-                    self._act(pool, steps)
-                    self.total_steps += self.store.n - before
+    def run(self, engine_command=None) -> None:
+        cfg = self.cfg
+        cap = cfg.rollout + 8192
+        blocks = [Store(cap, create=True) for _ in range(2)]
+        ctx = mp.get_context("spawn")
+        full_q, free_q, stop = ctx.Queue(), ctx.Queue(), ctx.Event()
+        for b in range(len(blocks)):
+            free_q.put(b)
+        actor = ctx.Process(target=actor_main, daemon=True,
+                            args=(asdict(cfg), str(self.run_dir), [b.shm.name for b in blocks], cap,
+                                  full_q, free_q, stop, engine_command))
+        actor.start()
+        print(f"actor started with {cfg.engines} engines; learning on {self.device}", flush=True)
+        t_last, steps_last = time.time(), self.total_steps
+        try:
+            while self.update < cfg.updates:
+                try:
+                    b, n, stats = full_q.get(timeout=5.0)
+                except queue.Empty:
+                    if not actor.is_alive():
+                        raise RuntimeError("actor process died") from None
+                    continue
                 t1 = time.time()
-                stats = self._learn()
+                out = self.learn(blocks[b], n)
+                free_q.put(b)
                 self.update += 1
+                self.total_steps += stats["steps"]
+                self.publish()
+                for k, v in stats["results"].items():
+                    self.results[k].extend(v)
+                self.lengths.extend(stats["lengths"])
                 t2 = time.time()
                 sps = (self.total_steps - steps_last) / max(t2 - t_last, 1e-6)
                 t_last, steps_last = t2, self.total_steps
                 rec = {"update": self.update, "steps": self.total_steps, "sps": round(sps),
-                       "collect_s": round(t1 - t0, 2), "learn_s": round(t2 - t1, 2),
+                       "collect_s": round(stats["collect_s"], 2), "learn_s": round(t2 - t1, 2),
+                       "policy_lag": self.update - 1 - stats["policy_update"],
                        "ep_len": float(np.mean(self.lengths)) if self.lengths else 0.0,
-                       **{k: round(v, 5) for k, v in stats.items()},
+                       **{k: round(v, 5) for k, v in out.items()},
                        **{f"win_{k}": round(float(np.mean(v)), 3) for k, v in self.results.items() if v},
                        "time": time.time()}
                 self.log.write(json.dumps(rec) + "\n")
                 self.log.flush()
                 wins = " ".join(f"{k}={np.mean(v):.2f}" for k, v in sorted(self.results.items()) if v)
                 print(f"u{self.update} {self.total_steps:,} steps {sps:,.0f}/s len={rec['ep_len']:.0f} "
-                      f"ent={stats.get('ent', 0):.3f} kl={stats.get('kl', 0):.4f} | {wins}", flush=True)
-                if self.update % self.cfg.save_every == 0:
+                      f"ent={out.get('ent', 0):.3f} kl={out.get('kl', 0):.4f} | {wins}", flush=True)
+                if self.update % cfg.save_every == 0:
                     self.save()
+        finally:
+            stop.set()
+            actor.join(timeout=30)
+            if actor.is_alive():
+                actor.terminate()
+            for blk in blocks:
+                blk.close(unlink=True)
+            self.save()
 
 
 def main() -> None:
-    ap = argparse.ArgumentParser(description=__doc__)
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     for f, v in asdict(Config()).items():
         ap.add_argument(f"--{f.replace('_', '-')}", type=type(v) if not isinstance(v, bool) else
                         (lambda x: x.lower() in ("1", "true", "yes")), default=v)
     cfg = Config(**vars(ap.parse_args()))
-    Trainer(cfg).run()
+    learner = Learner(cfg)
+
+    def on_term(*_):
+        raise KeyboardInterrupt
+
+    signal.signal(signal.SIGTERM, on_term)
+    try:
+        learner.run()
+    except KeyboardInterrupt:
+        print("stopping", flush=True)
 
 
 if __name__ == "__main__":

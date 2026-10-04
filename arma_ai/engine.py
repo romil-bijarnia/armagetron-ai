@@ -184,7 +184,8 @@ class EnginePool:
         (root / "userconfig" / "autoexec.cfg").write_text("".join(f"{k} {v}\n" for k, v in s.items()))
         return root
 
-    def _engine_command(self, i: int, root: Path) -> list[str]:
+    @staticmethod
+    def _engine_command(i: int, root: Path, sock_path: str, arena: ArenaConfig) -> list[str]:
         return [str(ENGINE_BIN), "--daemon",
                 "--datadir", str(ENGINE_DATA), "--configdir", str(ENGINE_CONFIG),
                 "--userconfigdir", str(root / "userconfig"), "--vardir", str(root / "var"),
@@ -194,7 +195,7 @@ class EnginePool:
         root = self._write_config(i)
         out = open(root / "engine.log", "ab") if self.log_engines else subprocess.DEVNULL
         self.procs[i] = subprocess.Popen(
-            self.command(i, root), cwd=root, stdin=subprocess.DEVNULL, stdout=out, stderr=subprocess.STDOUT,
+            self.command(i, root, self.sock_path, self.arenas[i]), cwd=root, stdin=subprocess.DEVNULL, stdout=out, stderr=subprocess.STDOUT,
         )
 
     def _accept_all(self, timeout: float = 60.0) -> None:
