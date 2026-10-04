@@ -87,6 +87,8 @@ REAL sg_lockstepDT = 0;
 tSettingItem<REAL> sg_lockstepDTConf( "LOCKSTEP_DT", sg_lockstepDT );
 int sg_debug = 0;
 tSettingItem<int> sg_debugConf( "NEURAL_DEBUG", sg_debug );
+bool sg_controlAfterRound = false;
+tSettingItem<bool> sg_controlAfterRoundConf( "NEURAL_CONTROL_AFTER_ROUND", sg_controlAfterRound );
 
 // ------------------------------------------------------------------ socket
 int sg_fd = -1;
@@ -616,7 +618,7 @@ void gNeural::Timestep( REAL time )
 {
     if ( !Active() || sn_GetNetState() == nCLIENT )
         return;
-    if ( time < 0 || sg_roundOver || time + 1E-5 < sg_nextDecision )
+    if ( time < 0 || ( sg_roundOver && !sg_controlAfterRound ) || time + 1E-5 < sg_nextDecision )
         return;
     sg_nextDecision = ( floor( time / sg_interval + 1E-3 ) + 1 ) * sg_interval;
 
@@ -654,7 +656,7 @@ void gNeural::Timestep( REAL time )
         sg_roundStarted = true;
         sg_roundTotal = nAlive;
     }
-    bool over = sg_roundTotal > 1 ? teamsAlive.size() <= 1 : nAlive == 0;
+    bool over = sg_roundOver || ( sg_roundTotal > 1 ? teamsAlive.size() <= 1 : nAlive == 0 );
 
     if ( sg_debug > 0 && ( sg_tick < 3 || over || sg_debug > 1 ) )
     {
@@ -689,7 +691,8 @@ void gNeural::Timestep( REAL time )
     {
         int aliveEnemies = 0, aliveMates = 0;
         World world;
-        bool needWorld = !over && slotAlive;
+        bool steer = !over || sg_controlAfterRound; // keep driving until the next round if asked to
+        bool needWorld = steer && slotAlive;
         if ( needWorld )
             BuildWorld( world, time );
 
@@ -716,7 +719,7 @@ void gNeural::Timestep( REAL time )
                 flags |= FLAG_DIED;
             if ( over && alive )
                 flags |= FLAG_WON;
-            asked[k] = alive && !over;
+            asked[k] = alive && steer;
             if ( asked[k] )
                 flags |= FLAG_NEEDS_ACTION;
             msg.U8( flags );
