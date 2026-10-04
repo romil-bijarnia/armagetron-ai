@@ -25,6 +25,7 @@ from rich.text import Text
 
 PROJECT = Path(__file__).resolve().parent.parent
 DECISIONS_PER_SECOND = 20  # the engine asks for a move every 0.05 s of game time
+TRAINCTL = str(PROJECT / "trainctl").replace(str(Path.home()), "~", 1)
 
 # braille cells are 2 dots wide and 4 high; bit for (row, column) inside a cell
 _DOT = ((0x01, 0x08), (0x02, 0x10), (0x04, 0x20), (0x40, 0x80))
@@ -258,7 +259,8 @@ def build(run_dir: Path, recs: list[dict]) -> Layout:
         Layout(Panel(head, border_style="green" if running else "red", padding=(0, 1)), size=4),
         Layout(charts, name="charts"),
         Layout(Panel(guide, title="Latest", title_align="left", border_style="grey35", padding=(0, 1)), size=8),
-        Layout(Text(" Ctrl-C closes this view; training keeps running", style="dim"), size=1),
+        Layout(Text(f" Ctrl-C closes this view; training keeps running.\n To stop training: {TRAINCTL} stop",
+                    style="dim", no_wrap=True, overflow="ellipsis"), size=2),
     )
     return layout
 
