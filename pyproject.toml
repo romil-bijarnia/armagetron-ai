@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=75", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "armagetron-ai"
+version = "0.1.0"
+description = "Self-play deep reinforcement learning agent for Armagetron Advanced"
+requires-python = ">=3.11"
+dependencies = [
+  "numpy>=2.0,<3",
+  "torch>=2.5,<3",
+]
+
+[project.scripts]
+arma-train = "arma_ai.train:main"
+arma-eval = "arma_ai.evaluate:main"
+arma-play = "arma_ai.play:main"
+
+[dependency-groups]
+dev = ["pytest>=8,<10"]
+
+[tool.setuptools.packages.find]
+include = ["arma_ai*"]
