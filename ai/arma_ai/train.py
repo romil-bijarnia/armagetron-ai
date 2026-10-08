@@ -204,7 +204,9 @@ class Actor:
         self.mix = arena_mix(cfg.engines)
         self.store = Store(cfg.rollout + 8192)
         self.open: dict[tuple[int, int], int] = {}  # stream -> index of its unresolved transition
-        self.controller: dict[tuple[int, int], int] = {}  # stream -> -1 learner, k past net
+        # stream -> None for the learner, else the frozen past net it plays with; holding the net
+        # itself keeps the opponent fixed for the round even when the pool is reloaded meanwhile
+        self.controller: dict[tuple[int, int], PolicyNet | None] = {}
         self.round_of: dict[int, int] = {}
         self.ep_len: dict[tuple[int, int], int] = defaultdict(int)
         self.results: dict[str, list] = defaultdict(list)
@@ -251,7 +253,7 @@ class Actor:
         for k in range(n_slots):
             use_past = (k > 0 and arena.builtin_ais == 0 and self.past_nets
                         and random.random() < self.cfg.past_prob)
-            self.controller[(engine, k)] = random.randrange(len(self.past_nets)) if use_past else -1
+            self.controller[(engine, k)] = random.choice(self.past_nets) if use_past else None
 
     def _resolve(self, key, reward: float, done: bool) -> None:
         i = self.open.get(key)
@@ -277,7 +279,7 @@ class Actor:
         rows = []
         for k, s in enumerate(step.slots):
             key = (e, k)
-            learner = self.controller.get(key, -1) == -1
+            learner = self.controller.get(key) is None
             r = self.cfg.kill_bonus * s.kills
             terminal = False
             if s.flags & P.FLAG_DIED:
@@ -330,10 +332,10 @@ class Actor:
             self.store.value[ids] = out[:, 2]
             for (key, _), act in zip(learner_rows, self.store.action[ids]):
                 per_engine_actions[key[0]][key[1]] = int(act)
-        for k, rows in past_rows.items():
+        for net, rows in past_rows.items():
             maps = np.stack([np.stack([s.local, s.globl]) for _, s in rows])
             feats = np.stack([np.concatenate([s.scalars, MASK_TABLE[s.mask]]) for _, s in rows])
-            a, _, _ = self.past_nets[k].act(torch.from_numpy(maps).to(d), torch.from_numpy(feats).to(d))
+            a, _, _ = net.act(torch.from_numpy(maps).to(d), torch.from_numpy(feats).to(d))
             for (key, _), act in zip(rows, a.cpu().numpy()):
                 per_engine_actions[key[0]][key[1]] = int(act)
         for e, acts in per_engine_actions.items():
