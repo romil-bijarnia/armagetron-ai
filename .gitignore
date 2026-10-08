@@ -123,3 +123,4 @@ wget-log*
 /build/
 /build-dedicated/
 /build-macos/
+/build-asan/
