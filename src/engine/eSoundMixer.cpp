@@ -514,6 +514,15 @@ void eSoundMixer::Update() {
         m_Channels[i].Update();
     }
 
+    // MUSIC_ACTIVE 0 switches the music off, and stops it if it was switched off while playing
+    // (whatever started it: title, menu, game track or the next-song key)
+    if ( !musicActive )
+    {
+        if ( Mix_PlayingMusic() )
+            Mix_HaltMusic();
+        return;
+    }
+
     // We only act on music if the mode has changed, indicated by m_isDirty
     if (m_isDirty) {
         // Also, we only update if the music has stopped for some reason.
