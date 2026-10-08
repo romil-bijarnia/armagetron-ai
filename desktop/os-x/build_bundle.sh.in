@@ -42,21 +42,40 @@ cp "@abs_srcdir@/armagetronad.icns" "${BUNDLE}@datadir@/${TITLE}.icns" || exit $
 #mv "${BUNDLE}"@prefix@ "${BUNDLE}"/Contents 
 #mv "${BUNDLE}"/Contents/bin "${BUNDLE}"/Contents/MacOS
 
-# additional libraries
+# additional libraries, from Homebrew for the chip of this Mac
+# (/opt/homebrew on Apple Silicon, /usr/local on Intel)
+BREW=$(brew --prefix 2>/dev/null)
+test -z "${BREW}" && BREW=/usr/local
+# (SDL2 itself needs no help, dylibbundler finds it through the executable)
 EXTRALIB=
 if test -z "@progtitle_server@"; then
-    for adlib in /usr/local/opt/sdl2/lib/libSDL2-*.dylib; do
-        if test -r ${adlib}; then
-            mkdir -p "${BUNDLE}/@libdir@/"
-            cp ${adlib} "${BUNDLE}/@libdir@/"
-           EXTRALIB="${EXTRALIB} -x ./@libdir@/`basename ${adlib}`"
-        fi
-    done
+    # Homebrew's SDL2 is sdl2-compat, which loads SDL3 at runtime instead of linking it,
+    # so dylibbundler can't see it. Put SDL3 next to the shim, the first place it looks.
+    sdl3="${BREW}/opt/sdl3/lib/libSDL3.dylib"
+    if test -r "${sdl3}"; then
+        mkdir -p "${BUNDLE}/@libdir@/"
+        cp -L "${sdl3}" "${BUNDLE}/@libdir@/libSDL3.dylib" || exit $?
+        chmod u+w "${BUNDLE}/@libdir@/libSDL3.dylib"
+        install_name_tool -id @loader_path/libSDL3.dylib "${BUNDLE}/@libdir@/libSDL3.dylib" 2> /dev/null || exit $?
+        EXTRALIB="${EXTRALIB} -x ./@libdir@/libSDL3.dylib"
+    fi
 fi
 
 # bundle libraries
 #(cd "${BUNDLE}"; dylibbundler -od -b -x "./Contents/MacOS/@progname@" -d "./Contents/Frameworks/" -i /usr/lib/ -p '@executable_path/../Frameworks/') || exit $?
 (cd "${BUNDLE}"; dylibbundler -cd -of -b -x "./@bindir@/@progname@" ${EXTRALIB} -d "./@libdir@/" -i /usr/lib/ -p @executable_path/../..@libdir@/) || exit $?
+
+# Apple Silicon refuses to run code whose signature broke when dylibbundler rewrote
+# its library paths, so without a developer ID everything gets a fresh ad-hoc signature
+if test -z "${APPLE_ID}"; then
+	for f in "${BUNDLE}"@libdir@/*.dylib "${BUNDLE}"@bindir@/*; do
+		if test -f "$f"; then
+			codesign --force --sign - "$f" || exit $?
+		fi
+	done
+	codesign --force --sign - "${BUNDLE}" || exit $?
+	codesign --verify --deep --strict "${BUNDLE}" || exit $?
+fi
 
 # Sign executable
 # original source: https://localazy.com/blog/how-to-automatically-sign-macos-apps-using-github-actions
@@ -185,6 +204,7 @@ DMG="${DIR}/@progname@-@version@.dmg"
 rm -f "${DMG}"
 ICON="@abs_top_srcdir@/desktop/os-x/armagetronad.icns"
 BG="@abs_top_srcdir@/desktop/os-x/background.png"
+if which create-dmg > /dev/null; then
 create-dmg \
 	--volicon "$ICON" \
 	--app-drop-link 470 180 --window-pos 200 112 --window-size 650 330 \
@@ -193,8 +213,9 @@ create-dmg \
 	--hide-extension "${TITLE}.app" \
 	--background ${BG} \
 	"${DMG}" "${DMG_SRC}" || exit $?
-
-# alternative, native way, less powerful
-# hdiutil create -volname "@progtitle@" -srcfolder "${BUNDLE}" -ov -format UDIF "${DMG}"
+else
+# native way, less powerful (no background or layout), needs nothing extra installed
+hdiutil create -volname "@progtitle@" -srcfolder "${BUNDLE}" -ov -format UDZO "${DMG}" || exit $?
+fi
 
 # rm -rf "${DMG_SRC}"

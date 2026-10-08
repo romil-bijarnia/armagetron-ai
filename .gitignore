@@ -122,3 +122,4 @@ wget-log*
 # local build trees
 /build/
 /build-dedicated/
+/build-macos/
