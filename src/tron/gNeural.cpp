@@ -646,10 +646,12 @@ void gNeural::Timestep( REAL time )
         std::map< ePlayerNetID const *, bool >::iterator it = sg_wasAlive.find( p );
         if ( it != sg_wasAlive.end() && it->second && !alive )
         {
+            // a teamkill earns nothing, as in gCycle::KillAt
             ePlayerNetID const * hunter = c->Hunter();
-            for ( size_t k = 0; k < sg_slots.size(); ++k )
-                if ( hunter && hunter != p && sg_slots[k].player == hunter )
-                    ++kills[k];
+            if ( hunter && hunter != p && hunter->CurrentTeam() != p->CurrentTeam() )
+                for ( size_t k = 0; k < sg_slots.size(); ++k )
+                    if ( sg_slots[k].player == hunter )
+                        ++kills[k];
         }
         sg_wasAlive[ p ] = alive;
     }

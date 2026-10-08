@@ -1480,12 +1480,18 @@ static void sg_CycleDestinationSyncHandler( Game::CycleDestinationSync const & s
             if ( c->Player() && !dest->Chatting() )
                 c->Player()->Activity();
             
-            // fill default gametime
-            if ( dest->GetGameTime() < -100 )
-                dest->SetGameTime( se_GameTime()+c->Lag()*3 );
-            
-            c->AddDestination(dest);
-            dest = 0;
+            // a dead cycle takes no more destinations: their game times are stale, and fed to
+            // the lag detection they inflate the sender's lag compensation (giant lag-o-meters
+            // for brakes pressed after death), and the list would grow until the round ends
+            if ( c->Alive() )
+            {
+                // fill default gametime
+                if ( dest->GetGameTime() < -100 )
+                    dest->SetGameTime( se_GameTime()+c->Lag()*3 );
+
+                c->AddDestination(dest);
+                dest = 0;
+            }
         }
     }
 
@@ -3749,6 +3755,10 @@ bool gCycle::Act(uActionPlayer *Act, REAL x){
         return true;
     }
     else if(s_brake==*Act){
+        // like turns, brakes do nothing for a dead cycle; they would only send it stale destinations
+        if ( !Alive() )
+            return true;
+
         //SendControl(lastTime,&brake,x);
         unsigned short newBraking=(x>0);
         if ( braking != newBraking )
@@ -3760,7 +3770,7 @@ bool gCycle::Act(uActionPlayer *Act, REAL x){
         return true;
     }
     else if(s_brakeToggle==*Act){
-        if ( x > 0 )
+        if ( x > 0 && Alive() )
         {
             AccelerationDiscontinuity();
             braking = !braking;

@@ -67,7 +67,7 @@ public:
 private:
     virtual unsigned int GetRawRand()                ;   //!< returns a raw random number
 
-    int z_, w_;
+    unsigned int z_, w_; // multiply-with-carry state; the arithmetic relies on unsigned 32 bit wraparound
 };
 
 #endif // TRANDOM_H_INCLUDED
