@@ -85,3 +85,22 @@ def test_pool_reload_mid_round_keeps_opponents(tmp_path):
     actor.act(pool, [step()])
     assert len(pool.sent[engine]) == 4
     assert {k: actor.controller[(engine, k)] for k in range(1, 4)} == opponents
+
+
+def test_kill_after_death_reaches_final_transition(tmp_path):
+    # A slot's wall stays in the arena after it dies; a kill it makes then is reported by the
+    # engine and must be credited to the slot's last transition instead of being dropped.
+    cfg = Config(run=str(tmp_path / "run"), engines=1, rollout=256, device="cpu", past_prob=0.0)
+    actor = Actor(cfg, tmp_path / "run")
+    pool = _RecordingPool()
+    obs = lambda: (np.zeros((P.GRID, P.GRID), np.uint8), np.zeros((P.GRID, P.GRID), np.uint8),
+                   np.zeros(P.N_SCALARS, np.float32))
+    playing = lambda: SlotStep(P.FLAG_ALIVE | P.FLAG_NEEDS_ACTION, 0, (1 << P.N_ACTIONS) - 1, *obs())
+
+    actor.act(pool, [Step(0, 1, 0, 0.0, False, 2, 2, [playing(), playing()])])
+    last = actor.open[(0, 0)]
+    # slot 0 dies; with one opponent left alive that costs the full -1
+    actor.act(pool, [Step(0, 1, 1, 0.1, False, 1, 2, [SlotStep(P.FLAG_DIED, 0, 0), playing()])])
+    # slot 1 then crashes into slot 0's wall, which ends the round
+    actor.act(pool, [Step(0, 1, 2, 0.2, True, 0, 2, [SlotStep(0, 1, 0), SlotStep(P.FLAG_DIED, 0, 0)])])
+    assert abs(actor.store.reward[last] - (-1.0 + cfg.kill_bonus)) < 1e-6

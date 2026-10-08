@@ -204,6 +204,9 @@ class Actor:
         self.mix = arena_mix(cfg.engines)
         self.store = Store(cfg.rollout + 8192)
         self.open: dict[tuple[int, int], int] = {}  # stream -> index of its unresolved transition
+        # stream -> final transition of its finished life this round, so kills its leftover
+        # wall makes after death still reach it
+        self.closed: dict[tuple[int, int], int] = {}
         # stream -> None for the learner, else the frozen past net it plays with; holding the net
         # itself keeps the opponent fixed for the round even when the pool is reloaded meanwhile
         self.controller: dict[tuple[int, int], PolicyNet | None] = {}
@@ -258,12 +261,16 @@ class Actor:
     def _resolve(self, key, reward: float, done: bool) -> None:
         i = self.open.get(key)
         if i is None:
+            j = self.closed.get(key)
+            if j is not None:
+                self.store.reward[j] += reward
             return
         self.store.reward[i] += reward
         if done:
             self.store.done[i] = True
             self.store.resolved += 1
             del self.open[key]
+            self.closed[key] = i
 
     def _process(self, step: Step) -> list[tuple[tuple[int, int], int]]:
         """Apply rewards from a STEP; return (stream, store_index or -1) rows needing actions."""
@@ -273,6 +280,7 @@ class Actor:
             for k in range(len(step.slots)):
                 self._resolve((e, k), 0.0, True)
                 self.ep_len.pop((e, k), None)
+                self.closed.pop((e, k), None)
             self.round_of[e] = step.round_id
             self._assign_controllers(e, len(step.slots))
         name = self.mix[e][0]
@@ -348,6 +356,7 @@ class Actor:
         keep = sorted(self.open.values())
         remap = self.store.compact(keep)
         self.open = {k: remap[i] for k, i in self.open.items()}
+        self.closed = {}  # those transitions are in the block now
         stats = {"results": dict(self.results), "lengths": self.lengths, "policy_update": self.weights_update}
         self.results = defaultdict(list)
         self.lengths = []
