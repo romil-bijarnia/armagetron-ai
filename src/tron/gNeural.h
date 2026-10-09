@@ -51,6 +51,9 @@ namespace gNeural
 
     //! the lockstep frame time; 0 means the game runs in real time
     REAL LockstepDT();
+
+    //! how many AI players the network drives (the NEURAL_SLOTS setting, for the menu)
+    int & Slots();
 }
 
 #endif

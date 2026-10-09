@@ -648,6 +648,12 @@ void gGameSettings::Menu()
      autoNum);
 
 
+    uMenuItemInt neuralconf
+    (&GameSettings,
+     "$game_menu_neural_text",
+     "$game_menu_neural_help",
+     gNeural::Slots(), 0, 8, 1);
+
     uMenuItemInt iqconf
     (&GameSettings,
      "$game_menu_iq_text",

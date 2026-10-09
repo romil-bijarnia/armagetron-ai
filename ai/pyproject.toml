@@ -22,6 +22,7 @@ arma-smoke = "arma_ai.smoke:main"
 arma-dash = "arma_ai.dashboard:main"
 arma-show = "arma_ai.show:main"
 arma-brain = "arma_ai.brain:main"
+arma-export = "arma_ai.export:main"
 
 [dependency-groups]
 dev = ["pytest>=8,<10"]

@@ -26,6 +26,12 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 */
 
 #include "gNeural.h"
+#include "gNeuralNet.h"
+#include "tConsole.h"
+#include "tDirectories.h"
+
+#include <chrono>
+#include <fstream>
 
 #include "gAIBase.h"
 #include "gCycle.h"
@@ -75,7 +81,7 @@ tString sg_socketPath("");
 tSettingItemLine sg_socketPathConf( "NEURAL_SOCKET", sg_socketPath );
 int sg_engineID = 0;
 tSettingItem<int> sg_engineIDConf( "NEURAL_ENGINE_ID", sg_engineID );
-int sg_numSlots = 0;
+int sg_numSlots = 1; // AI players driven by the network: by a trainer over NEURAL_SOCKET, or by the brain in the game
 tSettingItem<int> sg_numSlotsConf( "NEURAL_SLOTS", sg_numSlots );
 REAL sg_interval = .05;
 tSettingItem<REAL> sg_intervalConf( "NEURAL_DECISION_INTERVAL", sg_interval );
@@ -91,6 +97,13 @@ bool sg_controlAfterRound = false;
 tSettingItem<bool> sg_controlAfterRoundConf( "NEURAL_CONTROL_AFTER_ROUND", sg_controlAfterRound );
 bool sg_spectate = false; // also send every cycle's position each tick, for a match viewer
 tSettingItem<bool> sg_spectateConf( "NEURAL_SPECTATE", sg_spectate );
+// the brain inside the game, used when no trainer is attached
+tString sg_modelPath("brain/policy.bin");
+tSettingItemLine sg_modelPathConf( "NEURAL_MODEL", sg_modelPath );
+bool sg_sample = false; // draw moves from the policy instead of always taking the best one
+tSettingItem<bool> sg_sampleConf( "NEURAL_SAMPLE", sg_sample );
+tString sg_name("Brain"); // what the network-driven players are called
+tSettingItemLine sg_nameConf( "NEURAL_NAME", sg_name );
 
 // ------------------------------------------------------------------ socket
 int sg_fd = -1;
@@ -517,6 +530,65 @@ void Apply( gCycle * c, int action )
         c->Act( &gCycle::se_turnRight, 1 );
 }
 
+// ------------------------------------------------------------------ the brain in the game
+gNeuralNet::Net sg_net;
+std::string sg_netPath; // the NEURAL_MODEL the last load attempt was for
+double sg_decideMs = 0;
+int sg_decisions = 0;
+
+bool SocketMode()
+{
+    return !Trimmed( sg_socketPath ).empty();
+}
+
+//! true when no trainer is attached and the policy file could be loaded (loaded on first use)
+bool LocalBrain()
+{
+    if ( SocketMode() )
+        return false;
+    std::string path = Trimmed( sg_modelPath );
+    if ( path.empty() )
+        return false;
+    if ( path != sg_netPath )
+    {
+        sg_netPath = path;
+        std::ifstream f;
+        std::string error;
+        if ( !tDirectories::Data().Open( f, path.c_str() ) )
+            con << "Neural brain: " << path << " not found in the data folders, the AIs stay built in.\n";
+        else if ( !sg_net.Load( f, error ) )
+            con << "Neural brain: could not read " << path << ": " << error << "\n";
+        else
+            con << "Neural brain: " << path << " loaded (training update " << sg_net.Update() << ").\n";
+    }
+    return sg_net.Loaded();
+}
+
+int LocalDecide( uint8_t const * local, uint8_t const * global, float const * scalars, uint8_t mask )
+{
+    static uint32_t rng = 2463534242u;
+    float probs[16], value = 0;
+    std::chrono::steady_clock::time_point t0 = std::chrono::steady_clock::now();
+    int a = sg_net.Decide( local, global, scalars, mask, sg_sample, probs, &value, rng );
+    sg_decideMs += std::chrono::duration< double, std::milli >( std::chrono::steady_clock::now() - t0 ).count();
+    if ( ++sg_decisions % 400 == 0 && sg_debug > 0 )
+    {
+        std::cerr << "neural brain: " << sg_decideMs / sg_decisions << " ms per decision\n";
+        sg_decideMs = 0;
+        sg_decisions = 0;
+    }
+    return a;
+}
+
+void Rename( ePlayerNetID * ai, size_t slot )
+{
+    tString want( sg_name );
+    if ( slot > 0 )
+        want << " " << int( slot + 1 );
+    if ( want.Len() > 1 && ai->GetName() != want )
+        ai->SetName( want );
+}
+
 // ------------------------------------------------------------------ bookkeeping
 struct Slot
 {
@@ -565,6 +637,8 @@ void AssignSlots()
             {
                 sg_slots[k].player = ai;
                 sg_slots[k].wasAlive = false;
+                if ( !SocketMode() )
+                    Rename( ai, k );
                 break;
             }
         }
@@ -580,7 +654,12 @@ gCycle * SlotCycle( size_t k )
 
 bool gNeural::Active()
 {
-    return sg_numSlots > 0 && !Trimmed( sg_socketPath ).empty();
+    return sg_numSlots > 0 && ( SocketMode() || LocalBrain() );
+}
+
+int & gNeural::Slots()
+{
+    return sg_numSlots;
 }
 
 REAL gNeural::LockstepDT()
@@ -624,7 +703,9 @@ void gNeural::Timestep( REAL time )
         return;
     sg_nextDecision = ( floor( time / sg_interval + 1E-3 ) + 1 ) * sg_interval;
 
-    Connect();
+    bool const socketMode = SocketMode();
+    if ( socketMode )
+        Connect();
     AssignSlots();
 
     // census of all cycles: who is alive, who died since the last decision and who killed them
@@ -691,7 +772,7 @@ void gNeural::Timestep( REAL time )
         report = report || alive || sg_slots[k].wasAlive || kills[k] > 0;
     }
 
-    if ( sg_spectate )
+    if ( sg_spectate && socketMode )
     {
         // WORLD: arena bounds and every cycle, sent before the STEP (if one follows) so a viewer can
         // draw the match; without a STEP the viewer acknowledges, which also lets it pace the game
@@ -802,26 +883,37 @@ void gNeural::Timestep( REAL time )
                         ++aliveEnemies;
                 }
                 BuildObservation( world, c, time, aliveEnemies, aliveMates, &local[0], &global[0], &scalars[0] );
-                msg.Raw( &local[0], local.size() );
-                msg.Raw( &global[0], global.size() );
-                msg.Raw( &scalars[0], scalars.size() * sizeof( float ) );
+                if ( socketMode )
+                {
+                    msg.Raw( &local[0], local.size() );
+                    msg.Raw( &global[0], global.size() );
+                    msg.Raw( &scalars[0], scalars.size() * sizeof( float ) );
+                }
+                else
+                {
+                    // the brain is in the game: decide right here
+                    Apply( c, LocalDecide( &local[0], &global[0], &scalars[0], ActionMask( c ) ) );
+                }
             }
             sg_slots[k].wasAlive = alive;
         }
-        SendMessage( kMsgStep, msg );
+        if ( socketMode )
+        {
+            SendMessage( kMsgStep, msg );
 
-        // wait for the decisions
-        uint32_t header[3];
-        ReadAll( header, sizeof( header ) );
-        if ( header[0] != kMagic || header[1] != kMsgActions || header[2] > 1024 )
-            Fail( "malformed reply" );
-        std::vector< uint8_t > reply( header[2] );
-        if ( header[2] )
-            ReadAll( &reply[0], header[2] );
-        size_t n = reply.empty() ? 0 : reply[0];
-        for ( size_t k = 0; k < sg_slots.size() && k < n && k + 1 < reply.size(); ++k )
-            if ( asked[k] )
-                Apply( SlotCycle( k ), reply[ k + 1 ] );
+            // wait for the decisions
+            uint32_t header[3];
+            ReadAll( header, sizeof( header ) );
+            if ( header[0] != kMagic || header[1] != kMsgActions || header[2] > 1024 )
+                Fail( "malformed reply" );
+            std::vector< uint8_t > reply( header[2] );
+            if ( header[2] )
+                ReadAll( &reply[0], header[2] );
+            size_t n = reply.empty() ? 0 : reply[0];
+            for ( size_t k = 0; k < sg_slots.size() && k < n && k + 1 < reply.size(); ++k )
+                if ( asked[k] )
+                    Apply( SlotCycle( k ), reply[ k + 1 ] );
+        }
     }
 
     if ( over )

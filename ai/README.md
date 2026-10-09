@@ -52,7 +52,17 @@ Opens a page in the browser that draws the network itself while it plays a live 
 
 Space pauses the match and the right arrow steps it one decision at a time, so a single choice can be studied; `[` and `]` change the speed, `-` and `=` the brightness. Hovering any neuron says what it is (for the inputs, which number or map cell it is and its value). Drag to turn the picture, scroll to zoom; Flat turns it side-on into the classic layer diagram, Glow switches the bloom off. Run it while training and it follows the newest weights after every update, flashing the connections that changed, and a stats panel shows the training itself: win rate against the bot, episode length, entropy, KL, clip fraction, policy and value loss, how much of the return the value head explains, gradient norm, learning rate and speed, each with its recent history. Takes the same match flags as `show` (`--ais`, `--bots`, `--size`, `--speed`, `--walls`, `--checkpoint`).
 
-## Playing against it
+## Playing against it in the game itself
+
+The trained network also lives inside the game, so no Python is needed to play it: open Armagetron Advanced, start a single-player game, and the first AI opponent is the network (named Brain). Game Setup has a "Neural opponents" setting for how many of the AI players it drives; the rest use the game's built-in AI. The weights are the file `brain/policy.bin` in this repository, exported from a checkpoint with
+
+```bash
+uv run arma-export                      # runs/main/latest.pt -> brain/policy.bin
+```
+
+Rebuild the app after exporting, or drop the file into `~/Library/Application Support/Armagetron Advanced/brain/policy.bin`, which the game prefers over the bundled one. `NEURAL_SAMPLE 1` in the console makes it draw moves from its probabilities instead of always taking the best one, `NEURAL_NAME` renames it. The C++ side is `src/tron/gNeuralNet.cpp`; `tests/test_cpp_brain.py` checks it against PyTorch.
+
+## Playing against it from Python
 
 ```bash
 uv run arma-play

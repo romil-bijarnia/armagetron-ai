@@ -1561,6 +1561,8 @@ game_menu_ais_help		Lets you select the number of computer controlled players("A
 
 game_menu_iq_text		AI IQ:
 game_menu_iq_help		Lets you select the average intelligence of the computer controlled players("Artificial Intelligence") in the game.
+game_menu_neural_text		Neural opponents
+game_menu_neural_help		How many of the AI players are driven by the trained neural network (the brain/policy.bin file); the rest use the built-in AI
 
 game_menu_minplayers_text	Min Players:
 game_menu_minplayers_help	Selects the minimum number of players that will be on the game grid. If not enough humans are present, the empty positions will be filled by AIs.

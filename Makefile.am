@@ -8,6 +8,7 @@ sounddir=${armadatadir}
 languagedir=${armadatadir}
 modeldir=${armadatadir}
 musicdir=${armadatadir}
+braindir=${armadatadir}
 
 # include $(top_srcdir)/Makefile.paths
 include $(top_srcdir)/Makefile.manual
@@ -15,7 +16,7 @@ include $(top_srcdir)/Makefile.manual
 # what goes into the distribution
 EXTRA_DIST = README-DEVELOPER README-Subversion README-SDL \
 armagetron.kdevelop armagetron.kdevelop.pcs armagetron.kdevses tron.ico \
-models sound textures bootstrap.sh music \
+models sound textures bootstrap.sh music brain \
 acinclude.d/accustomdir.m4 acinclude.d/ax_boost_base.m4 acinclude.d/ax_boost_system.m4 acinclude.d/ax_boost_thread.m4\
 acinclude.d/ax_cxx_have_align.m4\
 fingerprint \
@@ -39,6 +40,9 @@ languagedata=language/english_base.txt language/english_base_notranslate.txt lan
              language/deutsch.txt language/french.txt language/spanish.txt language/polish.txt language/russian.txt
 
 nobase_dist_language_DATA=language/languages.txt.in $(languagedata) language/update.py
+
+# the trained policy the game plays with when no trainer is attached (see ai/arma_ai/export.py)
+nobase_brain_DATA=brain/policy.bin
 
 # What gets installed
 
