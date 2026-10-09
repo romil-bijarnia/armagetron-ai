@@ -40,10 +40,10 @@
   .row { display: flex; align-items: center; gap: 12px; height: 31px; color: var(--muted); font-size: 15px; }
   .row .name { width: 72px; }
   .row .bar { flex: 1; height: 3px; background: var(--hair); border-radius: 2px; overflow: hidden; }
-  .row .bar i { display: block; height: 100%; width: 0; background: #6b6b6b; transition: width 80ms linear; }
+  .row .bar i { display: block; height: 100%; width: 0; opacity: 0.4; transition: width 80ms linear; }
   .row .pct { width: 42px; text-align: right; font-variant-numeric: tabular-nums; }
   .row.pick { color: var(--text); }
-  .row.pick .bar i { background: #fff; }
+  .row.pick .bar i { opacity: 1; }
   .row.off { color: #3c3c3c; }
   #value { color: var(--muted); font-size: 14px; margin-top: 8px; font-variant-numeric: tabular-nums; }
   #arenaBox { position: fixed; left: 28px; bottom: 26px; }
@@ -129,6 +129,10 @@ const PLANE_COLORS = {                             // input cells: colour of the
 };
 const PRIORITY = ['enemy heads', 'own head', 'team heads', 'own trail', 'enemy trails', 'team trails',
                   'walls', 'enemy paths', 'outside'];
+// each branch has its own hue, so you can see where a signal came from; the trunk, where the
+// three meet, stays neutral, and each move has its own colour
+const BRANCH_COLORS = { local: '#38bdf8', global: '#a78bfa', scalars: '#fbbf24', trunk: '#f1f5f9', head: '#ffffff' };
+const MOVE_COLORS = ['#4ade80', '#60a5fa', '#e879f9', '#f87171'];
 
 function mulberry32(seed) {
   return () => {
@@ -231,7 +235,8 @@ const pointMaterial = new THREE.ShaderMaterial({
       // nearly nothing when silent: a slab stacks dozens of filters on one pixel, and the
       // picture must come from the neurons that fire, not from the sheer number of them
       float lit = pow(vA, 1.6);
-      gl_FragColor = vec4(vT * (0.03 + 0.87 * lit), shape * (0.05 + 0.95 * lit));
+      vec3 col = mix(vT, vec3(1.0), 0.45 * lit);           // the hottest neurons go white
+      gl_FragColor = vec4(col * (0.03 + 0.87 * lit), shape * (0.05 + 0.95 * lit));
     }`,
   transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
 });
@@ -264,7 +269,14 @@ function buildPoints(layers) {
   }
   const pos = new Float32Array(total * 3), size = new Float32Array(total), tint = new Float32Array(total * 3);
   parts.forEach((p, i) => { pos.set(p.pos, start[i] * 3); size.set(p.size, start[i]); });
-  tint.fill(1);
+  const col = new THREE.Color();
+  layers.forEach((L, i) => {
+    for (let u = 0; u < unitCount(L); u++) {
+      col.set(L.id === 'policy' ? MOVE_COLORS[u] : BRANCH_COLORS[L.group] || '#ffffff');
+      tint.set([col.r, col.g, col.b], 3 * (start[i] + u));
+    }
+  });
+  const hue = tint.slice();  // the resting colours; input cells are recoloured by their content
   const geo = new THREE.BufferGeometry();
   geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
   geo.setAttribute('size', new THREE.BufferAttribute(size, 1));
@@ -278,7 +290,7 @@ function buildPoints(layers) {
   scene.add(points);
   shown = new Float32Array(total);
   target = new Float32Array(total);
-  return { start, pos, total };
+  return { start, pos, total, hue };
 }
 
 function buildLines(topo) {
@@ -288,15 +300,18 @@ function buildLines(topo) {
     const si = b64(e.si, Uint32Array), di = b64(e.di, Uint32Array), w = b64(e.w), dw = e.dw ? b64(e.dw) : null;
     n += si.length;
     // many near-parallel lines between two layers pile up into a solid bar; thin the big groups
-    return { s0: T.start[idx[e.src]], d0: T.start[idx[e.dst]], si, di, w, dw, gain: Math.min(1, 1500 / si.length) };
+    return { s0: T.start[idx[e.src]], d0: T.start[idx[e.dst]], si, di, w, dw, gain: Math.min(1, 1500 / si.length),
+             toOutput: topo.layers[idx[e.dst]].kind === 'output' };
   });
-  const pos = new Float32Array(n * 6), src = new Uint32Array(n), wt = new Float32Array(n), dwt = new Float32Array(n);
+  const pos = new Float32Array(n * 6), src = new Uint32Array(n), colOf = new Uint32Array(n),
+        wt = new Float32Array(n), dwt = new Float32Array(n);
   let k = 0;
   for (const g of groups) for (let j = 0; j < g.si.length; j++, k++) {
     const a = g.s0 + g.si[j], b = g.d0 + g.di[j];
     pos.set(T.pos.subarray(3 * a, 3 * a + 3), 6 * k);
     pos.set(T.pos.subarray(3 * b, 3 * b + 3), 6 * k + 3);
-    src[k] = a; wt[k] = g.w[j] / 255 * g.gain; dwt[k] = g.dw ? g.dw[j] / 255 : 0;
+    src[k] = a; colOf[k] = g.toOutput ? b : a;  // a line takes its source's colour; the last ones, their move's
+    wt[k] = g.w[j] / 255 * g.gain; dwt[k] = g.dw ? g.dw[j] / 255 : 0;
   }
   const geo = new THREE.BufferGeometry();
   geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
@@ -308,18 +323,17 @@ function buildLines(topo) {
   lines.renderOrder = 0;
   lines.visible = visible;
   scene.add(lines);
-  T.lineSrc = src; T.lineW = wt; T.lineDW = dwt; T.nLines = n;
+  T.lineSrc = src; T.lineCol = colOf; T.lineW = wt; T.lineDW = dwt; T.nLines = n;
 }
 
-const ACCENT = new THREE.Color('#339cff');
 function updateLines() {
   if (!lines || !lines.visible) return;
-  const col = lines.geometry.attributes.color.array, n = T.nLines;
+  const col = lines.geometry.attributes.color.array, n = T.nLines, tint = points.geometry.attributes.tint.array;
   for (let k = 0; k < n; k++) {
-    const w = T.lineW[k], a = shown[T.lineSrc[k]];
-    const white = Math.min(1, w * 0.004 + w * a * a * 0.22);
-    const blue = T.lineDW[k] * flash * 0.5;
-    const r = white + blue * ACCENT.r, g = white + blue * ACCENT.g, b = white + blue * ACCENT.b;
+    const w = T.lineW[k], a = shown[T.lineSrc[k]], c = 3 * T.lineCol[k];
+    const lum = Math.min(1, w * 0.004 + w * a * a * 0.24);
+    const fl = T.lineDW[k] * flash * 0.5;  // new weights: a white pulse on the connections that changed
+    const r = lum * tint[c] + fl, g = lum * tint[c + 1] + fl, b = lum * tint[c + 2] + fl;
     col[6 * k] = col[6 * k + 3] = r; col[6 * k + 1] = col[6 * k + 4] = g; col[6 * k + 2] = col[6 * k + 5] = b;
   }
   lines.geometry.attributes.color.needsUpdate = true;
@@ -382,8 +396,8 @@ function placeLabels() {
 // ------------------------------------------------------------------ side panels
 const movesBox = document.getElementById('moves');
 function buildMoves(names) {
-  movesBox.innerHTML = names.map(n =>
-    `<div class="row"><span class="name">${n}</span><span class="bar"><i></i></span><span class="pct"></span></div>`
+  movesBox.innerHTML = names.map((n, i) =>
+    `<div class="row"><span class="name">${n}</span><span class="bar"><i style="background:${MOVE_COLORS[i]}"></i></span><span class="pct"></span></div>`
   ).join('') + '<div id="value"></div>';
 }
 function showMoves(f) {
@@ -463,7 +477,7 @@ function inputCells(layerIndex, bytes) {
   const outside = L.planes.indexOf('outside');
   for (let c = 0; c < bytes.length; c++) {
     const b = bytes[c], u = s0 + c;
-    if (!b) { target[u] = 0.25; tint[3 * u] = tint[3 * u + 1] = tint[3 * u + 2] = 1; continue; }  // faint: the plane stays visible
+    if (!b) { target[u] = 0.25; tint[3 * u] = T.hue[3 * u]; tint[3 * u + 1] = T.hue[3 * u + 1]; tint[3 * u + 2] = T.hue[3 * u + 2]; continue; }  // faint: the plane stays visible
     const bit = order.find(i => b & (1 << i));
     const col = bitColor[bit];
     tint[3 * u] = col.r; tint[3 * u + 1] = col.g; tint[3 * u + 2] = col.b;
@@ -496,7 +510,7 @@ function onFrame(f) {
 
 function showStatus() {
   if (!last) return;
-  const f = last, training = f.trained_ago != null && f.trained_ago < 120;
+  const f = last, training = isTraining(f);
   const head = state.paused ? 'paused' : 'live';
   statusEl.innerHTML = training
     ? `${head} · training · update ${f.update} · <span class="${flash > 0.05 ? 'flash' : ''}">new weights ${Math.round(f.trained_ago)} s ago</span>`
@@ -546,6 +560,14 @@ function spark(cv, vals, range) {
   c.beginPath(); c.arc(X(i), Y(v), 1.6 * dpr, 0, Math.PI * 2); c.fill();
 }
 
+// training counts as running while updates keep arriving at the run's own pace
+function isTraining(f) {
+  if (metrics && metrics.last.time) {
+    const age = Date.now() / 1000 - metrics.last.time;
+    return age < Math.max(180, 3 * (metrics.interval || 60));
+  }
+  return !!f && f.trained_ago != null && f.trained_ago < 120;
+}
 function onMetrics(m) {
   metrics = m;
   if (!trainRows.children.length) {
@@ -557,7 +579,7 @@ function onMetrics(m) {
 function showMetrics() {
   if (!metrics) return;
   const { last, series } = metrics;
-  const training = last.time && (Date.now() / 1000 - last.time) < 180;
+  const training = isTraining();
   const steps = last.steps >= 1e6 ? `${(last.steps / 1e6).toFixed(1)}M` : `${Math.round(last.steps / 1e3)}k`;
   trainHead.textContent = `${training ? 'Training' : 'Last run'} · update ${last.update} · ${steps} steps`;
   TRAIN_ROWS.forEach((r, i) => {
@@ -713,10 +735,11 @@ function resize() {
 window.addEventListener('resize', resize);
 resize();
 
-let prev = performance.now(), lastRender = 0;
+let prev = performance.now(), lastRender = 0, lastHeadAt = 0;
 function frame(now) {
   requestAnimationFrame(frame);
-  if (now - lastRender < 15.5) return;              // 60 fps is plenty; ProMotion would double the work
+  // 60 fps on its own; 30 while training runs, which shares the GPU with the trainer
+  if (now - lastRender < (isTraining(last) ? 32 : 15.5)) return;
   lastRender = now;
   const dt = Math.min(0.1, (now - prev) / 1000); prev = now;
   if (fly) {
@@ -734,6 +757,7 @@ function frame(now) {
     updateLines();
     flash = Math.max(0, flash - dt / 2.2);
     if (!state.paused && lastFrameAt && now - lastFrameAt > 3000) statusEl.textContent = 'waiting · no new decisions';
+    if (metrics && now - lastHeadAt > 5000) { lastHeadAt = now; showMetrics(); }
     pick(now);
   }
   placeLabels();

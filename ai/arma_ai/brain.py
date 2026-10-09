@@ -462,7 +462,11 @@ class Metrics:
         last = self.rows[-1]
         wins = sorted(k for k in last if k.startswith("win_"))
         series = {k: [r.get(k) for r in self.rows] for k in (*self.KEYS, *wins) if k in last}
-        return json.dumps({"last": last, "series": series}, separators=(",", ":"))
+        # the run's own rhythm, so the page can tell "training" from "stopped" at any pace
+        times = [r["time"] for r in self.rows[-8:] if "time" in r]
+        gaps = sorted(b - a for a, b in zip(times, times[1:]))
+        interval = gaps[len(gaps) // 2] if gaps else 60.0
+        return json.dumps({"last": last, "series": series, "interval": interval}, separators=(",", ":"))
 
 
 class Weights:
@@ -512,6 +516,8 @@ def main() -> None:
     ap.add_argument("--port", type=int, default=8765)
     ap.add_argument("--no-open", action="store_true", help="don't open the page in the browser")
     args = ap.parse_args()
+    # one decision at a time needs no thread pool; a wide one only fights the trainer for the CPU
+    torch.set_num_threads(2)
 
     run = PROJECT / "runs/main"
     path = args.checkpoint or next((f for f in (run / "actor.pt", run / "latest.pt") if f.exists()), run / "actor.pt")
