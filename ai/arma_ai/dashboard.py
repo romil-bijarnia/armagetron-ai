@@ -455,7 +455,7 @@ def build(run_dir: Path, recs: list[dict], width: int = 160, height: int = 48) -
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--run", default="runs/main")
+    ap.add_argument("--run", default="runs/v2")
     ap.add_argument("--once", action="store_true", help="print one frame and exit")
     ap.add_argument("--width", type=int, default=None)
     ap.add_argument("--height", type=int, default=None)

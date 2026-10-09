@@ -3,7 +3,7 @@
 Starts a local Armagetron server whose AI opponents are driven by a checkpoint, then waits for you
 to join from your normal Armagetron client (Play Game > Multiplayer > Custom Connect > 127.0.0.1).
 
-    arma-play                                  # latest checkpoint of runs/main, one neural opponent
+    arma-play                                  # latest checkpoint of runs/v2, one neural opponent
     arma-play --neural 3 --builtin 1 --size -1 # three neural opponents plus one built-in AI
 """
 
@@ -24,7 +24,7 @@ import torch
 
 from . import protocol as P
 from .engine import ENGINE_BIN, ENGINE_CONFIG, ENGINE_DATA, _parse_step, _recv_exact
-from .model import PolicyNet
+from .model import make_net, net_version
 
 PROJECT = Path(__file__).resolve().parent.parent
 MASK_TABLE = np.array([[(m >> a) & 1 for a in range(P.N_ACTIONS)] for m in range(1 << P.N_ACTIONS)], np.float32)
@@ -36,10 +36,11 @@ class Brain:
     def __init__(self, checkpoint: Path, device: str | None = None, sample: bool = False):
         self.device = torch.device(device or ("mps" if torch.backends.mps.is_available() else "cpu"))
         ck = torch.load(checkpoint, map_location=self.device, weights_only=True)
-        self.net = PolicyNet().to(self.device).eval()
+        self.net = make_net(net_version(ck["model"])).to(self.device).eval()
         self.net.load_state_dict(ck["model"])
         self.update = ck.get("update", 0)
         self.sample = sample
+        self.prev: dict[int, np.ndarray] = {}  # slot -> maps of its previous decision (frame stacking)
 
     @torch.no_grad()
     def actions(self, step) -> list[int]:
@@ -47,7 +48,12 @@ class Brain:
         rows = [k for k, s in enumerate(step.slots) if s.needs_action]
         if not rows:
             return acts
-        maps = np.stack([np.stack([step.slots[k].local, step.slots[k].globl]) for k in rows])
+        for k, s in enumerate(step.slots):
+            if s.flags & (P.FLAG_SPAWNED | P.FLAG_DIED):
+                self.prev.pop(k, None)
+        maps = np.stack([np.concatenate([step.slots[k].maps, self.prev.get(k, step.slots[k].maps)]) for k in rows])
+        for k in rows:
+            self.prev[k] = np.array(step.slots[k].maps)
         feats = np.stack([np.concatenate([step.slots[k].scalars, MASK_TABLE[step.slots[k].mask]]) for k in rows])
         a, _, _ = self.net.act(torch.from_numpy(maps).to(self.device), torch.from_numpy(feats).to(self.device),
                                greedy=not self.sample)
@@ -94,7 +100,7 @@ def server_settings(args, sock_path: str) -> dict[str, str]:
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--checkpoint", type=Path, default=PROJECT / "runs/main/latest.pt")
+    ap.add_argument("--checkpoint", type=Path, default=PROJECT / "runs/v2/latest.pt")
     ap.add_argument("--neural", type=int, default=1, help="opponents driven by the network")
     ap.add_argument("--builtin", type=int, default=0, help="extra built-in AI opponents")
     ap.add_argument("--size", type=float, default=-3, help="arena SIZE_FACTOR (-3 is the single-player default)")

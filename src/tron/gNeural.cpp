@@ -64,10 +64,13 @@ namespace
 {
 // wire protocol; keep in sync with arma_ai/protocol.py
 const uint32_t kMagic = 0x414D5241;
-const uint32_t kProtocol = 1;
+const uint32_t kProtocol = 2;
 const uint32_t kMsgHello = 1, kMsgStep = 2, kMsgActions = 3, kMsgWorld = 4;
 const int kGrid = 64;
 const int kLocalPlanes = 8, kGlobalPlanes = 8, kScalars = 96;
+const int kMaps = 4;  // local (2 m), close (1 m), global (arena), territory (arena); one byte per cell each
+const REAL kCloseCell = 1;  // the sharp player view: 1 m cells, 64 m across, 40 m ahead
+enum { T_MINE = 0, T_ENEMY = 1 };  // territory bits; bits 2..7 hold my BFS distance / 4 cells, capped
 const int kAgentRow = 40;  // rows of the local map that lie in front of the cycle
 const int kRays = 16;
 const int kEnemies = 3;
@@ -213,6 +216,7 @@ void Connect()
     hello.U32( kLocalPlanes );
     hello.U32( kGlobalPlanes );
     hello.U32( kScalars );
+    hello.U32( kMaps );
     hello.F32( sg_localCell );
     hello.F32( sg_interval );
     SendMessage( kMsgHello, hello );
@@ -302,13 +306,13 @@ inline void SetBit( uint8_t * grid, int row, int col, int bit )
         grid[ row * kGrid + col ] |= uint8_t( 1 << bit );
 }
 
-inline void LocalCell( Frame const & f, REAL x, REAL y, int & row, int & col )
+inline void LocalCell( Frame const & f, REAL x, REAL y, int & row, int & col, REAL cell = sg_localCell )
 {
     REAL dx = x - f.pos.x, dy = y - f.pos.y;
     REAL fw = dx * f.h.x + dy * f.h.y;
     REAL sd = dx * f.r.x + dy * f.r.y;
-    col = int( floor( sd / sg_localCell ) ) + kGrid / 2;
-    row = kAgentRow - 1 - int( floor( fw / sg_localCell ) );
+    col = int( floor( sd / cell ) ) + kGrid / 2;
+    row = kAgentRow - 1 - int( floor( fw / cell ) );
 }
 
 inline void GlobalCell( World const & w, Frame const & f, REAL x, REAL y, int & row, int & col )
@@ -347,10 +351,92 @@ struct Other
     bool enemy;
 };
 
+// ------------------------------------------------------------------ territory
+// A breadth-first race over the arena grid: from my head and from every enemy head, who reaches
+// each free cell first. Walls block; it is the Voronoi partition every good Tron player holds in
+// their head when they glance at the minimap.
+void BuildTerritory( World const & w, Frame const & f, uint8_t const * global, gCycle * self,
+                     std::vector< Other > const & others, uint8_t * territory )
+{
+    int const N = kGrid * kGrid;
+    memset( territory, 0, N );
+    static std::vector< int > distMine, distEnemy, queue;
+    distMine.assign( N, -1 );
+    distEnemy.assign( N, -1 );
+    queue.clear();
+    queue.reserve( N );
+
+    // a head's own cell holds the start of its trail, so a seed is never "blocked"; the frontier
+    // of its trail's neighbours is what matters
+    auto blocked = [&]( int idx ) { return ( global[idx] & ( ( 1 << G_WALL ) | ( 1 << G_OUTSIDE ) ) ) != 0; };
+    auto bfs = [&]( std::vector< int > & dist, std::vector< int > const & seeds )
+    {
+        queue.clear();
+        for ( size_t i = 0; i < seeds.size(); ++i )
+        {
+            if ( dist[seeds[i]] >= 0 )
+                continue;
+            dist[seeds[i]] = 0;
+            queue.push_back( seeds[i] );
+        }
+        for ( size_t qi = 0; qi < queue.size(); ++qi )
+        {
+            int idx = queue[qi];
+            int r = idx / kGrid, c = idx % kGrid;
+            int const dr[4] = { -1, 1, 0, 0 }, dc[4] = { 0, 0, -1, 1 };
+            for ( int k = 0; k < 4; ++k )
+            {
+                int rr = r + dr[k], cc = c + dc[k];
+                if ( rr < 0 || rr >= kGrid || cc < 0 || cc >= kGrid )
+                    continue;
+                int j = rr * kGrid + cc;
+                if ( dist[j] >= 0 || blocked( j ) )
+                    continue;
+                dist[j] = dist[idx] + 1;
+                queue.push_back( j );
+            }
+        }
+    };
+
+    std::vector< int > mine, enemies;
+    {
+        int row, col;
+        GlobalCell( w, f, f.pos.x, f.pos.y, row, col );
+        mine.push_back( row * kGrid + col );
+        for ( size_t i = 0; i < others.size(); ++i )
+        {
+            if ( !others[i].enemy )
+                continue;
+            eCoord p = others[i].cycle->Position();
+            GlobalCell( w, f, p.x, p.y, row, col );
+            enemies.push_back( row * kGrid + col );
+        }
+    }
+    bfs( distMine, mine );
+    if ( !enemies.empty() )
+        bfs( distEnemy, enemies );
+
+    for ( int i = 0; i < N; ++i )
+    {
+        int dm = distMine[i], de = distEnemy[i];
+        if ( blocked( i ) && dm != 0 && de != 0 )
+            continue;  // walls own nothing; the heads' own cells keep their owner
+        uint8_t v = 0;
+        if ( dm >= 0 && ( de < 0 || dm <= de ) )
+            v |= 1 << T_MINE;
+        if ( de >= 0 && ( dm < 0 || de < dm ) )
+            v |= 1 << T_ENEMY;
+        if ( dm >= 0 )
+            v |= uint8_t( std::min( dm / 4, 63 ) ) << 2;
+        territory[i] = v;
+    }
+}
+
 void BuildObservation( World const & w, gCycle * self, REAL time, int aliveEnemies, int aliveMates,
-                       uint8_t * local, uint8_t * global, float * scalars )
+                       uint8_t * local, uint8_t * close, uint8_t * global, uint8_t * territory, float * scalars )
 {
     memset( local, 0, kGrid * kGrid );
+    memset( close, 0, kGrid * kGrid );
     memset( global, 0, kGrid * kGrid );
     memset( scalars, 0, kScalars * sizeof( float ) );
 
@@ -382,6 +468,10 @@ void BuildObservation( World const & w, gCycle * self, REAL time, int aliveEnemi
         SetBit( local, row, col, L_WALL );
         if ( lp >= 0 )
             SetBit( local, row, col, lp );
+        LocalCell( f, s.x, s.y, row, col, kCloseCell );
+        SetBit( close, row, col, L_WALL );
+        if ( lp >= 0 )
+            SetBit( close, row, col, lp );
         GlobalCell( w, f, s.x, s.y, row, col );
         SetBit( global, row, col, G_WALL );
         if ( gp >= 0 )
@@ -399,6 +489,10 @@ void BuildObservation( World const & w, gCycle * self, REAL time, int aliveEnemi
             eCoord p = f.pos + f.h * fw + f.r * sd;
             if ( w.Outside( p.x, p.y ) )
                 SetBit( local, row, col, L_OUTSIDE );
+            REAL fwc = ( kAgentRow - 1 - row + .5 ) * kCloseCell, sdc = ( col - kGrid / 2 + .5 ) * kCloseCell;
+            eCoord pc = f.pos + f.h * fwc + f.r * sdc;
+            if ( w.Outside( pc.x, pc.y ) )
+                SetBit( close, row, col, L_OUTSIDE );
             REAL sg = ( col + .5 ) * cg - w.extent;
             eCoord q = eCoord( w.cx, w.cy ) + f.h * fg + f.r * sg;
             if ( w.Outside( q.x, q.y ) )
@@ -434,6 +528,8 @@ void BuildObservation( World const & w, gCycle * self, REAL time, int aliveEnemi
         int row, col;
         LocalCell( f, p.x, p.y, row, col );
         SetBit( local, row, col, others[i].enemy ? L_ENEMY_HEAD : L_TEAM_HEAD );
+        LocalCell( f, p.x, p.y, row, col, kCloseCell );
+        SetBit( close, row, col, others[i].enemy ? L_ENEMY_HEAD : L_TEAM_HEAD );
         GlobalCell( w, f, p.x, p.y, row, col );
         SetBit( global, row, col, others[i].enemy ? G_ENEMY_HEAD : G_TEAM_HEAD );
 
@@ -443,14 +539,18 @@ void BuildObservation( World const & w, gCycle * self, REAL time, int aliveEnemi
             eCoord d = Unit( o->Direction() );
             int type;
             REAL reach = std::min( Ray( o, p, d, 200, type ), o->Speed() * REAL( 1 ) );
-            for ( REAL t = .5 * c; t < reach; t += .5 * c )
+            for ( REAL t = .5 * kCloseCell; t < reach; t += .5 * kCloseCell )
             {
                 eCoord q = p + d * t;
                 LocalCell( f, q.x, q.y, row, col );
                 SetBit( local, row, col, L_ENEMY_PATH );
+                LocalCell( f, q.x, q.y, row, col, kCloseCell );
+                SetBit( close, row, col, L_ENEMY_PATH );
             }
         }
     }
+
+    BuildTerritory( w, f, global, self, others, territory );
 
     // scalars
     float * s = scalars;
@@ -564,12 +664,14 @@ bool LocalBrain()
     return sg_net.Loaded();
 }
 
-int LocalDecide( uint8_t const * local, uint8_t const * global, float const * scalars, uint8_t mask )
+int LocalDecide( uint8_t const * local, uint8_t const * close, uint8_t const * global, uint8_t const * territory,
+                 float const * scalars, uint8_t mask )
 {
     static uint32_t rng = 2463534242u;
     float probs[16], value = 0;
     std::chrono::steady_clock::time_point t0 = std::chrono::steady_clock::now();
-    int a = sg_net.Decide( local, global, scalars, mask, sg_sample, probs, &value, rng );
+    uint8_t const * maps[4] = { local, close, global, territory };
+    int a = sg_net.Decide( maps, scalars, mask, sg_sample, probs, &value, rng );
     sg_decideMs += std::chrono::duration< double, std::milli >( std::chrono::steady_clock::now() - t0 ).count();
     if ( ++sg_decisions % 400 == 0 && sg_debug > 0 )
     {
@@ -626,8 +728,10 @@ void AssignSlots()
 {
     if ( int( sg_slots.size() ) != sg_numSlots )
         sg_slots.resize( std::max( 0, sg_numSlots ) );
+    // a slot whose player left the game, or lost its cycle for good (the AI of a finished match
+    // lingers until the next one is set up), is free again
     for ( size_t k = 0; k < sg_slots.size(); ++k )
-        if ( sg_slots[k].player && !Listed( sg_slots[k].player ) )
+        if ( sg_slots[k].player && ( !Listed( sg_slots[k].player ) || !sg_slots[k].player->CurrentTeam() ) )
             sg_slots[k] = Slot();
     for ( int i = 0; i < se_PlayerNetIDs.Len(); ++i )
     {
@@ -691,6 +795,7 @@ void gNeural::NewRound()
 {
     if ( !Active() )
         return;
+    sg_net.NewLife();
     ++sg_roundID;
     sg_tick = 0;
     sg_roundOver = false;
@@ -857,7 +962,7 @@ void gNeural::Timestep( REAL time )
         msg.U8( uint8_t( sg_slots.size() ) );
 
         std::vector< bool > asked( sg_slots.size(), false );
-        std::vector< uint8_t > local( kGrid * kGrid ), global( kGrid * kGrid );
+        std::vector< uint8_t > local( kGrid * kGrid ), close( kGrid * kGrid ), global( kGrid * kGrid ), territory( kGrid * kGrid );
         std::vector< float > scalars( kScalars );
         for ( size_t k = 0; k < sg_slots.size(); ++k )
         {
@@ -890,17 +995,19 @@ void gNeural::Timestep( REAL time )
                     else
                         ++aliveEnemies;
                 }
-                BuildObservation( world, c, time, aliveEnemies, aliveMates, &local[0], &global[0], &scalars[0] );
+                BuildObservation( world, c, time, aliveEnemies, aliveMates, &local[0], &close[0], &global[0], &territory[0], &scalars[0] );
                 if ( socketMode )
                 {
                     msg.Raw( &local[0], local.size() );
+                    msg.Raw( &close[0], close.size() );
                     msg.Raw( &global[0], global.size() );
+                    msg.Raw( &territory[0], territory.size() );
                     msg.Raw( &scalars[0], scalars.size() * sizeof( float ) );
                 }
                 else
                 {
                     // the brain is in the game: decide right here
-                    Apply( c, LocalDecide( &local[0], &global[0], &scalars[0], ActionMask( c ) ) );
+                    Apply( c, LocalDecide( &local[0], &close[0], &global[0], &territory[0], &scalars[0], ActionMask( c ) ) );
                 }
             }
             sg_slots[k].wasAlive = alive;

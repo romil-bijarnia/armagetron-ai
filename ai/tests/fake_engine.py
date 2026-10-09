@@ -37,7 +37,7 @@ def main():
     s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     s.connect(path)
     send(s, P.MSG_HELLO, P.HELLO.pack(engine_id, P.PROTOCOL_VERSION, slots, P.GRID, P.N_LOCAL_PLANES,
-                                      P.N_GLOBAL_PLANES, P.N_SCALARS, 2.0, 0.05))
+                                      P.N_GLOBAL_PLANES, P.N_SCALARS, P.N_MAPS, 2.0, 0.05))
     round_id = 0
     while True:
         round_id += 1
@@ -65,7 +65,7 @@ def main():
                     flags |= P.FLAG_NEEDS_ACTION
                 body += P.SLOT_HEAD.pack(flags, 0, 0b0111, 0)
                 if needs:
-                    body += np.random.randint(0, 256, P.GRID * P.GRID * 2, dtype=np.uint8).tobytes()
+                    body += np.random.randint(0, 256, P.GRID * P.GRID * P.N_MAPS, dtype=np.uint8).tobytes()
                     body += np.random.randn(P.N_SCALARS).astype(np.float32).tobytes()
             send(s, P.MSG_STEP, body)
             magic, mtype, length = P.HEADER.unpack(recv_exact(s, P.HEADER.size))

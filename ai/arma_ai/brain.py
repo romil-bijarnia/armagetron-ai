@@ -9,7 +9,7 @@ activation of every neuron is sent to a page (http://127.0.0.1:8765) that draws 
 one slab of points per layer, lit by how strongly each neuron fires, and the strongest connections
 between layers, glowing where signal flows through them. Space pauses the match, the right arrow
 steps it one decision at a time, [ and ] change the speed, and hovering a neuron says what it is.
-While training runs, the page follows the newest weights (runs/main/actor.pt) and flashes the
+While training runs, the page follows the newest weights (runs/v2/actor.pt) and flashes the
 connections each update changed. Ctrl-C quits.
 """
 
@@ -31,7 +31,7 @@ import torch.nn as nn
 
 from . import protocol as P
 from .engine import ArenaConfig, EnginePool, _parse_step
-from .model import PolicyNet
+from .model import PolicyNet, make_net, net_version
 from .show import Match
 from .train import MASK_TABLE
 
@@ -45,7 +45,6 @@ LOCAL_PLANES = ["walls", "own trail", "enemy trails", "team trails", "enemy head
 GLOBAL_PLANES = ["walls", "own trail", "enemy trails", "own head", "enemy heads", "outside", "team trails",
                  "team heads"]
 MOVES = ["Straight", "Left", "Right", "Brake"]
-GROUP_WORD = {"local": "nearby", "global": "arena", "scalars": "numbers", "trunk": "trunk"}
 
 
 def scalar_names() -> list[str]:
@@ -66,25 +65,30 @@ def scalar_names() -> list[str]:
 
 # ------------------------------------------------------------------------------------------- network
 
+MAP_IDS = ("local_in", "close_in", "global_in", "territory_in")
+MAP_LABELS = ("what it sees nearby", "up close", "the whole arena", "who gets there first")
+MAP_PLANE_NAMES = (LOCAL_PLANES, LOCAL_PLANES, GLOBAL_PLANES,
+                   ["mine first", "enemy first", "d1", "d2", "d4", "d8", "d16", "d32"])
+GROUP_OF = {"local": "local", "close": "close", "global": "global", "territory": "territory"}
+GROUP_WORD = {"local": "nearby", "close": "close", "global": "arena", "territory": "territory", "scalars": "numbers",
+              "trunk": "trunk"}
+TOWER_GROUPS = ("local", "close", "global", "territory")  # v2 tower order == map order
+
+
+def stacked(maps: np.ndarray, prev: np.ndarray | None) -> np.ndarray:
+    """(2*N_MAPS, G, G): this decision's maps, then the previous decision's (or these again at a spawn)."""
+    return np.concatenate([maps, maps if prev is None else prev])
+
+
 @torch.no_grad()
-def trace(net: PolicyNet, local: np.ndarray, globl: np.ndarray, scalars: np.ndarray, mask: np.ndarray):
+def trace(net: PolicyNet, maps: np.ndarray, scalars: np.ndarray, mask: np.ndarray):
     """Run one decision through NET and keep every layer's output.
 
-    local/globl: (GRID, GRID) uint8 bit-planes, scalars: (N_SCALARS,) float32, mask: (N_ACTIONS,) bool.
-    Returns (layers, probs, value) where layers is a list of (name, activations) after each ReLU."""
+    MAPS: (2*N_MAPS, GRID, GRID) uint8 (current then previous frame), SCALARS: (N_SCALARS,) float32,
+    MASK: (N_ACTIONS,) bool. Returns (layers, probs, value): layers is a list of (name, activations)
+    after each ReLU, in forward order."""
     out: list[tuple[str, torch.Tensor]] = []
-
-    def tower(prefix: str, mod, unpack, packed: np.ndarray) -> torch.Tensor:
-        x = unpack(torch.from_numpy(np.array(packed, np.uint8))[None])
-        n = 0
-        for m in mod.net:
-            x = m(x)
-            if isinstance(m, nn.ReLU):
-                n += 1
-                out.append((f"{prefix}_c{n}", x[0]))
-        h = torch.relu(mod.fc(x.flatten(1)))
-        out.append((f"{prefix}_fc", h[0]))
-        return h
+    x_in = torch.from_numpy(np.array(maps, np.uint8))[None]
 
     def mlp(prefix: str, seq: nn.Sequential, h: torch.Tensor) -> torch.Tensor:
         n = 0
@@ -95,10 +99,28 @@ def trace(net: PolicyNet, local: np.ndarray, globl: np.ndarray, scalars: np.ndar
                 out.append((f"{prefix}{n}", h[0]))
         return h
 
-    hl = tower("local", net.local, net.unpack_local, local)
-    hg = tower("global", net.globl, net.unpack_global, globl)
+    parts = []
+    for m, group in enumerate(TOWER_GROUPS):
+        tower = net.towers[m]
+        cur = net.unpack[m](x_in[:, m])
+        prev = net.unpack[m](x_in[:, P.N_MAPS + m])
+        x = torch.relu(tower.stem(torch.cat([cur, prev], 1)))
+        out.append((f"{group}_c1", x[0]))
+        n = 1
+        for b in tower.res:
+            y = torch.relu(b.c0(x))
+            x = torch.relu(x + b.c1(y))
+            n += 1
+            out.append((f"{group}_c{n}", x[0]))
+        x = torch.relu(tower.down0(x))
+        out.append((f"{group}_c{n + 1}", x[0]))
+        x = torch.relu(tower.down1(x))
+        out.append((f"{group}_c{n + 2}", x[0]))
+        h = torch.relu(tower.fc(x.flatten(1)))
+        out.append((f"{group}_fc", h[0]))
+        parts.append(h)
     hs = mlp("scalars_h", net.scalars, torch.from_numpy(np.array(scalars, np.float32))[None])
-    h = mlp("trunk", net.trunk, torch.cat([hl, hg, hs], 1))
+    h = mlp("trunk", net.trunk, torch.cat(parts + [hs], 1))
     logits = net.pi(h)[0].masked_fill(~torch.from_numpy(np.asarray(mask, bool)), -1e8)
     probs = torch.softmax(logits, 0)
     return [(k, v.numpy()) for k, v in out], probs.numpy(), float(net.v(h)[0, 0])
@@ -106,46 +128,42 @@ def trace(net: PolicyNet, local: np.ndarray, globl: np.ndarray, scalars: np.ndar
 
 def layer_table(net: PolicyNet) -> list[dict]:
     """Every layer the page draws, in frame order, with where it sits in the picture."""
-    blank = np.zeros((P.GRID, P.GRID), np.uint8)
-    outs = trace(net, blank, blank, np.zeros(P.N_SCALARS, np.float32), np.ones(P.N_ACTIONS, bool))[0]
+    blank = np.zeros((2 * P.N_MAPS, P.GRID, P.GRID), np.uint8)
+    outs = trace(net, blank, np.zeros(P.N_SCALARS, np.float32), np.ones(P.N_ACTIONS, bool))[0]
     names, shapes = [k for k, _ in outs], dict(outs)
-    layers = [
-        {"id": "local_in", "group": "local", "kind": "input", "shape": [P.GRID, P.GRID], "col": 0,
-         "label": "what it sees nearby", "name": "what it sees nearby", "planes": LOCAL_PLANES},
-        {"id": "global_in", "group": "global", "kind": "input", "shape": [P.GRID, P.GRID], "col": 0,
-         "label": "the whole arena", "name": "the whole arena", "planes": GLOBAL_PLANES},
-        {"id": "scalars_in", "group": "scalars", "kind": "input", "shape": [P.N_SCALARS], "col": 0,
-         "label": f"{P.N_SCALARS} exact numbers", "name": "exact numbers", "names": scalar_names()},
-    ]
-    seen16 = {"local": 0, "global": 0}
-    convs = {"local": 0, "global": 0}
+    layers = []
+    for mid, label, planes, group in zip(MAP_IDS, MAP_LABELS, MAP_PLANE_NAMES, TOWER_GROUPS):
+        layers.append({"id": mid, "group": group, "kind": "input", "shape": [P.GRID, P.GRID], "col": 0,
+                       "label": label, "name": label, "planes": planes})
+    layers.append({"id": "scalars_in", "group": "scalars", "kind": "input", "shape": [P.N_SCALARS], "col": 0,
+                   "label": f"{P.N_SCALARS} exact numbers", "name": "exact numbers", "names": scalar_names()})
+    seen16: dict[str, int] = {}
+    convs: dict[str, int] = {}
     for name in names:
         shape = list(shapes[name].shape)
         group = name.split("_")[0] if not name.startswith("trunk") else "trunk"
         word = GROUP_WORD[group]
         if len(shape) == 3:
             if shape[1] == P.GRID // 4:  # full patch resolution, one column each
-                seen16[group] += 1
+                seen16[group] = seen16.get(group, 0) + 1
                 col = seen16[group]
             else:
-                col = 4 if shape[1] == P.GRID // 8 else 5
-            convs[group] += 1
+                col = 5 if shape[1] == P.GRID // 8 else 6
+            convs[group] = convs.get(group, 0) + 1
             label = f"{shape[0]} filters · {shape[1]}×{shape[2]}"
             human = f"{word} · conv {convs[group]}"
             kind = "conv"
         else:
-            col = {"local_fc": 6, "global_fc": 6, "scalars_h1": 3, "scalars_h2": 6,
-                   "trunk1": 7, "trunk2": 8}[name]
+            col = {"scalars_h1": 3, "scalars_h2": 7, "trunk1": 8, "trunk2": 9}.get(name, 7)
             label = f"{shape[0]} neurons"
-            human = {"local_fc": "nearby · summary", "global_fc": "arena · summary",
-                     "scalars_h1": "numbers · layer 1", "scalars_h2": "numbers · layer 2",
-                     "trunk1": "trunk · layer 1", "trunk2": "trunk · layer 2"}[name]
+            human = {"scalars_h1": "numbers · layer 1", "scalars_h2": "numbers · layer 2",
+                     "trunk1": "trunk · layer 1", "trunk2": "trunk · layer 2"}.get(name, f"{word} · summary")
             kind = "dense"
         layers.append({"id": name, "group": group, "kind": kind, "shape": shape, "col": col,
                        "label": label, "name": human})
-    layers.append({"id": "policy", "group": "head", "kind": "output", "shape": [P.N_ACTIONS], "col": 9,
+    layers.append({"id": "policy", "group": "head", "kind": "output", "shape": [P.N_ACTIONS], "col": 10,
                    "label": "move", "name": "move", "names": MOVES})
-    layers.append({"id": "value", "group": "head", "kind": "output", "shape": [1], "col": 9,
+    layers.append({"id": "value", "group": "head", "kind": "output", "shape": [1], "col": 10,
                    "label": "value", "name": "value"})
     return layers
 
@@ -171,12 +189,14 @@ def edges(net: PolicyNet, layers: list[dict], rng: np.random.Generator) -> list[
         W = mod.weight.detach().numpy()
         co_n, ci_n, k, _ = W.shape
         s, p = mod.stride[0], mod.padding[0]
-        if composite:  # the input is drawn as one point per cell, all planes together
+        A = np.abs(W)
+        if composite:  # the input is drawn as one point per cell, all planes together (current frame only)
             hi = wi = P.GRID
+            A = A[:, :A.shape[1] // 2]  # ignore the stacked previous-frame planes for the picture
+            ci_n_pic = A.shape[1]
         else:
             _, hi, wi = by_id[src]["shape"]
         _, ho, wo = by_id[dst]["shape"]
-        A = np.abs(W)
         units = rng.choice(co_n * ho * wo, size=min(CONV_LINES, co_n * ho * wo), replace=False)
         si, di, pidx = [], [], []
         for u in units:
@@ -222,20 +242,31 @@ def edges(net: PolicyNet, layers: list[dict], rng: np.random.Generator) -> list[
             if si:
                 add(sid, dst, si, di, param, pidx)
 
-    for prefix, tower in (("local", net.local), ("global", net.globl)):
-        attr = "local" if prefix == "local" else "globl"
-        convs = [m for m in tower.net if isinstance(m, nn.Conv2d)]
-        names = [f"{prefix}_c{i + 1}" for i in range(len(convs))]
-        params = [n for n, m in tower.net.named_modules() if isinstance(m, nn.Conv2d)]
-        conv(f"{prefix}_in", names[0], convs[0], f"{attr}.net.{params[0]}.weight", composite=True)
-        for i in range(1, len(convs)):
-            conv(names[i - 1], names[i], convs[i], f"{attr}.net.{params[i]}.weight")
+    fused_srcs = []
+    for m, group in enumerate(TOWER_GROUPS):
+        tower = net.towers[m]
+        seq = [(f"towers.{m}.stem.weight", tower.stem, True)]
+        for b_i, b in enumerate(tower.res):
+            seq += [(f"towers.{m}.res.{b_i}.c0.weight", b.c0, False), (f"towers.{m}.res.{b_i}.c1.weight", b.c1, False)]
+        seq += [(f"towers.{m}.down0.weight", tower.down0, False), (f"towers.{m}.down1.weight", tower.down1, False)]
+        # the page shows one slab per ReLU output: stem, each residual block (after its 2nd conv), two downs
+        names = [f"{group}_c1"] + [f"{group}_c{2 + i}" for i in range(len(tower.res))] + \
+                [f"{group}_c{2 + len(tower.res)}", f"{group}_c{3 + len(tower.res)}"]
+        # stem: from the input map
+        conv(f"{group}_in", names[0], tower.stem, seq[0][0], composite=True)
+        prev_name = names[0]
+        for b_i, b in enumerate(tower.res):
+            # a residual block is drawn as one slab; its lines come from the block's second conv
+            conv(prev_name, names[1 + b_i], b.c1, f"towers.{m}.res.{b_i}.c1.weight")
+            prev_name = names[1 + b_i]
+        conv(prev_name, names[-2], tower.down0, f"towers.{m}.down0.weight")
+        conv(names[-2], names[-1], tower.down1, f"towers.{m}.down1.weight")
         last = by_id[names[-1]]["shape"]
-        dense([(names[-1], int(np.prod(last)))], f"{prefix}_fc", tower.fc.weight, f"{attr}.fc.weight", 2)
+        dense([(names[-1], int(np.prod(last)))], f"{group}_fc", tower.fc.weight, f"towers.{m}.fc.weight", 2)
+        fused_srcs.append((f"{group}_fc", tower.fc.out_features))
     dense([("scalars_in", P.N_SCALARS)], "scalars_h1", net.scalars[0].weight, "scalars.0.weight", 2)
     dense([("scalars_h1", 256)], "scalars_h2", net.scalars[2].weight, "scalars.2.weight", 2)
-    dense([("local_fc", 256), ("global_fc", 256), ("scalars_h2", 256)], "trunk1", net.trunk[0].weight,
-          "trunk.0.weight", 3)
+    dense(fused_srcs + [("scalars_h2", 256)], "trunk1", net.trunk[0].weight, "trunk.0.weight", 3)
     dense([("trunk1", net.trunk[2].weight.shape[1])], "trunk2", net.trunk[2].weight, "trunk.2.weight", 2)
     dense([("trunk2", net.pi.weight.shape[1])], "policy", net.pi.weight, "pi.weight", 48)
     dense([("trunk2", net.v.weight.shape[1])], "value", net.v.weight, "v.weight", 48)
@@ -474,7 +505,7 @@ class Weights:
 
     def __init__(self, path: Path):
         self.path = path
-        self.net = PolicyNet().eval()
+        self.net = make_net().eval()
         self.mtime = 0.0
         self.update = 0
         self.changed_at = 0.0
@@ -494,6 +525,8 @@ class Weights:
         except Exception:
             return None  # being replaced right now; next time
         old = self.state
+        if net_version(ck["model"]) != 2:
+            raise SystemExit("the brain page shows v2 networks; export/convert older checkpoints first")
         self.net.load_state_dict(ck["model"])
         self.state = {k: v.clone() for k, v in self.net.state_dict().items()}
         self.update = int(ck.get("update", 0))
@@ -511,7 +544,7 @@ def main() -> None:
     ap.add_argument("--speed", type=float, default=1.0, help="playback speed, 1 = real time")
     ap.add_argument("--walls", type=float, default=600, help="trail length in metres (-1 = endless)")
     ap.add_argument("--checkpoint", type=Path, default=None,
-                    help="weights to show (default: runs/main/actor.pt, which training rewrites every update)")
+                    help="weights to show (default: runs/v2/actor.pt, which training rewrites every update)")
     ap.add_argument("--greedy", action="store_true", help="always take the top move")
     ap.add_argument("--port", type=int, default=8765)
     ap.add_argument("--no-open", action="store_true", help="don't open the page in the browser")
@@ -519,7 +552,7 @@ def main() -> None:
     # one decision at a time needs no thread pool; a wide one only fights the trainer for the CPU
     torch.set_num_threads(2)
 
-    run = PROJECT / "runs/main"
+    run = PROJECT / "runs/v2"
     path = args.checkpoint or next((f for f in (run / "actor.pt", run / "latest.pt") if f.exists()), run / "actor.pt")
     weights = Weights(path)
     if weights.poll() is None:
@@ -564,6 +597,7 @@ def main() -> None:
         clock = None
         speed = hub.speed
         last_frame = last_poll = 0.0
+        prev_maps: dict[int, np.ndarray] = {}  # slot -> maps of its previous decision
         try:
             while True:
                 now = time.monotonic()
@@ -577,6 +611,7 @@ def main() -> None:
                 step_follows = m.update(payload)
                 if m.round_id != rid or clock is None:
                     clock = (time.monotonic(), m.time)
+                    prev_maps.clear()
                 acts: list[int] = []
                 if step_follows:
                     mtype, payload = pool._read_msg(conn)
@@ -587,7 +622,10 @@ def main() -> None:
                             if not s.needs_action:
                                 continue
                             mask = MASK_TABLE[s.mask] > 0.5
-                            outs, probs, value = trace(net, s.local, s.globl, s.scalars, mask)
+                            if s.flags & (P.FLAG_SPAWNED | P.FLAG_DIED):
+                                prev_maps.pop(k, None)
+                            outs, probs, value = trace(net, stacked(s.maps, prev_maps.get(k)), s.scalars, mask)
+                            prev_maps[k] = np.array(s.maps)
                             a = int(probs.argmax()) if args.greedy else int(np.random.choice(len(probs), p=probs / probs.sum()))
                             acts[k] = a
                             # every decision counts while paused (stepping must not skip one)
@@ -599,8 +637,8 @@ def main() -> None:
                                     "update": weights.update, "trained_ago": (time.time() - weights.changed_at)
                                     if weights.changed_at else None,
                                     "acts": _u8(acts_q),
-                                    "local": base64.b64encode(np.ascontiguousarray(s.local).tobytes()).decode(),
-                                    "global": base64.b64encode(np.ascontiguousarray(s.globl).tobytes()).decode(),
+                                    "maps": {mid: base64.b64encode(np.ascontiguousarray(s.maps[i]).tobytes()).decode()
+                                             for i, mid in enumerate(MAP_IDS)},
                                     "scalars": _u8(np.tanh(np.abs(s.scalars))),
                                     "numbers": [round(float(x), 3) for x in s.scalars],
                                     "probs": [round(float(x), 4) for x in probs], "mask": mask.tolist(),

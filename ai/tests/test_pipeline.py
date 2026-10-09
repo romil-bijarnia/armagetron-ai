@@ -68,8 +68,7 @@ def test_pool_reload_mid_round_keeps_opponents(tmp_path):
 
     def step():
         slot = lambda: SlotStep(P.FLAG_ALIVE | P.FLAG_NEEDS_ACTION, 0, (1 << P.N_ACTIONS) - 1,
-                                np.zeros((P.GRID, P.GRID), np.uint8),
-                                np.zeros((P.GRID, P.GRID), np.uint8),
+                                np.zeros((P.N_MAPS, P.GRID, P.GRID), np.uint8),
                                 np.zeros(P.N_SCALARS, np.float32))
         return Step(engine, 1, 0, 0.0, False, 4, 4, [slot() for _ in range(4)])
 
@@ -93,8 +92,7 @@ def test_kill_after_death_reaches_final_transition(tmp_path):
     cfg = Config(run=str(tmp_path / "run"), engines=1, rollout=256, device="cpu", past_prob=0.0)
     actor = Actor(cfg, tmp_path / "run")
     pool = _RecordingPool()
-    obs = lambda: (np.zeros((P.GRID, P.GRID), np.uint8), np.zeros((P.GRID, P.GRID), np.uint8),
-                   np.zeros(P.N_SCALARS, np.float32))
+    obs = lambda: (np.zeros((P.N_MAPS, P.GRID, P.GRID), np.uint8), np.zeros(P.N_SCALARS, np.float32))
     playing = lambda: SlotStep(P.FLAG_ALIVE | P.FLAG_NEEDS_ACTION, 0, (1 << P.N_ACTIONS) - 1, *obs())
 
     actor.act(pool, [Step(0, 1, 0, 0.0, False, 2, 2, [playing(), playing()])])

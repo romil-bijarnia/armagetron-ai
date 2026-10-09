@@ -37,20 +37,20 @@ import torch
 
 from . import protocol as P
 from .engine import ArenaConfig, EnginePool, Step
-from .model import PolicyNet
+from .model import PolicyNet, make_net, net_version
 
 PROJECT = Path(__file__).resolve().parent.parent
 
 
 @dataclass
 class Config:
-    run: str = "runs/main"
+    run: str = "runs/v2"
     engines: int = 24
     rollout: int = 32768  # learner transitions per PPO update
     epochs: int = 2  # data is cheap with async collection; fresher data beats more reuse
     minibatch: int = 4096
     lr: float = 2.5e-4
-    gamma: float = 0.995
+    gamma: float = 0.999  # ~35 s of consequences at 20 decisions/s; a sealing move 30 s before a win still gets credit
     lam: float = 0.95
     clip: float = 0.2
     target_kl: float = 0.03
@@ -90,7 +90,7 @@ def arena_mix(n: int) -> list[tuple[str, ArenaConfig]]:
 MASK_TABLE = np.array([[(m >> a) & 1 for a in range(P.N_ACTIONS)] for m in range(1 << P.N_ACTIONS)], np.float32)
 
 FIELDS = (
-    ("maps", np.uint8, (2, P.GRID, P.GRID)),  # local and global map
+    ("maps", np.uint8, (2 * P.N_MAPS, P.GRID, P.GRID)),  # the four maps, then the previous decision's four (frame stacking)
     ("feats", np.float32, (P.N_SCALARS + P.N_ACTIONS,)),  # scalars, then the action mask as 0/1
     ("action", np.int64, ()),
     ("logp", np.float32, ()),
@@ -126,12 +126,13 @@ class Store:
         self.n = 0
         self.resolved = 0
 
-    def add(self, local, globl, scal, mask: int) -> int:
+    def add(self, maps, prev_maps, scal, mask: int) -> int:
+        """MAPS: (N_MAPS, G, G) of this decision; PREV_MAPS: the previous decision's, or None at a spawn."""
         if self.n >= self.cap:
             raise RuntimeError("transition store overflow")
         i = self.n
-        self.maps[i, 0] = local
-        self.maps[i, 1] = globl
+        self.maps[i, :P.N_MAPS] = maps
+        self.maps[i, P.N_MAPS:] = maps if prev_maps is None else prev_maps
         self.feats[i, :P.N_SCALARS] = scal
         self.feats[i, P.N_SCALARS:] = MASK_TABLE[mask]
         self.reward[i] = 0.0
@@ -194,7 +195,7 @@ class Actor:
         self.device = torch.device(cfg.device)
         random.seed(cfg.seed + 1)
         torch.manual_seed(cfg.seed + 1)
-        self.net = PolicyNet().to(self.device).eval()
+        self.net = make_net().to(self.device).eval()
         self.weights_mtime = 0.0
         self.weights_update = 0
         self.reload_weights()
@@ -204,6 +205,8 @@ class Actor:
         self.mix = arena_mix(cfg.engines)
         self.store = Store(cfg.rollout + 8192)
         self.open: dict[tuple[int, int], int] = {}  # stream -> index of its unresolved transition
+        self.prev_maps: dict[tuple[int, int], np.ndarray] = {}  # stream -> the maps of its previous decision
+        self._stacked: dict[tuple[int, int], np.ndarray] = {}  # stream -> (2*N_MAPS, G, G) for this decision
         # stream -> final transition of its finished life this round, so kills its leftover
         # wall makes after death still reach it
         self.closed: dict[tuple[int, int], int] = {}
@@ -227,6 +230,8 @@ class Actor:
             ck = torch.load(f, map_location=self.device, weights_only=True)
         except Exception:
             return  # being replaced right now; next time
+        if net_version(ck["model"]) != self.net.version:
+            self.net = make_net(net_version(ck["model"])).to(self.device).eval()
         self.net.load_state_dict(ck["model"])
         self.weights_mtime = m
         self.weights_update = ck.get("update", 0)
@@ -245,8 +250,9 @@ class Actor:
         picks.update(random.sample(files, min(2, len(files))))
         nets = []
         for f in sorted(picks):
-            n = PolicyNet().to(self.device).eval()
-            n.load_state_dict(torch.load(f, map_location=self.device, weights_only=True)["model"])
+            sd = torch.load(f, map_location=self.device, weights_only=True)["model"]
+            n = make_net(net_version(sd)).to(self.device).eval()
+            n.load_state_dict(sd)
             nets.append(n)
         self.past_nets = nets
 
@@ -281,6 +287,7 @@ class Actor:
                 self._resolve((e, k), 0.0, True)
                 self.ep_len.pop((e, k), None)
                 self.closed.pop((e, k), None)
+                self.prev_maps.pop((e, k), None)
             self.round_of[e] = step.round_id
             self._assign_controllers(e, len(step.slots))
         name = self.mix[e][0]
@@ -293,6 +300,7 @@ class Actor:
             if s.flags & P.FLAG_DIED:
                 r -= step.n_alive / max(step.n_total - 1, 1)  # n_alive no longer counts us
                 terminal = True
+                self.prev_maps.pop(key, None)
                 if learner:
                     self.results[name].append(0.0 if step.n_alive else 0.5)
             elif step.round_over and s.alive:
@@ -306,8 +314,10 @@ class Actor:
                 if terminal:
                     self.lengths.append(self.ep_len.pop(key, 0))
             if s.needs_action:
+                if s.flags & P.FLAG_SPAWNED:
+                    self.prev_maps.pop(key, None)
                 if learner:
-                    i = self.store.add(s.local, s.globl, s.scalars, s.mask)
+                    i = self.store.add(s.maps, self.prev_maps.get(key), s.scalars, s.mask)
                     prev = self.open.get(key)
                     if prev is not None:
                         self.store.next[prev] = i
@@ -317,6 +327,8 @@ class Actor:
                     rows.append((key, i))
                 else:
                     rows.append((key, -1))
+                self._stacked[key] = np.concatenate([s.maps, self.prev_maps.get(key, s.maps)])
+                self.prev_maps[key] = np.array(s.maps)  # a copy: the STEP buffer is reused
         return rows
 
     @torch.no_grad()
@@ -341,7 +353,7 @@ class Actor:
             for (key, _), act in zip(learner_rows, self.store.action[ids]):
                 per_engine_actions[key[0]][key[1]] = int(act)
         for net, rows in past_rows.items():
-            maps = np.stack([np.stack([s.local, s.globl]) for _, s in rows])
+            maps = np.stack([self._stacked[key] for key, _ in rows])
             feats = np.stack([np.concatenate([s.scalars, MASK_TABLE[s.mask]]) for _, s in rows])
             a, _, _ = net.act(torch.from_numpy(maps).to(d), torch.from_numpy(feats).to(d))
             for (key, _), act in zip(rows, a.cpu().numpy()):
@@ -422,7 +434,7 @@ class Learner:
         np.random.seed(cfg.seed)
         torch.manual_seed(cfg.seed)
         self.device = torch.device(cfg.device)
-        self.net = PolicyNet().to(self.device)
+        self.net = make_net().to(self.device)
         self.opt = torch.optim.Adam(self.net.parameters(), lr=cfg.lr, eps=1e-5)
         self.update = 0
         self.total_steps = 0
@@ -433,6 +445,9 @@ class Learner:
                              f"overwrite it, so pick a new --run folder for a fresh start.")
         if saved:
             ck = torch.load(saved, map_location=self.device, weights_only=True)
+            if net_version(ck["model"]) != self.net.version:
+                self.net = make_net(net_version(ck["model"])).to(self.device)
+                self.opt = torch.optim.Adam(self.net.parameters(), lr=cfg.lr, eps=1e-5)
             self.net.load_state_dict(ck["model"])
             self.opt.load_state_dict(ck["opt"])
             for group in self.opt.param_groups:  # a --lr flag wins over the learning rate saved with the optimiser
@@ -482,7 +497,7 @@ class Learner:
             for b in range(0, m, cfg.minibatch):
                 mb = perm[b:b + cfg.minibatch]
                 f = feats[mb]
-                logits, v = self.net(maps[mb, 0], maps[mb, 1], f[:, :P.N_SCALARS], f[:, P.N_SCALARS:] > 0.5)
+                logits, v = self.net(maps[mb], f[:, :P.N_SCALARS], f[:, P.N_SCALARS:] > 0.5)
                 logp_all = torch.log_softmax(logits, 1)
                 logp = logp_all.gather(1, act[mb, None]).squeeze(1)
                 ent = -(logp_all.exp() * logp_all).sum(1).mean()

@@ -92,7 +92,7 @@
 <div id="arenaBox">
   <canvas id="arena"></canvas>
   <div id="result"></div>
-  <div id="legend"><span><i style="background:#22d3ee"></i>you</span><span><i style="background:#fb923c"></i>enemy</span><span><i style="background:#9ca3af"></i>walls</span></div>
+  <div id="legend"><span><i style="background:#22d3ee"></i>you</span><span><i style="background:#fb923c"></i>enemy</span><span><i style="background:#9ca3af"></i>walls</span><span><i style="background:#f472b6"></i>territory</span></div>
 </div>
 <div id="moves"></div>
 <div id="labels"></div>
@@ -111,27 +111,31 @@ import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
 // ------------------------------------------------------------------ layout
 const COL = 3.2;                                   // distance between layer columns
 const BAND = {                                     // vertical band of each branch
-  local:   { y:  2.35, h: 3.0 },
-  global:  { y: -1.05, h: 2.3 },
-  scalars: { y: -3.45, h: 1.25 },
-  trunk:   { y:  0.0,  h: 4.4 },
-  head:    { y:  0.0,  h: 3.0 },
+  local:     { y:  4.1,  h: 2.4 },                  // the player view, 2 m
+  close:     { y:  1.45, h: 2.4 },                  // the player view, 1 m
+  global:    { y: -1.2,  h: 2.4 },                  // the minimap
+  territory: { y: -3.85, h: 2.4 },                  // who gets where first
+  scalars:   { y: -5.9,  h: 1.1 },
+  trunk:     { y:  0.0,  h: 5.0 },
+  head:      { y:  0.0,  h: 3.0 },
 };
-const CENTER = new THREE.Vector3(COL * 4.0, -1.0, 0);
-const VIEW_ANGLED = new THREE.Vector3(-16, 6.5, 27);
-const VIEW_FLAT = new THREE.Vector3(0, 0, 33);
+const CENTER = new THREE.Vector3(COL * 4.5, -0.9, 0);
+const VIEW_ANGLED = new THREE.Vector3(-18, 7, 32);
+const VIEW_FLAT = new THREE.Vector3(0, 0, 40);
 const SPEEDS = [0.25, 0.5, 1, 2, 4];
 
 const PLANE_COLORS = {                             // input cells: colour of the most important bit
   'walls': '#9ca3af', 'own trail': '#22d3ee', 'own head': '#a5f3fc', 'enemy trails': '#fb923c',
   'enemy heads': '#f87171', 'enemy paths': '#a16207', 'team trails': '#4ade80', 'team heads': '#86efac',
   'outside': '#2e2e2e',
+  'mine first': '#22d3ee', 'enemy first': '#fb923c',   // territory: my region in my colour, theirs in theirs
 };
 const PRIORITY = ['enemy heads', 'own head', 'team heads', 'own trail', 'enemy trails', 'team trails',
-                  'walls', 'enemy paths', 'outside'];
+                  'walls', 'enemy paths', 'outside', 'mine first', 'enemy first'];
 // each branch has its own hue, so you can see where a signal came from; the trunk, where the
 // three meet, stays neutral, and each move has its own colour
-const BRANCH_COLORS = { local: '#38bdf8', global: '#a78bfa', scalars: '#fbbf24', trunk: '#f1f5f9', head: '#ffffff' };
+const BRANCH_COLORS = { local: '#38bdf8', close: '#2dd4bf', global: '#a78bfa', territory: '#f472b6', scalars: '#fbbf24',
+                        trunk: '#f1f5f9', head: '#ffffff' };
 const MOVE_COLORS = ['#4ade80', '#60a5fa', '#e879f9', '#f87171'];
 
 function mulberry32(seed) {
@@ -487,12 +491,16 @@ function inputCells(layerIndex, bytes) {
   const bitColor = L.planes.map(p => new THREE.Color(PLANE_COLORS[p] || '#ffffff'));
   const order = PRIORITY.map(p => L.planes.indexOf(p)).filter(i => i >= 0);
   const outside = L.planes.indexOf('outside');
+  const territory = L.id === 'territory_in';
   for (let c = 0; c < bytes.length; c++) {
-    const b = bytes[c], u = s0 + c;
+    let b = bytes[c];
+    const u = s0 + c;
+    if (territory) b &= 3;  // the upper bits are a distance, not a flag
     if (!b) { target[u] = 0.25; tint[3 * u] = T.hue[3 * u]; tint[3 * u + 1] = T.hue[3 * u + 1]; tint[3 * u + 2] = T.hue[3 * u + 2]; continue; }  // faint: the plane stays visible
     const bit = order.find(i => b & (1 << i));
     const col = bitColor[bit];
     tint[3 * u] = col.r; tint[3 * u + 1] = col.g; tint[3 * u + 2] = col.b;
+    if (territory) { target[u] = 0.45 + 0.55 * Math.max(0, 1 - (bytes[c] >> 2) / 24); continue; }  // nearer = brighter
     // the rim is the dullest wall on the map: it stays a quiet grey while trails and heads burn
     target[u] = bit === outside ? 0.4 : L.planes[bit] === 'walls' ? 0.5 : 1;
   }
@@ -508,8 +516,8 @@ function onFrame(f) {
     const s0 = T.start[i], n = unitCount(L);
     if (L.kind === 'conv' || L.kind === 'dense') {
       for (let u = 0; u < n; u++) target[s0 + u] = acts[k++] / 255;
-    } else if (L.id === 'local_in' || L.id === 'global_in') {
-      lastInput[L.id] = b64(L.id === 'local_in' ? f.local : f.global);
+    } else if (f.maps && f.maps[L.id] !== undefined) {
+      lastInput[L.id] = b64(f.maps[L.id]);
       inputCells(i, lastInput[L.id]);
     } else if (L.id === 'scalars_in') { const s = b64(f.scalars); for (let u = 0; u < n; u++) target[s0 + u] = s[u] / 255; }
     else if (L.id === 'policy') for (let u = 0; u < n; u++) target[s0 + u] = Math.sqrt(f.probs[u]);
@@ -648,6 +656,10 @@ function describe(u) {
   const L = T.layers[li], k = u - T.start[li], a = target[u];
   if (L.kind === 'input' && L.shape.length === 2) {
     const r = Math.floor(k / L.shape[1]), c = k % L.shape[1], b = lastInput[L.id] ? lastInput[L.id][k] : 0;
+    if (L.id === 'territory_in') {
+      const who = (b & 1) ? 'I get here first' : (b & 2) ? 'the enemy gets here first' : 'unreachable';
+      return [L.name, `cell ${r}, ${c} · ${who}${(b & 1) ? ` · ${(b >> 2) * 4} cells away` : ''}`];
+    }
     const what = L.planes.filter((p, i) => b & (1 << i)).join(', ') || 'empty';
     return [L.name, `cell ${r}, ${c} · ${what}`];
   }

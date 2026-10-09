@@ -255,7 +255,7 @@ def main() -> None:
     ap.add_argument("--size", type=float, default=-2, help="arena SIZE_FACTOR (-3 small, 0 full-size)")
     ap.add_argument("--speed", type=float, default=1.0, help="playback speed, 1 = real time")
     ap.add_argument("--walls", type=float, default=600, help="trail length in metres (-1 = endless)")
-    ap.add_argument("--checkpoint", type=Path, default=PROJECT / "runs/main/latest.pt")
+    ap.add_argument("--checkpoint", type=Path, default=PROJECT / "runs/v2/latest.pt")
     ap.add_argument("--greedy", action="store_true",
                     help="always take the top move (copies of the AI then tend to mirror each other)")
     ap.add_argument("--snapshot", type=float, default=0,

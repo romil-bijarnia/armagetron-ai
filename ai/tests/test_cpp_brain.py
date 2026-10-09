@@ -11,16 +11,18 @@ import torch
 
 from arma_ai import protocol as P
 from arma_ai.export import export
-from arma_ai.model import PolicyNet
+from arma_ai.model import PolicyNet, PolicyNetV1
 
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parent.parent
 
 
 @pytest.mark.skipif(shutil.which("clang++") is None and shutil.which("g++") is None, reason="no C++ compiler")
-def test_cpp_matches_pytorch(tmp_path):
+@pytest.mark.parametrize("version", [1, 2])
+def test_cpp_matches_pytorch(tmp_path, version):
     torch.manual_seed(1)
-    net = PolicyNet().eval()
+    net = (PolicyNet() if version == 2 else PolicyNetV1()).eval()
+    n_maps, stack = net.n_maps, net.stack_prev
     ck = tmp_path / "ck.pt"
     torch.save({"model": net.state_dict(), "update": 7}, ck)
     policy = tmp_path / "policy.bin"
@@ -34,14 +36,13 @@ def test_cpp_matches_pytorch(tmp_path):
 
     rng = np.random.default_rng(3)
     n = 12
-    local = rng.integers(0, 256, (n, P.GRID, P.GRID), dtype=np.uint8)
-    globl = rng.integers(0, 256, (n, P.GRID, P.GRID), dtype=np.uint8)
+    maps = rng.integers(0, 256, (n, n_maps, P.GRID, P.GRID), dtype=np.uint8)
     scalars = rng.standard_normal((n, P.N_SCALARS)).astype(np.float32)
     masks = rng.integers(1, 1 << P.N_ACTIONS, n).astype(np.uint8)
     masks[0] = 0b1111
     blob = [struct.pack("<I", n)]
     for i in range(n):
-        blob += [local[i].tobytes(), globl[i].tobytes(), scalars[i].tobytes(), bytes([masks[i]])]
+        blob += [maps[i].tobytes(), scalars[i].tobytes(), bytes([masks[i]])]
     inputs = tmp_path / "inputs.bin"
     inputs.write_bytes(b"".join(blob))
 
@@ -51,7 +52,13 @@ def test_cpp_matches_pytorch(tmp_path):
 
     with torch.no_grad():
         mask_t = torch.tensor([[(m >> a) & 1 for a in range(P.N_ACTIONS)] for m in masks], dtype=torch.bool)
-        logits, value = net(torch.from_numpy(local), torch.from_numpy(globl), torch.from_numpy(scalars), mask_t)
+        if stack:
+            # the C++ net stacks each decision's maps with the previous decision's (the first with itself)
+            prev = np.concatenate([maps[:1], maps[:-1]])
+            x = np.concatenate([maps, prev], 1)
+        else:
+            x = maps
+        logits, value = net(torch.from_numpy(x), torch.from_numpy(scalars), mask_t)
         probs = torch.softmax(logits, 1).numpy()
     for i, row in enumerate(rows):
         action, p, v = int(row[0]), np.array(row[1:1 + P.N_ACTIONS]), row[-1]

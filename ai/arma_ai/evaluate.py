@@ -71,13 +71,13 @@ def evaluate(checkpoint: Path, opponent: Path | None, rounds: int, engines: int,
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--checkpoint", type=Path, default=PROJECT / "runs/main/latest.pt")
+    ap.add_argument("--checkpoint", type=Path, default=PROJECT / "runs/v2/latest.pt")
     ap.add_argument("--opponent", type=Path, default=None, help="checkpoint to play against (default: built-in AI)")
     ap.add_argument("--rounds", type=int, default=200)
     ap.add_argument("--engines", type=int, default=4)
     ap.add_argument("--size", type=float, default=-3)
     ap.add_argument("--sample", action="store_true")
-    ap.add_argument("--log", type=Path, default=PROJECT / "runs/main/eval.jsonl")
+    ap.add_argument("--log", type=Path, default=PROJECT / "runs/v2/eval.jsonl")
     args = ap.parse_args()
     res = evaluate(args.checkpoint, args.opponent, args.rounds, args.engines, args.size, args.sample)
     res["time"] = time.time()

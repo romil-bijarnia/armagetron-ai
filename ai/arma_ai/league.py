@@ -27,7 +27,7 @@ def elo_gap(score: float) -> float:
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--run", default="runs/main")
+    ap.add_argument("--run", default="runs/v2")
     ap.add_argument("--checkpoint", type=Path, default=None, help="defaults to <run>/latest.pt")
     ap.add_argument("--opponents", type=int, default=5)
     ap.add_argument("--games", type=int, default=100)

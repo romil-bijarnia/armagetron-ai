@@ -1,16 +1,18 @@
 """Policy/value network.
 
-The engine sends three things per agent per decision:
+The engine sends four maps and a vector of exact numbers per agent per decision:
 
-* a local egocentric map (64x64 cells of 2 m, packed as 8 bit-planes in one byte per cell),
-  rotated so the agent always drives "up" the image,
-* a global map of the whole arena (64x64, same packing, same rotation),
-* a vector of exact scalar features (ray distances, speed, rubber, nearest enemies...).
+* local: the player view, 64x64 cells of 2 m around the cycle (40 ahead), rotated so the agent
+  always drives "up"; 8 bit-planes packed in one byte per cell;
+* close: the same view at 1 m, a 64 m window, for the close fight;
+* global: the whole arena at 64x64, same rotation, the minimap;
+* territory: arena-aligned; bit 0 "I reach this cell first", bit 1 "an enemy does", bits 2..7 my
+  BFS distance, the partition a good player holds in their head when glancing at the minimap;
+* scalars: ray distances, speed, rubber, nearest enemies.
 
-Each map is cut into 4x4 patches (a strided conv, which keeps every bit of the patch) and then
-processed by a small conv tower; the scalars go through an MLP; the three embeddings are fused
-and fed to a policy head (one logit per action) and a value head. Convolutions at full 64x64
-resolution are very slow on Apple GPUs, the patch stem makes training ~15x faster.
+v2 (`PolicyNet`): one residual tower per map; the previous frame's maps are stacked under the
+current ones so motion is visible. v1 (`PolicyNetV1`) is kept so old checkpoints and the game's
+in-engine brain stay loadable.
 """
 
 from __future__ import annotations
@@ -18,7 +20,7 @@ from __future__ import annotations
 import torch
 import torch.nn as nn
 
-from .protocol import GRID, N_ACTIONS, N_GLOBAL_PLANES, N_LOCAL_PLANES, N_SCALARS
+from .protocol import GRID, MAP_PLANES, N_ACTIONS, N_GLOBAL_PLANES, N_LOCAL_PLANES, N_MAPS, N_SCALARS
 
 _BITS = torch.tensor([[(v >> b) & 1 for b in range(8)] for v in range(256)], dtype=torch.float32)
 
@@ -34,6 +36,8 @@ class Unpack(nn.Module):
         # contiguous matters: convolution backward on a permuted view is ~3x slower on MPS
         return self.table[packed.long()].permute(0, 3, 1, 2).contiguous()
 
+
+# ------------------------------------------------------------------------------------------ v1
 
 class PatchTower(nn.Module):
     def __init__(self, in_ch: int, width: int, depth: int, out_dim: int):
@@ -52,25 +56,21 @@ class PatchTower(nn.Module):
         return torch.relu(self.fc(self.net(x).flatten(1)))
 
 
-class PolicyNet(nn.Module):
+class PolicyNetV1(nn.Module):
+    """The first network: two maps, plain conv towers. Kept for old checkpoints."""
+
+    version = 1
+    n_maps = 2
+    stack_prev = False
+
     def __init__(self, hidden: int = 512):
         super().__init__()
         self.unpack_local = Unpack(N_LOCAL_PLANES)
         self.unpack_global = Unpack(N_GLOBAL_PLANES)
         self.local = PatchTower(N_LOCAL_PLANES, 64, 2, 256)
         self.globl = PatchTower(N_GLOBAL_PLANES, 32, 1, 256)
-        self.scalars = nn.Sequential(
-            nn.Linear(N_SCALARS, 256),
-            nn.ReLU(inplace=True),
-            nn.Linear(256, 256),
-            nn.ReLU(inplace=True),
-        )
-        self.trunk = nn.Sequential(
-            nn.Linear(768, hidden),
-            nn.ReLU(inplace=True),
-            nn.Linear(hidden, hidden),
-            nn.ReLU(inplace=True),
-        )
+        self.scalars = nn.Sequential(nn.Linear(N_SCALARS, 256), nn.ReLU(inplace=True), nn.Linear(256, 256), nn.ReLU(inplace=True))
+        self.trunk = nn.Sequential(nn.Linear(768, hidden), nn.ReLU(inplace=True), nn.Linear(hidden, hidden), nn.ReLU(inplace=True))
         self.pi = nn.Linear(hidden, N_ACTIONS)
         self.v = nn.Linear(hidden, 1)
         for m in self.modules():
@@ -81,25 +81,128 @@ class PolicyNet(nn.Module):
         nn.init.orthogonal_(self.v.weight, gain=1.0)
 
     def act(self, maps, feats, greedy: bool = False):
-        """Sample actions. maps: (B, 2, G, G) uint8, feats: (B, N_SCALARS + N_ACTIONS) float32 whose
-        last N_ACTIONS columns are the action mask. Returns (action, logp, value)."""
-        logits, value = self(maps[:, 0], maps[:, 1], feats[:, :N_SCALARS], feats[:, N_SCALARS:] > 0.5)
-        if greedy:
-            a = logits.argmax(1)
-        else:
-            gumbel = -torch.log(-torch.log(torch.rand_like(logits).clamp_(1e-9, 1.0)))
-            a = (logits + gumbel).argmax(1)
-        logp = torch.log_softmax(logits, 1).gather(1, a[:, None]).squeeze(1)
-        return a, logp, value
+        logits, value = self(maps, feats[:, :N_SCALARS], feats[:, N_SCALARS:] > 0.5)
+        return _pick(logits, value, greedy)
 
-    def forward(self, local_packed, global_packed, scalars, mask=None):
-        h = torch.cat([
-            self.local(self.unpack_local(local_packed)),
-            self.globl(self.unpack_global(global_packed)),
-            self.scalars(scalars),
-        ], dim=1)
+    def forward(self, maps, scalars, mask=None):
+        local, globl = maps[:, 0], maps[:, 2] if maps.shape[1] >= 3 else maps[:, 1]
+        h = torch.cat([self.local(self.unpack_local(local)), self.globl(self.unpack_global(globl)), self.scalars(scalars)], 1)
         h = self.trunk(h)
         logits = self.pi(h)
         if mask is not None:
             logits = logits.masked_fill(~mask, -1e8)
         return logits, self.v(h).squeeze(1)
+
+
+# ------------------------------------------------------------------------------------------ v2
+
+class ResBlock(nn.Module):
+    def __init__(self, ch: int):
+        super().__init__()
+        self.c0 = nn.Conv2d(ch, ch, 3, padding=1)
+        self.c1 = nn.Conv2d(ch, ch, 3, padding=1)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        y = torch.relu(self.c0(x))
+        return torch.relu(x + self.c1(y))
+
+
+class ResTower(nn.Module):
+    """stem (4x4 patches) -> residual blocks at 16x16 -> two strided convs -> linear.
+
+    Exported layer names: towers.M.convs.0 (stem), towers.M.res.B.0/.1, towers.M.convs.1/.2
+    (strided), towers.M.fc. The C++ side (gNeuralNet.cpp) replays exactly this order."""
+
+    def __init__(self, in_ch: int, width: int, blocks: int, out_dim: int):
+        super().__init__()
+        self.stem = nn.Conv2d(in_ch, width, 4, stride=4)  # 16x16
+        self.res = nn.ModuleList([ResBlock(width) for _ in range(blocks)])
+        self.down0 = nn.Conv2d(width, 2 * width, 3, stride=2, padding=1)  # 8x8
+        self.down1 = nn.Conv2d(2 * width, 2 * width, 3, stride=2, padding=1)  # 4x4
+        self.fc = nn.Linear(2 * width * (GRID // 16) ** 2, out_dim)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = torch.relu(self.stem(x))
+        for b in self.res:
+            x = b(x)
+        x = torch.relu(self.down0(x))
+        x = torch.relu(self.down1(x))
+        return torch.relu(self.fc(x.flatten(1)))
+
+    def export_layers(self, prefix: str):
+        """(name, module) in forward order, the names the game's loader expects."""
+        out = [(f"{prefix}.convs.0", self.stem)]
+        for i, b in enumerate(self.res):
+            out += [(f"{prefix}.res.{i}.0", b.c0), (f"{prefix}.res.{i}.1", b.c1)]
+        out += [(f"{prefix}.convs.1", self.down0), (f"{prefix}.convs.2", self.down1), (f"{prefix}.fc", self.fc)]
+        return out
+
+
+TOWER_SPECS = (  # per map: (width, residual blocks, output dim)
+    (64, 3, 256),  # local, 2 m
+    (64, 3, 256),  # close, 1 m
+    (48, 2, 192),  # global
+    (48, 2, 192),  # territory
+)
+
+
+class PolicyNet(nn.Module):
+    """v2: four maps through residual towers, with the previous frame stacked under the current one."""
+
+    version = 2
+    n_maps = N_MAPS
+    stack_prev = True
+
+    def __init__(self, hidden: int = 768):
+        super().__init__()
+        self.unpack = nn.ModuleList([Unpack(p) for p in MAP_PLANES])
+        self.towers = nn.ModuleList([ResTower(2 * p, w, b, d) for p, (w, b, d) in zip(MAP_PLANES, TOWER_SPECS)])
+        fused = sum(d for _, _, d in TOWER_SPECS) + 256
+        self.scalars = nn.Sequential(nn.Linear(N_SCALARS, 256), nn.ReLU(inplace=True), nn.Linear(256, 256), nn.ReLU(inplace=True))
+        self.trunk = nn.Sequential(nn.Linear(fused, hidden), nn.ReLU(inplace=True), nn.Linear(hidden, hidden), nn.ReLU(inplace=True))
+        self.pi = nn.Linear(hidden, N_ACTIONS)
+        self.v = nn.Linear(hidden, 1)
+        for m in self.modules():
+            if isinstance(m, (nn.Conv2d, nn.Linear)):
+                nn.init.orthogonal_(m.weight, gain=2**0.5)
+                nn.init.zeros_(m.bias)
+        nn.init.orthogonal_(self.pi.weight, gain=0.01)
+        nn.init.orthogonal_(self.v.weight, gain=1.0)
+
+    def act(self, maps, feats, greedy: bool = False):
+        """maps: (B, 2*N_MAPS, G, G) uint8, current maps then the previous frame's; feats: (B, N_SCALARS +
+        N_ACTIONS) float32 whose last N_ACTIONS columns are the action mask. Returns (action, logp, value)."""
+        logits, value = self(maps, feats[:, :N_SCALARS], feats[:, N_SCALARS:] > 0.5)
+        return _pick(logits, value, greedy)
+
+    def forward(self, maps, scalars, mask=None):
+        parts = []
+        for m in range(N_MAPS):
+            cur = self.unpack[m](maps[:, m])
+            prev = self.unpack[m](maps[:, N_MAPS + m]) if maps.shape[1] >= 2 * N_MAPS else cur
+            parts.append(self.towers[m](torch.cat([cur, prev], 1)))
+        parts.append(self.scalars(scalars))
+        h = self.trunk(torch.cat(parts, 1))
+        logits = self.pi(h)
+        if mask is not None:
+            logits = logits.masked_fill(~mask, -1e8)
+        return logits, self.v(h).squeeze(1)
+
+
+def _pick(logits, value, greedy):
+    if greedy:
+        a = logits.argmax(1)
+    else:
+        gumbel = -torch.log(-torch.log(torch.rand_like(logits).clamp_(1e-9, 1.0)))
+        a = (logits + gumbel).argmax(1)
+    logp = torch.log_softmax(logits, 1).gather(1, a[:, None]).squeeze(1)
+    return a, logp, value
+
+
+def make_net(version: int = 2) -> nn.Module:
+    return PolicyNet() if version == 2 else PolicyNetV1()
+
+
+def net_version(state_dict) -> int:
+    """Which network a checkpoint's weights belong to."""
+    return 2 if any(k.startswith("towers.") for k in state_dict) else 1

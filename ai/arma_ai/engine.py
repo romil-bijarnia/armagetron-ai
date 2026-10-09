@@ -93,9 +93,24 @@ class SlotStep:
     flags: int
     kills: int
     mask: int
-    local: np.ndarray | None = None
-    globl: np.ndarray | None = None
+    maps: np.ndarray | None = None  # (N_MAPS, GRID, GRID) uint8: local, close, global, territory
     scalars: np.ndarray | None = None
+
+    @property
+    def local(self) -> np.ndarray | None:
+        return None if self.maps is None else self.maps[0]
+
+    @property
+    def close(self) -> np.ndarray | None:
+        return None if self.maps is None else self.maps[1]
+
+    @property
+    def globl(self) -> np.ndarray | None:
+        return None if self.maps is None else self.maps[2]
+
+    @property
+    def territory(self) -> np.ndarray | None:
+        return None if self.maps is None else self.maps[3]
 
     @property
     def alive(self) -> bool:
@@ -140,10 +155,8 @@ def _parse_step(engine: int, payload: bytes) -> Step:
         off += P.SLOT_HEAD.size
         s = SlotStep(flags, kills, mask)
         if flags & P.FLAG_NEEDS_ACTION:
-            s.local = np.frombuffer(payload, np.uint8, g2, off).reshape(P.GRID, P.GRID)
-            off += g2
-            s.globl = np.frombuffer(payload, np.uint8, g2, off).reshape(P.GRID, P.GRID)
-            off += g2
+            s.maps = np.frombuffer(payload, np.uint8, g2 * P.N_MAPS, off).reshape(P.N_MAPS, P.GRID, P.GRID)
+            off += g2 * P.N_MAPS
             s.scalars = np.frombuffer(payload, np.float32, P.N_SCALARS, off)
             off += P.N_SCALARS * 4
         slots.append(s)
@@ -216,9 +229,10 @@ class EnginePool:
             mtype, payload = self._read_msg(conn)
             if mtype != P.MSG_HELLO:
                 raise RuntimeError(f"expected HELLO, got message type {mtype}")
-            engine_id, proto, n_slots, grid, nl, ng, ns, cell, interval = P.HELLO.unpack(payload)
-            if (proto, grid, nl, ng, ns) != (P.PROTOCOL_VERSION, P.GRID, P.N_LOCAL_PLANES, P.N_GLOBAL_PLANES, P.N_SCALARS):
-                raise RuntimeError(f"engine {engine_id} speaks an incompatible protocol: {(proto, grid, nl, ng, ns)}")
+            engine_id, proto, n_slots, grid, nl, ng, ns, nmaps, cell, interval = P.HELLO.unpack(payload)
+            if (proto, grid, nl, ng, ns, nmaps) != (P.PROTOCOL_VERSION, P.GRID, P.N_LOCAL_PLANES, P.N_GLOBAL_PLANES,
+                                                     P.N_SCALARS, P.N_MAPS):
+                raise RuntimeError(f"engine {engine_id} speaks an incompatible protocol: {(proto, grid, nl, ng, ns, nmaps)}")
             if engine_id not in pending:
                 raise RuntimeError(f"unexpected HELLO from engine {engine_id}")
             if n_slots != self.arenas[engine_id].slots:

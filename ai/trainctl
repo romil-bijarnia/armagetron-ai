@@ -22,8 +22,8 @@ cd "$(dirname "$self")" || exit 1
 cmd="${1:-help}"
 [ $# -gt 0 ] && shift
 
-# the run folder is the value after --run, runs/main by default
-run=runs/main
+# the run folder is the value after --run, runs/v2 by default
+run=runs/v2
 prev=""
 for a in "$@"; do
     [ "$prev" = "--run" ] && run="$a"
