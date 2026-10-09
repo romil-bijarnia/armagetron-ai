@@ -79,6 +79,7 @@ def server_settings(args, sock_path: str) -> dict[str, str]:
             f"{prefix}AUTO_IQ": "0",
             f"{prefix}SIZE_FACTOR": f"{args.size:g}",
             f"{prefix}SPEED_FACTOR": f"{args.speed:g}",
+            f"{prefix}WALLS_LENGTH": f"{args.walls:g}",
             f"{prefix}GAME_TYPE": "1",
             f"{prefix}FINISH_TYPE": "3" if args.watch else "1",
             # you plus one team per AI, each team exactly one cycle
@@ -98,6 +99,7 @@ def main() -> None:
     ap.add_argument("--builtin", type=int, default=0, help="extra built-in AI opponents")
     ap.add_argument("--size", type=float, default=-3, help="arena SIZE_FACTOR (-3 is the single-player default)")
     ap.add_argument("--speed", type=float, default=0, help="SPEED_FACTOR")
+    ap.add_argument("--walls", type=float, default=700, help="trail length in metres (-1 = endless)")
     ap.add_argument("--port", type=int, default=4534)
     ap.add_argument("--sample", action="store_true", help="sample moves instead of always taking the best one")
     ap.add_argument("--watch", action="store_true", help="run rounds without waiting for a human (testing)")

@@ -13,20 +13,29 @@
     --hair: rgba(255, 255, 255, 0.08);
     --accent: #339cff;
   }
+  [hidden] { display: none !important; }
   html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text); overflow: hidden;
     font: 16px/1.4 -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", sans-serif; }
   canvas#scene { position: fixed; inset: 0; width: 100vw; height: 100vh; display: block; }
   .top { position: fixed; left: 28px; top: 22px; pointer-events: none; }
   h1 { font-size: 21px; font-weight: 500; margin: 0; letter-spacing: 0.01em; }
-  #status { color: var(--muted); font-size: 14px; margin-top: 4px; }
+  #status { color: var(--muted); font-size: 14px; margin-top: 4px; text-shadow: 0 0 6px #000; }
+  h1 { text-shadow: 0 0 8px #000; }
   #status .flash { color: var(--accent); }
   .toggles { position: fixed; right: 28px; top: 22px; display: flex; gap: 8px; align-items: center; }
-  .toggles button { background: transparent; color: var(--muted); border: 1px solid var(--hair);
+  .toggles button { background: rgba(0, 0, 0, 0.55); backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px);
+    color: var(--muted); border: 1px solid var(--hair);
     border-radius: 999px; padding: 6px 15px; font: inherit; font-size: 14px; cursor: pointer;
     font-variant-numeric: tabular-nums; }
   .toggles button.on { color: var(--text); border-color: rgba(255, 255, 255, 0.28); }
   .toggles button:disabled { opacity: 0.35; cursor: default; }
   .toggles .sep { width: 1px; height: 18px; background: rgba(255, 255, 255, 0.14); margin: 0 6px; }
+  #train { position: fixed; right: 28px; top: 78px; width: 236px; text-shadow: 0 0 6px #000; }
+  #trainHead { color: var(--muted); font-size: 14px; height: 31px; display: flex; align-items: center; }
+  .trow { display: flex; align-items: center; gap: 10px; height: 31px; font-size: 14px; color: var(--muted); }
+  .trow .k { flex: 1; white-space: nowrap; }
+  .trow .v { color: var(--text); font-variant-numeric: tabular-nums; text-align: right; white-space: nowrap; }
+  .trow canvas { width: 56px; height: 16px; flex: none; }
   #moves { position: fixed; right: 28px; bottom: 26px; width: 250px; }
   .row { display: flex; align-items: center; gap: 12px; height: 31px; color: var(--muted); font-size: 15px; }
   .row .name { width: 72px; }
@@ -44,7 +53,7 @@
   #legend i { display: inline-block; width: 7px; height: 7px; border-radius: 50%; margin: 0 5px 1px 0; }
   #legend span { margin-right: 12px; }
   .label { position: fixed; transform: translate(-50%, 0); color: var(--faint); font-size: 12px;
-    white-space: nowrap; pointer-events: none; }
+    white-space: nowrap; pointer-events: none; text-shadow: 0 0 6px #000, 0 0 2px #000; }
   .label.left { transform: translate(0, -50%); }
   #tip { position: fixed; display: none; pointer-events: none; background: rgba(0, 0, 0, 0.82);
     border: 1px solid rgba(255, 255, 255, 0.14); border-radius: 8px; padding: 6px 10px; font-size: 13px;
@@ -77,7 +86,9 @@
   <button id="tLines" class="on">Lines</button>
   <button id="tGlow" class="on">Glow</button>
   <button id="tFlat">Flat</button>
+  <button id="tStats" class="on">Stats</button>
 </div>
+<div id="train" hidden><div id="trainHead"></div><div id="trainRows"></div></div>
 <div id="arenaBox">
   <canvas id="arena"></canvas>
   <div id="result"></div>
@@ -86,7 +97,7 @@
 <div id="moves"></div>
 <div id="labels"></div>
 <div id="tip"></div>
-<div id="keys">space pause · → step · [ ] speed · drag to turn · hover a neuron</div>
+<div id="keys">space pause · → step · [ ] speed · - = brightness · drag to turn · hover a neuron</div>
 <div id="wait">waiting for the brain</div>
 
 <script type="module">
@@ -170,7 +181,7 @@ function layoutLayer(L, rand) {
 // ------------------------------------------------------------------ scene
 const canvas = document.getElementById('scene');
 const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, powerPreference: 'high-performance' });
-const DPR = Math.min(window.devicePixelRatio, 1.5);  // Retina at full scale is wasted on soft glows
+const DPR = Math.min(window.devicePixelRatio, 2);
 renderer.setPixelRatio(DPR);
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x000000);
@@ -185,7 +196,12 @@ controls.autoRotateSpeed = 0.35;
 controls.minDistance = 6;
 controls.maxDistance = 80;
 
-const composer = new EffectComposer(renderer);
+// highlights roll off instead of clipping to white; - and = adjust the exposure
+renderer.toneMapping = THREE.AgXToneMapping;
+renderer.toneMappingExposure = 1.0;
+// the post-processing target needs its own multisampling, or every line turns jagged
+const target4x = new THREE.WebGLRenderTarget(1, 1, { type: THREE.HalfFloatType, samples: 4 });
+const composer = new EffectComposer(renderer, target4x);
 composer.setPixelRatio(DPR);
 composer.addPass(new RenderPass(scene, camera));
 const bloom = new UnrealBloomPass(new THREE.Vector2(1, 1), 0.42, 0.4, 0.5);
@@ -193,26 +209,29 @@ composer.addPass(bloom);
 composer.addPass(new OutputPass());
 
 const pointMaterial = new THREE.ShaderMaterial({
-  uniforms: { uScale: { value: 1000 } },
+  uniforms: { uScale: { value: 1000 }, uMin: { value: 2.0 }, uMax: { value: 12.0 } },
   vertexShader: `
     attribute float act; attribute float size; attribute vec3 tint;
-    uniform float uScale; varying float vA; varying vec3 vT;
+    uniform float uScale, uMin, uMax; varying float vA; varying vec3 vT;
     void main() {
       vA = act; vT = tint;
       vec4 mv = modelViewMatrix * vec4(position, 1.0);
-      gl_PointSize = max(1.6, size * (0.8 + 1.4 * act) * uScale / -mv.z);
+      gl_PointSize = clamp(size * (0.8 + 1.3 * act) * uScale / -mv.z, uMin, uMax);
       gl_Position = projectionMatrix * mv;
     }`,
   fragmentShader: `
     varying float vA; varying vec3 vT;
     void main() {
-      vec2 c = gl_PointCoord - 0.5; float r = dot(c, c);
-      if (r > 0.25) discard;
-      float soft = smoothstep(0.25, 0.0, r);
+      float d = length(gl_PointCoord - 0.5) * 2.0;        // 0 at the centre, 1 at the rim
+      if (d > 1.0) discard;
+      float e = fwidth(d) * 1.2;                            // one pixel of antialiasing
+      float core = 1.0 - smoothstep(0.5 - e, 0.5 + e, d);  // a crisp dot
+      float halo = (1.0 - d) * (1.0 - d) * 0.5;            // and a thin soft skirt around it
+      float shape = max(core, halo);
       // nearly nothing when silent: a slab stacks dozens of filters on one pixel, and the
       // picture must come from the neurons that fire, not from the sheer number of them
-      float lit = vA * vA;
-      gl_FragColor = vec4(vT * (0.02 + 0.98 * lit), soft * (0.03 + 0.97 * lit));
+      float lit = pow(vA, 1.6);
+      gl_FragColor = vec4(vT * (0.03 + 0.87 * lit), shape * (0.05 + 0.95 * lit));
     }`,
   transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
 });
@@ -255,6 +274,7 @@ function buildPoints(layers) {
   if (points) { scene.remove(points); points.geometry.dispose(); }
   points = new THREE.Points(geo, pointMaterial);
   points.frustumCulled = false;
+  points.renderOrder = 1;  // on top of the lines
   scene.add(points);
   shown = new Float32Array(total);
   target = new Float32Array(total);
@@ -285,6 +305,7 @@ function buildLines(topo) {
   if (lines) { scene.remove(lines); lines.geometry.dispose(); }
   lines = new THREE.LineSegments(geo, lineMaterial);
   lines.frustumCulled = false;
+  lines.renderOrder = 0;
   lines.visible = visible;
   scene.add(lines);
   T.lineSrc = src; T.lineW = wt; T.lineDW = dwt; T.nLines = n;
@@ -296,7 +317,7 @@ function updateLines() {
   const col = lines.geometry.attributes.color.array, n = T.nLines;
   for (let k = 0; k < n; k++) {
     const w = T.lineW[k], a = shown[T.lineSrc[k]];
-    const white = Math.min(1, w * 0.005 + w * a * a * 0.3);
+    const white = Math.min(1, w * 0.004 + w * a * a * 0.22);
     const blue = T.lineDW[k] * flash * 0.5;
     const r = white + blue * ACCENT.r, g = white + blue * ACCENT.g, b = white + blue * ACCENT.b;
     col[6 * k] = col[6 * k + 3] = r; col[6 * k + 1] = col[6 * k + 4] = g; col[6 * k + 2] = col[6 * k + 5] = b;
@@ -331,7 +352,10 @@ function buildLabels(layers) {
 const tmp = new THREE.Vector3();
 function placeLabels() {
   if (!T || !T.labels) return;
-  const w = window.innerWidth, h = window.innerHeight, placed = [];
+  const w = window.innerWidth, h = window.innerHeight;
+  // the panels come first, so no label is ever drawn across them
+  const placed = [...document.querySelectorAll('.top, .toggles, #train:not([hidden]), #arenaBox, #moves')]
+    .map(el => el.getBoundingClientRect()).map(b => ({ x0: b.left, x1: b.right, y0: b.top, y1: b.bottom }));
   const items = T.labels.map(l => {
     tmp.copy(l.at).project(camera);
     return { l, x: (tmp.x * 0.5 + 0.5) * w, y: (-tmp.y * 0.5 + 0.5) * h, z: tmp.z };
@@ -479,6 +503,79 @@ function showStatus() {
     : `${head} · update ${f.update}`;
 }
 
+// ------------------------------------------------------------------ training stats
+const trainBox = document.getElementById('train'), trainHead = document.getElementById('trainHead'),
+      trainRows = document.getElementById('trainRows');
+const pct = v => v == null ? '–' : `${Math.round(v * 100)}%`;
+const num = (v, d) => v == null ? '–' : (+v).toFixed(d);
+const TRAIN_ROWS = [
+  { key: 'win_vs_ai_small', label: 'wins vs bot', range: [0, 1],
+    value: m => m.win_vs_ai_std == null ? pct(m.win_vs_ai_small) : `${pct(m.win_vs_ai_small)} · ${pct(m.win_vs_ai_std)}` },
+  { key: 'ep_len', label: 'episode', value: m => m.ep_len == null ? '–' : `${Math.round(m.ep_len)} steps` },
+  { key: 'ent', label: 'entropy', value: m => num(m.ent, 3) },
+  { key: 'kl', label: 'KL', value: m => num(m.kl, 4) },
+  { key: 'clipfrac', label: 'clipped', value: m => pct(m.clipfrac) },
+  { key: 'pg', label: 'policy loss', value: m => num(m.pg, 4) },
+  { key: 'vf', label: 'value loss', value: m => num(m.vf, 4) },
+  { key: 'value_explained', label: 'value explains', range: [0, 1], value: m => pct(m.value_explained) },
+  { key: 'grad_norm', label: 'grad norm', value: m => num(m.grad_norm, 3), optional: true },
+  { key: 'lr', label: 'learning rate', value: m => m.lr == null ? '–' : (+m.lr).toExponential(1), optional: true },
+  { key: 'sps', label: 'speed', value: m => m.sps == null ? '–' : `${Math.round(m.sps).toLocaleString()} steps/s` },
+];
+let metrics = null, statsOn = true;
+
+function spark(cv, vals, range) {
+  const dpr = Math.min(window.devicePixelRatio, 2), W = 56, H = 16;
+  if (cv.width !== W * dpr) { cv.width = W * dpr; cv.height = H * dpr; }
+  const c = cv.getContext('2d');
+  c.clearRect(0, 0, cv.width, cv.height);
+  const pts = vals.map((v, i) => [i, v]).filter(p => p[1] != null && isFinite(p[1]));
+  if (pts.length < 2) return;
+  let lo = range ? range[0] : Math.min(...pts.map(p => p[1])), hi = range ? range[1] : Math.max(...pts.map(p => p[1]));
+  if (hi - lo < 1e-9) hi = lo + 1;
+  const n = Math.max(vals.length - 1, 1);
+  const X = i => (dpr + i / n * (W - 2) * dpr), Y = v => (H - 1 - (v - lo) / (hi - lo) * (H - 2)) * dpr;
+  c.strokeStyle = 'rgba(255,255,255,0.4)';
+  c.lineWidth = dpr;
+  c.lineJoin = 'round';
+  c.beginPath();
+  pts.forEach(([i, v], j) => j ? c.lineTo(X(i), Y(v)) : c.moveTo(X(i), Y(v)));
+  c.stroke();
+  const [i, v] = pts[pts.length - 1];
+  c.fillStyle = '#fff';
+  c.beginPath(); c.arc(X(i), Y(v), 1.6 * dpr, 0, Math.PI * 2); c.fill();
+}
+
+function onMetrics(m) {
+  metrics = m;
+  if (!trainRows.children.length) {
+    trainRows.innerHTML = TRAIN_ROWS.map(r =>
+      `<div class="trow" data-key="${r.key}"><span class="k">${r.label}</span><span class="v"></span><canvas></canvas></div>`).join('');
+  }
+  showMetrics();
+}
+function showMetrics() {
+  if (!metrics) return;
+  const { last, series } = metrics;
+  const training = last.time && (Date.now() / 1000 - last.time) < 180;
+  const steps = last.steps >= 1e6 ? `${(last.steps / 1e6).toFixed(1)}M` : `${Math.round(last.steps / 1e3)}k`;
+  trainHead.textContent = `${training ? 'Training' : 'Last run'} · update ${last.update} · ${steps} steps`;
+  TRAIN_ROWS.forEach((r, i) => {
+    const row = trainRows.children[i];
+    row.hidden = r.optional && last[r.key] == null;
+    if (row.hidden) return;
+    row.querySelector('.v').textContent = r.value(last);
+    spark(row.querySelector('canvas'), series[r.key] || [], r.range);
+  });
+  setStatsVisible();
+}
+function setStatsVisible() {
+  const show = statsOn && !!metrics;
+  if (trainBox.hidden === !show) return;
+  trainBox.hidden = !show;
+  applyViewOffset();
+}
+
 function onState(s) {
   state = s;
   bPause.textContent = s.paused ? 'Play' : 'Pause';
@@ -493,6 +590,7 @@ function connect() {
   es.addEventListener('topology', e => onTopology(JSON.parse(e.data)));
   es.addEventListener('frame', e => onFrame(JSON.parse(e.data)));
   es.addEventListener('state', e => onState(JSON.parse(e.data)));
+  es.addEventListener('metrics', e => onMetrics(JSON.parse(e.data)));
   es.onerror = () => { statusEl.textContent = 'reconnecting'; };
 }
 connect();
@@ -553,7 +651,9 @@ function pick(now) {
 const bPause = document.getElementById('bPause'), bStep = document.getElementById('bStep'),
       bSpeed = document.getElementById('bSpeed');
 const tRotate = document.getElementById('tRotate'), tLines = document.getElementById('tLines'),
-      tGlow = document.getElementById('tGlow'), tFlat = document.getElementById('tFlat');
+      tGlow = document.getElementById('tGlow'), tFlat = document.getElementById('tFlat'),
+      tStats = document.getElementById('tStats');
+tStats.onclick = () => { statsOn = !statsOn; tStats.classList.toggle('on', statsOn); setStatsVisible(); };
 let flat = false, fly = null;
 const post = body => fetch('/control', { method: 'POST', headers: { 'Content-Type': 'application/json' },
                                          body: JSON.stringify(body) }).catch(() => {});
@@ -572,7 +672,13 @@ window.addEventListener('keydown', e => {
   else if (e.code === 'ArrowRight') { e.preventDefault(); post({ step: 1 }); }
   else if (e.key === '[') post({ speed: speedStep(-1) });
   else if (e.key === ']') post({ speed: speedStep(1) });
+  else if (e.key === '-' || e.key === '=' || e.key === '+') {
+    renderer.toneMappingExposure = Math.min(2.5, Math.max(0.3, renderer.toneMappingExposure * (e.key === '-' ? 0.85 : 1 / 0.85)));
+    statusEl.textContent = `brightness ${Math.round(renderer.toneMappingExposure * 100)}%`;
+    clearTimeout(window.__brTimer); window.__brTimer = setTimeout(showStatus, 1200);
+  }
 });
+document.querySelectorAll('.toggles button').forEach(b => b.addEventListener('click', e => e.currentTarget.blur()));
 
 function flyTo(offset) {
   fly = { from: camera.position.clone(), to: CENTER.clone().add(offset), t: 0 };
@@ -587,13 +693,22 @@ tFlat.onclick = () => {
   flyTo(flat ? VIEW_FLAT : VIEW_ANGLED);
 };
 
+function applyViewOffset() {
+  // with the stats panel up, the picture slides left to make room for it
+  const w = window.innerWidth, h = window.innerHeight, S = trainBox.hidden ? 0 : 300;
+  camera.aspect = (w + S) / h;
+  camera.zoom = trainBox.hidden ? 1 : 0.9;   // and steps back a little
+  camera.setViewOffset(w + S, h, S, 0, w, h);
+  camera.updateProjectionMatrix();
+}
 function resize() {
   const w = window.innerWidth, h = window.innerHeight;
   renderer.setSize(w, h, false);
   composer.setSize(w, h);
-  camera.aspect = w / h;
-  camera.updateProjectionMatrix();
+  applyViewOffset();
   pointMaterial.uniforms.uScale.value = renderer.domElement.height / (2 * Math.tan(THREE.MathUtils.degToRad(camera.fov / 2)));
+  pointMaterial.uniforms.uMin.value = 1.3 * DPR;
+  pointMaterial.uniforms.uMax.value = 6.5 * DPR;
 }
 window.addEventListener('resize', resize);
 resize();

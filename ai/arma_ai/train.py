@@ -473,7 +473,7 @@ class Learner:
         adv_t, ret_t = T(adv), T(ret)
         adv_t = (adv_t - adv_t.mean()) / (adv_t.std() + 1e-8)
         m = len(train)
-        sums = torch.zeros(5, device=d)
+        sums = torch.zeros(6, device=d)
         count = 0
         for epoch in range(cfg.epochs):
             perm = torch.randperm(m, device=d)
@@ -493,19 +493,19 @@ class Learner:
                 loss = pg + cfg.vf_coef * vl - cfg.ent_coef * ent
                 self.opt.zero_grad(set_to_none=True)
                 loss.backward()
-                torch.nn.utils.clip_grad_norm_(self.net.parameters(), cfg.max_grad_norm)
+                grad_norm = torch.nn.utils.clip_grad_norm_(self.net.parameters(), cfg.max_grad_norm)
                 self.opt.step()
                 with torch.no_grad():
                     kl = ((ratio - 1) - torch.log(ratio)).mean()
                     clipfrac = ((ratio - 1).abs() > cfg.clip).float().mean()
-                    sums += torch.stack([pg.detach(), vl.detach(), ent.detach(), kl, clipfrac])
+                    sums += torch.stack([pg.detach(), vl.detach(), ent.detach(), kl, clipfrac, grad_norm.detach()])
                     epoch_kl += kl
                 count += 1
                 batches += 1
             # one GPU sync per epoch: stop early if the policy moved too far
             if (epoch_kl / max(batches, 1)).item() > cfg.target_kl:
                 break
-        out = dict(zip(("pg", "vf", "ent", "kl", "clipfrac"), (sums / max(count, 1)).tolist()))
+        out = dict(zip(("pg", "vf", "ent", "kl", "clipfrac", "grad_norm"), (sums / max(count, 1)).tolist()))
         out["samples"] = m
         out["value_explained"] = explained
         return out
@@ -547,6 +547,7 @@ class Learner:
                 rec = {"update": self.update, "steps": self.total_steps, "sps": round(sps),
                        "collect_s": round(stats["collect_s"], 2), "learn_s": round(t2 - t1, 2),
                        "policy_lag": self.update - 1 - stats["policy_update"],
+                       "lr": self.opt.param_groups[0]["lr"],
                        "ep_len": float(np.mean(self.lengths)) if self.lengths else 0.0,
                        **{k: round(v, 5) for k, v in out.items()},
                        **{f"win_{k}": round(float(np.mean(v)), 3) for k, v in self.results.items() if v},

@@ -819,6 +819,10 @@ int main(int argc,char **argv){
         tLocale::Load("languages.txt");
 
         eLadderLogInitializer ladderlog;
+        // the cycle wall settings (CYCLE_WALLS_LENGTH and friends) are registered here, so
+        // that the configuration files loaded next can set them; registering them afterwards
+        // made the files' values fail with "unknown command" and left the walls endless
+        gCycle::PrivateSettings();
         st_LoadConfig();
 
         // migrate user configuration from previous versions
@@ -854,8 +858,6 @@ int main(int argc,char **argv){
 
         if ( commandLine.Execute() )
         {
-            gCycle::PrivateSettings();
-
             {
                 std::ifstream t;
 

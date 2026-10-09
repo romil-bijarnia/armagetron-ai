@@ -288,7 +288,7 @@ class Hub:
     def __init__(self, speed: float):
         self.clients: set[queue.Queue] = set()
         self.lock = threading.Lock()
-        self.topology: bytes | None = None
+        self.sticky: dict[str, bytes] = {}  # topology and metrics: a new page gets the latest of each
         self.paused = False
         self.steps = 0  # decisions still to let through while paused
         self.speed = speed
@@ -330,8 +330,8 @@ class Hub:
     # ------------------------------------------------------------------ events
     def publish(self, event: str, data: str) -> None:
         msg = f"event: {event}\ndata: {data}\n\n".encode()
-        if event == "topology":
-            self.topology = msg
+        if event in ("topology", "metrics"):
+            self.sticky[event] = msg
         self._send(msg)
 
     def _send(self, msg: bytes) -> None:
@@ -372,7 +372,7 @@ class Hub:
                     q: queue.Queue = queue.Queue(maxsize=6)
                     with hub.lock:
                         hub.clients.add(q)
-                        first = (hub.topology or b"") + hub.state_msg
+                        first = b"".join(hub.sticky.values()) + hub.state_msg
                     try:
                         self.wfile.write(first)
                         self.wfile.flush()
@@ -421,6 +421,50 @@ def serve(hub: Hub, port: int) -> tuple[ThreadingHTTPServer, int]:
 
 # ----------------------------------------------------------------------------------------------- run
 
+class Metrics:
+    """The trainer's metrics.jsonl (one row per update), re-read whenever it grows."""
+
+    KEEP = 150  # updates of history the page gets for its sparklines
+    KEYS = ("update", "steps", "sps", "lr", "pg", "vf", "ent", "kl", "clipfrac", "grad_norm",
+            "value_explained", "ep_len", "policy_lag", "collect_s", "learn_s", "time")
+
+    def __init__(self, path: Path):
+        self.path = path
+        self.size = -1
+        self.rows: list[dict] = []
+
+    def poll(self) -> bool:
+        """Re-read the tail of the file if it changed; say whether there is anything to show."""
+        try:
+            size = self.path.stat().st_size
+        except FileNotFoundError:
+            return False
+        if size == self.size:
+            return False
+        self.size = size
+        tail = 300_000
+        try:
+            with open(self.path, "rb") as f:
+                f.seek(max(0, size - tail))
+                lines = f.read().decode(errors="replace").split("\n")
+        except OSError:
+            return False
+        rows = []
+        for line in lines[1 if size > tail else 0:]:  # the first line of a cut tail is partial
+            try:
+                rows.append(json.loads(line))
+            except ValueError:
+                continue
+        self.rows = rows[-self.KEEP:]
+        return bool(self.rows)
+
+    def payload(self) -> str:
+        last = self.rows[-1]
+        wins = sorted(k for k in last if k.startswith("win_"))
+        series = {k: [r.get(k) for r in self.rows] for k in (*self.KEYS, *wins) if k in last}
+        return json.dumps({"last": last, "series": series}, separators=(",", ":"))
+
+
 class Weights:
     """The network, reloaded whenever its checkpoint file changes (every update while training)."""
 
@@ -461,6 +505,7 @@ def main() -> None:
     ap.add_argument("--bots", type=int, default=1, help="built-in AI opponents")
     ap.add_argument("--size", type=float, default=-2, help="arena SIZE_FACTOR (-3 small, 0 full-size)")
     ap.add_argument("--speed", type=float, default=1.0, help="playback speed, 1 = real time")
+    ap.add_argument("--walls", type=float, default=700, help="trail length in metres (-1 = endless)")
     ap.add_argument("--checkpoint", type=Path, default=None,
                     help="weights to show (default: runs/main/actor.pt, which training rewrites every update)")
     ap.add_argument("--greedy", action="store_true", help="always take the top move")
@@ -473,6 +518,8 @@ def main() -> None:
     weights = Weights(path)
     if weights.poll() is None:
         raise SystemExit(f"no checkpoint at {path}")
+    run_dir = path.parent.parent if path.parent.name == "pool" else path.parent
+    metrics = Metrics(run_dir / "metrics.jsonl")
     net = weights.net
     rng = np.random.default_rng(0)
     layers = layer_table(net)
@@ -485,19 +532,23 @@ def main() -> None:
             "update": weights.update, "checkpoint": str(path.relative_to(PROJECT) if path.is_relative_to(PROJECT)
                                                         else path)}))
 
-    def follow_weights() -> None:
+    def follow_training() -> None:
         old = weights.poll()
         if old is not None:
             publish_topology(old)
+        if metrics.poll():
+            hub.publish("metrics", metrics.payload())
 
     publish_topology(None)
+    if metrics.poll():
+        hub.publish("metrics", metrics.payload())
     srv, port = serve(hub, args.port)
     url = f"http://127.0.0.1:{port}/"
     print(f"brain: {url}  (update {weights.update}, {path.name}); Ctrl-C quits", flush=True)
     if not args.no_open:
         webbrowser.open(url)
 
-    arena = ArenaConfig(slots=args.ais, builtin_ais=args.bots, size_factor=args.size, extra={
+    arena = ArenaConfig(slots=args.ais, builtin_ais=args.bots, size_factor=args.size, walls_length=args.walls, extra={
         "NEURAL_SPECTATE": "1", "NEURAL_END_ROUND_WITHOUT_NEURAL": "0", "NEURAL_CONTROL_AFTER_ROUND": "1"})
     scales = Scales()
     m = Match()
@@ -512,7 +563,7 @@ def main() -> None:
                 now = time.monotonic()
                 if now - last_poll > 1.0:
                     last_poll = now
-                    follow_weights()
+                    follow_training()
                 mtype, payload = pool._read_msg(conn)
                 if mtype != P.MSG_WORLD:
                     continue
@@ -557,7 +608,7 @@ def main() -> None:
                                 hub.frame_shown()
                 # paused: hold the match here (the engine waits for its actions); a step lets it run
                 # until the next decision has been shown
-                if hub.wait_if_paused(follow_weights) or hub.speed != speed:
+                if hub.wait_if_paused(follow_training) or hub.speed != speed:
                     speed = hub.speed
                     clock = (time.monotonic(), m.time)
                 if not m.over:

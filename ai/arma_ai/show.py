@@ -235,6 +235,7 @@ def main() -> None:
     ap.add_argument("--bots", type=int, default=0, help="built-in AI opponents")
     ap.add_argument("--size", type=float, default=-2, help="arena SIZE_FACTOR (-3 small, 0 full-size)")
     ap.add_argument("--speed", type=float, default=1.0, help="playback speed, 1 = real time")
+    ap.add_argument("--walls", type=float, default=700, help="trail length in metres (-1 = endless)")
     ap.add_argument("--checkpoint", type=Path, default=PROJECT / "runs/main/latest.pt")
     ap.add_argument("--greedy", action="store_true",
                     help="always take the top move (copies of the AI then tend to mirror each other)")
@@ -245,7 +246,7 @@ def main() -> None:
     args = ap.parse_args()
 
     brain = Brain(args.checkpoint, sample=not args.greedy)
-    arena = ArenaConfig(slots=args.ais, builtin_ais=args.bots, size_factor=args.size, extra={
+    arena = ArenaConfig(slots=args.ais, builtin_ais=args.bots, size_factor=args.size, walls_length=args.walls, extra={
         "NEURAL_SPECTATE": "1", "NEURAL_END_ROUND_WITHOUT_NEURAL": "0", "NEURAL_CONTROL_AFTER_ROUND": "1"})
     console = Console(width=args.width, height=args.height)
     m = Match()
