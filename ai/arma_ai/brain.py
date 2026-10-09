@@ -469,7 +469,8 @@ class Metrics:
 
     KEEP = 150  # updates of history the page gets for its sparklines
     KEYS = ("update", "steps", "sps", "lr", "pg", "vf", "ent", "kl", "clipfrac", "grad_norm",
-            "value_explained", "ep_len", "policy_lag", "collect_s", "learn_s", "time")
+            "value_explained", "ep_len", "policy_lag", "collect_s", "learn_s", "time",
+            "aux", "search_kl", "evals_s", "replay", "games")
 
     def __init__(self, path: Path):
         self.path = path

@@ -18,11 +18,14 @@ arma-train = "arma_ai.train:main"
 arma-eval = "arma_ai.evaluate:main"
 arma-play = "arma_ai.play:main"
 arma-league = "arma_ai.league:main"
+arma-ladder = "arma_ai.ladder:main"
 arma-smoke = "arma_ai.smoke:main"
 arma-dash = "arma_ai.dashboard:main"
 arma-show = "arma_ai.show:main"
 arma-brain = "arma_ai.brain:main"
 arma-export = "arma_ai.export:main"
+arma-teach = "arma_ai.teach:main"
+arma-record = "arma_ai.record:main"
 
 [dependency-groups]
 dev = ["pytest>=8,<10"]

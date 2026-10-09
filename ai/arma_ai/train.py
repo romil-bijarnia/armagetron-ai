@@ -44,7 +44,7 @@ PROJECT = Path(__file__).resolve().parent.parent
 
 @dataclass
 class Config:
-    run: str = "runs/v2"
+    run: str = "runs/ppo"
     engines: int = 24
     rollout: int = 32768  # learner transitions per PPO update
     epochs: int = 2  # data is cheap with async collection; fresher data beats more reuse

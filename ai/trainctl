@@ -1,9 +1,13 @@
 #!/bin/sh
 # trainctl: start, stop and watch Armagetron AI training from any terminal.
 #
-#   ./trainctl start [flags]    train in the background with the Mac kept awake and open the brain page
-#                               in the browser; restarts itself from the last checkpoint if it crashes
-#   ./trainctl gentle [flags]   same, but 6 engines at low priority so the laptop stays usable
+#   ./trainctl start [flags]    train with the teacher (self-play with search in the simulator, a league
+#                               of past selves and an exploiter) in the background, Mac kept awake, and
+#                               open the brain page; restarts itself from the last checkpoint if it crashes
+#   ./trainctl gentle [flags]   same, but fewer rounds at once and at low priority so the laptop stays usable
+#   ./trainctl ppo [flags]      the old trainer instead (PPO against the real engine), in runs/ppo
+#   ./trainctl ladder [flags]   rate the network in the real game: duels against the built-in AI, the old
+#                               brain and the league pool, fitted into Elo ratings (runs/v2/ratings.json)
 #   ./trainctl stop             stop training (it saves a checkpoint on the way out)
 #   ./trainctl status           is it running, latest progress, when the last checkpoint was saved
 #   ./trainctl watch            terminal charts of how training is going (Ctrl-C closes them, not training)
@@ -12,7 +16,7 @@
 #                               and single-step; follows the newest weights while training runs
 #   ./trainctl log              follow the training log (Ctrl-C stops watching, not training)
 #
-# Extra flags go straight to arma-train, e.g. ./trainctl start --lr 1e-4 or --run runs/exp1.
+# Extra flags go straight to the trainer, e.g. ./trainctl start --lr 1e-4 or --run runs/exp1.
 # Checkpoints are saved automatically every few minutes and whenever training stops.
 
 set -u
@@ -22,8 +26,9 @@ cd "$(dirname "$self")" || exit 1
 cmd="${1:-help}"
 [ $# -gt 0 ] && shift
 
-# the run folder is the value after --run, runs/v2 by default
+# the run folder is the value after --run: runs/v2 by default, runs/ppo for the old trainer
 run=runs/v2
+[ "$cmd" = ppo ] && run=runs/ppo
 prev=""
 for a in "$@"; do
     [ "$prev" = "--run" ] && run="$a"
@@ -44,27 +49,30 @@ brainpage() {
     pkill -f "bin/arma-brain" 2>/dev/null
     nohup sh -c 'i=0; while [ ! -f "'"$run"'/actor.pt" ] && [ $i -lt 600 ]; do sleep 1; i=$((i+1)); done; exec uv run -q arma-brain --checkpoint "'"$run"'/actor.pt"' >> "$run/brain.log" 2>&1 &
 }
-trainer_pids() { pgrep -f "bin/arma-train"; }
+trainer_pids() { pgrep -f "bin/arma-(train|teach)"; }
 stamp() { date '+%Y-%m-%d %H:%M:%S'; }
 
 case "$cmd" in
-start | gentle)
+start | gentle | ppo)
     if running; then
         echo "already training in $run"
         pgrep -f "bin/arma-brain" >/dev/null || brainpage
         exit 0
     fi
     if [ -n "$(trainer_pids)" ]; then
-        echo "a training process started some other way is already running; stop it first (pkill -f arma-train)"
+        echo "a training process started some other way is already running; stop it first (pkill -f arma-teach)"
         exit 1
     fi
     command -v uv >/dev/null || { echo "uv not found on PATH"; exit 1; }
     rm -f "$stopflag"
-    if [ "$cmd" = gentle ]; then
-        set -- --engines 6 "$@"
-        nohup nice -n 15 "$self" _supervise "$@" >> "$log" 2>&1 &
+    if [ "$cmd" = ppo ]; then
+        [ "$run" = runs/ppo ] && set -- --run runs/ppo "$@"
+        nohup caffeinate -i "$self" _supervise train "$@" >> "$log" 2>&1 &
+    elif [ "$cmd" = gentle ]; then
+        set -- --games 96 --threads 4 "$@"
+        nohup nice -n 15 "$self" _supervise teach "$@" >> "$log" 2>&1 &
     else
-        nohup caffeinate -i "$self" _supervise "$@" >> "$log" 2>&1 &
+        nohup caffeinate -i "$self" _supervise teach "$@" >> "$log" 2>&1 &
     fi
     echo $! > "$pidfile"
     echo "training started ($cmd) in $run"
@@ -75,14 +83,16 @@ start | gentle)
     ;;
 
 _supervise)
+    trainer="$1"  # teach or train
+    shift
     quick=0
     first=1
     while :; do
         started=$(date +%s)
         if [ "$first" = 1 ]; then
-            uv run arma-train "$@"
+            uv run "arma-$trainer" "$@"
         else
-            uv run arma-train "$@" --resume true  # a restart always continues from the checkpoint
+            uv run "arma-$trainer" "$@" --resume true  # a restart always continues from the checkpoint
         fi
         code=$?
         first=0
@@ -152,12 +162,16 @@ brain)
     exec uv run -q arma-brain "$@"
     ;;
 
+ladder)
+    exec uv run -q arma-ladder "$@"
+    ;;
+
 log)
     touch "$log"
     tail -n 20 -f "$log"
     ;;
 
 *)
-    sed -n '2,16p' "$self" | sed 's/^# \{0,1\}//'
+    sed -n '2,21p' "$self" | sed 's/^# \{0,1\}//'
     ;;
 esac

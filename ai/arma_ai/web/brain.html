@@ -546,19 +546,24 @@ const trainBox = document.getElementById('train'), trainHead = document.getEleme
       trainRows = document.getElementById('trainRows');
 const pct = v => v == null ? '–' : `${Math.round(v * 100)}%`;
 const num = (v, d) => v == null ? '–' : (+v).toFixed(d);
-const TRAIN_ROWS = [
+const TRAIN_ROWS = [  // rows hide themselves when the running trainer does not report that number
   { key: 'win_vs_ai_small', label: 'wins vs bot', range: [0, 1],
     value: m => m.win_vs_ai_std == null ? pct(m.win_vs_ai_small) : `${pct(m.win_vs_ai_small)} · ${pct(m.win_vs_ai_std)}` },
-  { key: 'ep_len', label: 'episode', value: m => m.ep_len == null ? '–' : `${Math.round(m.ep_len)} steps` },
+  { key: 'win_vs_past', label: 'wins vs past selves', range: [0, 1], value: m => pct(m.win_vs_past) },
+  { key: 'win_exploiter', label: 'exploiter wins', range: [0, 1], value: m => pct(m.win_exploiter) },
+  { key: 'ep_len', label: 'round', value: m => m.ep_len == null ? '–' : `${(m.ep_len / 20).toFixed(1)} s` },
+  { key: 'search_kl', label: 'search gain', value: m => num(m.search_kl, 3) },
   { key: 'ent', label: 'entropy', value: m => num(m.ent, 3) },
   { key: 'kl', label: 'KL', value: m => num(m.kl, 4) },
   { key: 'clipfrac', label: 'clipped', value: m => pct(m.clipfrac) },
   { key: 'pg', label: 'policy loss', value: m => num(m.pg, 4) },
   { key: 'vf', label: 'value loss', value: m => num(m.vf, 4) },
+  { key: 'aux', label: 'aux loss', value: m => num(m.aux, 4) },
   { key: 'value_explained', label: 'value explains', range: [0, 1], value: m => pct(m.value_explained) },
-  { key: 'grad_norm', label: 'grad norm', value: m => num(m.grad_norm, 3), optional: true },
-  { key: 'lr', label: 'learning rate', value: m => m.lr == null ? '–' : (+m.lr).toExponential(1), optional: true },
-  { key: 'sps', label: 'speed', value: m => m.sps == null ? '–' : `${Math.round(m.sps).toLocaleString()} steps/s` },
+  { key: 'grad_norm', label: 'grad norm', value: m => num(m.grad_norm, 3) },
+  { key: 'lr', label: 'learning rate', value: m => m.lr == null ? '–' : (+m.lr).toExponential(1) },
+  { key: 'sps', label: 'speed',
+    value: m => m.sps == null ? '–' : `${Math.round(m.sps).toLocaleString()} ${m.evals_s == null ? 'steps' : 'decisions'}/s` },
 ];
 let metrics = null, statsOn = true;
 
@@ -605,10 +610,10 @@ function showMetrics() {
   const { last, series } = metrics;
   const training = isTraining();
   const steps = last.steps >= 1e6 ? `${(last.steps / 1e6).toFixed(1)}M` : `${Math.round(last.steps / 1e3)}k`;
-  trainHead.textContent = `${training ? 'Training' : 'Last run'} · update ${last.update} · ${steps} steps`;
+  trainHead.textContent = `${training ? 'Training' : 'Last run'} · update ${last.update} · ${steps} ${last.evals_s == null ? 'steps' : 'decisions'}`;
   TRAIN_ROWS.forEach((r, i) => {
     const row = trainRows.children[i];
-    row.hidden = r.optional && last[r.key] == null;
+    row.hidden = last[r.key] == null;
     if (row.hidden) return;
     row.querySelector('.v').textContent = r.value(last);
     spark(row.querySelector('canvas'), series[r.key] || [], r.range);
