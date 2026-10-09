@@ -99,7 +99,7 @@ def main() -> None:
     ap.add_argument("--builtin", type=int, default=0, help="extra built-in AI opponents")
     ap.add_argument("--size", type=float, default=-3, help="arena SIZE_FACTOR (-3 is the single-player default)")
     ap.add_argument("--speed", type=float, default=0, help="SPEED_FACTOR")
-    ap.add_argument("--walls", type=float, default=700, help="trail length in metres (-1 = endless)")
+    ap.add_argument("--walls", type=float, default=600, help="trail length in metres (-1 = endless)")
     ap.add_argument("--port", type=int, default=4534)
     ap.add_argument("--sample", action="store_true", help="sample moves instead of always taking the best one")
     ap.add_argument("--watch", action="store_true", help="run rounds without waiting for a human (testing)")

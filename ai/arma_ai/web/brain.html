@@ -426,14 +426,25 @@ function drawArena(f) {
   actx.strokeStyle = 'rgba(255,255,255,0.14)';
   actx.lineWidth = dpr;
   actx.strokeRect(X(lx), Y(hy), (hx - lx) * k * dpr, (hy - ly) * k * dpr);
+  const walls = f.walls > 0 ? f.walls : Infinity;
   for (const [pid, x, y, alive, color] of f.cycles) {
-    const t = trails[pid] || (trails[pid] = { color, pts: [] });
+    const t = trails[pid] || (trails[pid] = { color, pts: [], len: 0, alive: true, diedAt: null });
     const lastPt = t.pts[t.pts.length - 1];
-    if (alive && (!lastPt || Math.hypot(lastPt[0] - x, lastPt[1] - y) > 0.4)) t.pts.push([x, y]);
+    if (alive && (!lastPt || Math.hypot(lastPt[0] - x, lastPt[1] - y) > 0.4)) {
+      if (lastPt) t.len += Math.hypot(lastPt[0] - x, lastPt[1] - y);
+      t.pts.push([x, y]);
+      // the engine forgets the far end of a wall past WALLS_LENGTH; so does the map
+      while (t.pts.length > 1 && t.len - Math.hypot(t.pts[1][0] - t.pts[0][0], t.pts[1][1] - t.pts[0][1]) >= walls) {
+        t.len -= Math.hypot(t.pts[1][0] - t.pts[0][0], t.pts[1][1] - t.pts[0][1]);
+        t.pts.shift();
+      }
+    }
+    if (t.alive && !alive) t.diedAt = f.time;
     t.alive = alive;
   }
   for (const [pid, t] of Object.entries(trails)) {
     if (t.pts.length < 1) continue;
+    if (!t.alive && t.diedAt != null && f.time - t.diedAt > 8) continue;  // a dead cycle's wall is gone after 8 s
     const me = Number(pid) === f.me;
     actx.strokeStyle = t.color;
     actx.globalAlpha = t.alive ? 1 : 0.35;

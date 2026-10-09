@@ -509,7 +509,7 @@ def main() -> None:
     ap.add_argument("--bots", type=int, default=1, help="built-in AI opponents")
     ap.add_argument("--size", type=float, default=-2, help="arena SIZE_FACTOR (-3 small, 0 full-size)")
     ap.add_argument("--speed", type=float, default=1.0, help="playback speed, 1 = real time")
-    ap.add_argument("--walls", type=float, default=700, help="trail length in metres (-1 = endless)")
+    ap.add_argument("--walls", type=float, default=600, help="trail length in metres (-1 = endless)")
     ap.add_argument("--checkpoint", type=Path, default=None,
                     help="weights to show (default: runs/main/actor.pt, which training rewrites every update)")
     ap.add_argument("--greedy", action="store_true", help="always take the top move")
@@ -557,7 +557,7 @@ def main() -> None:
     arena = ArenaConfig(slots=args.ais, builtin_ais=args.bots, size_factor=args.size, walls_length=args.walls, extra={
         "NEURAL_SPECTATE": "1", "NEURAL_END_ROUND_WITHOUT_NEURAL": "0", "NEURAL_CONTROL_AFTER_ROUND": "1"})
     scales = Scales()
-    m = Match()
+    m = Match(args.walls)
     with EnginePool([arena], workdir=PROJECT / "runtime" / "brain", base_port=47950, log_engines=True) as pool:
         conn = pool.conns[0]
         conn.setblocking(True)
@@ -606,6 +606,7 @@ def main() -> None:
                                     "probs": [round(float(x), 4) for x in probs], "mask": mask.tolist(),
                                     "action": a, "value": round(value, 3),
                                     "round": m.round_id, "time": round(m.time, 2), "bounds": m.bounds,
+                                    "walls": args.walls,
                                     "me": me.pid if me else None,
                                     "cycles": [[c.pid, round(c.x, 1), round(c.y, 1), int(c.alive), c.color, c.slot]
                                                for c in m.cycles.values()],

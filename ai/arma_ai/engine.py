@@ -41,7 +41,7 @@ class ArenaConfig:
     ai_iq: int = 100
     size_factor: float = -3.0
     speed_factor: float = 0.0
-    walls_length: float = 700.0  # metres of trail behind each cycle; the game's own default is -1, endless
+    walls_length: float = 600.0  # metres of trail behind each cycle; the game's own default is -1, endless
     lockstep_dt: float = 0.025  # >= the dedicated server's 0.9/DEDICATED_FPS physics step
     decision_interval: float = 0.05
     debug: int = 0

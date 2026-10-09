@@ -40,7 +40,7 @@ Reward is +1 for winning a round, up to −1 for dying (scaled by how many oppon
 ./trainctl show
 ```
 
-Runs a real match in a headless engine and draws it live in the terminal: every cycle's trail in its own colour, with a scoreboard of wins. `--bots 1 --ais 1` pits it against the game's best bot, `--ais 2 --bots 2` makes a four-player game, `--size 0` uses the full-size arena, `--speed 4` plays at four times real speed and `--walls` sets the trail length in metres (700 by default everywhere here, including training; the game's own default, -1, is endless). Ctrl-C quits.
+Runs a real match in a headless engine and draws it live in the terminal: every cycle's trail in its own colour, with a scoreboard of wins. `--bots 1 --ais 1` pits it against the game's best bot, `--ais 2 --bots 2` makes a four-player game, `--size 0` uses the full-size arena, `--speed 4` plays at four times real speed and `--walls` sets the trail length in metres (600 by default everywhere here, including training; the game's own default, -1, is endless). Ctrl-C quits.
 
 ## Watching it think
 

@@ -11,7 +11,9 @@ colour, with a scoreboard beside the arena. Ctrl-C quits.
 from __future__ import annotations
 
 import argparse
+import math
 import time
+from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -50,7 +52,8 @@ class Cycle:
     dx: float = 0.0
     dy: float = 1.0
     speed: float = 0.0
-    trail: list = field(default_factory=list)
+    trail: deque = field(default_factory=deque)  # (x, y) points, oldest first
+    length: float = 0.0  # metres of trail currently kept
     died_at: float | None = None
 
     @property
@@ -59,7 +62,8 @@ class Cycle:
 
 
 class Match:
-    def __init__(self):
+    def __init__(self, walls_length: float = -1):
+        self.walls_length = walls_length  # the engine's WALLS_LENGTH; <= 0 means endless
         self.round_id = -1
         self.time = 0.0
         self.over = False
@@ -70,6 +74,21 @@ class Match:
         self.rounds = 0
         self.last_result = ""
         self._colors: dict[int, str] = {}
+
+    def _extend(self, c: Cycle, p: tuple) -> None:
+        """Add a point and forget the far end, so the drawn trail is the wall the engine still has."""
+        if c.trail:
+            lx, ly = c.trail[-1]
+            c.length += math.hypot(p[0] - lx, p[1] - ly)
+        c.trail.append(p)
+        if self.walls_length > 0:
+            while len(c.trail) > 1:
+                (x0, y0), (x1, y1) = c.trail[0], c.trail[1]
+                seg = math.hypot(x1 - x0, y1 - y0)
+                if c.length - seg < self.walls_length:
+                    break
+                c.length -= seg
+                c.trail.popleft()
 
     def update(self, payload: bytes) -> bool:
         """Apply one WORLD message; return whether a STEP follows."""
@@ -98,8 +117,8 @@ class Match:
                 if (round(dx), round(dy)) != (round(c.dx), round(c.dy)):
                     # it turned since the last tick: put the corner in so the trail stays axis-aligned
                     corner = (x, c.y) if abs(c.dx) > abs(c.dy) else (c.x, y)
-                    c.trail.append(corner)
-                c.trail.append((x, y))
+                    self._extend(c, corner)
+                self._extend(c, (x, y))
             if c.alive and not alive:
                 c.died_at = t
             c.alive, c.x, c.y, c.dx, c.dy, c.speed = bool(alive), x, y, dx, dy, speed
@@ -235,7 +254,7 @@ def main() -> None:
     ap.add_argument("--bots", type=int, default=0, help="built-in AI opponents")
     ap.add_argument("--size", type=float, default=-2, help="arena SIZE_FACTOR (-3 small, 0 full-size)")
     ap.add_argument("--speed", type=float, default=1.0, help="playback speed, 1 = real time")
-    ap.add_argument("--walls", type=float, default=700, help="trail length in metres (-1 = endless)")
+    ap.add_argument("--walls", type=float, default=600, help="trail length in metres (-1 = endless)")
     ap.add_argument("--checkpoint", type=Path, default=PROJECT / "runs/main/latest.pt")
     ap.add_argument("--greedy", action="store_true",
                     help="always take the top move (copies of the AI then tend to mirror each other)")
@@ -249,7 +268,7 @@ def main() -> None:
     arena = ArenaConfig(slots=args.ais, builtin_ais=args.bots, size_factor=args.size, walls_length=args.walls, extra={
         "NEURAL_SPECTATE": "1", "NEURAL_END_ROUND_WITHOUT_NEURAL": "0", "NEURAL_CONTROL_AFTER_ROUND": "1"})
     console = Console(width=args.width, height=args.height)
-    m = Match()
+    m = Match(args.walls)
     with EnginePool([arena], workdir=PROJECT / "runtime" / "show", base_port=47900, log_engines=True) as pool:
         conn = pool.conns[0]
         conn.setblocking(True)
