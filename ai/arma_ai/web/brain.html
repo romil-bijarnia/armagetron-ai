@@ -208,7 +208,7 @@ const target4x = new THREE.WebGLRenderTarget(1, 1, { type: THREE.HalfFloatType, 
 const composer = new EffectComposer(renderer, target4x);
 composer.setPixelRatio(DPR);
 composer.addPass(new RenderPass(scene, camera));
-const bloom = new UnrealBloomPass(new THREE.Vector2(1, 1), 0.42, 0.4, 0.5);
+const bloom = new UnrealBloomPass(new THREE.Vector2(1, 1), 0.3, 0.35, 0.6);
 composer.addPass(bloom);
 composer.addPass(new OutputPass());
 
@@ -235,8 +235,8 @@ const pointMaterial = new THREE.ShaderMaterial({
       // nearly nothing when silent: a slab stacks dozens of filters on one pixel, and the
       // picture must come from the neurons that fire, not from the sheer number of them
       float lit = pow(vA, 1.6);
-      vec3 col = mix(vT, vec3(1.0), 0.45 * lit);           // the hottest neurons go white
-      gl_FragColor = vec4(col * (0.03 + 0.87 * lit), shape * (0.05 + 0.95 * lit));
+      vec3 col = mix(vT, vec3(1.0), 0.3 * lit);            // the hottest neurons lean white, but keep their colour
+      gl_FragColor = vec4(col * (0.03 + 0.72 * lit), shape * (0.05 + 0.8 * lit));
     }`,
   transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
 });
@@ -332,9 +332,9 @@ function updateLines() {
   for (let k = 0; k < n; k++) {
     const w = T.lineW[k], a = shown[T.lineSrc[k]], c = 3 * T.lineCol[k];
     const lum = Math.min(1, w * 0.004 + w * a * a * 0.24);
-    // new weights: a faint blue ripple on the few connections that moved most (dw cubed keeps the rest dark)
-    const dw = T.lineDW[k], fl = dw * dw * dw * flash * 0.18;
-    const r = lum * tint[c] + fl * 0.2, g = lum * tint[c + 1] + fl * 0.6, b = lum * tint[c + 2] + fl;
+    // new weights: a soft white pulse, strongest on the connections that moved most
+    const dw = T.lineDW[k], fl = dw * dw * flash * 0.2;
+    const r = lum * tint[c] + fl, g = lum * tint[c + 1] + fl, b = lum * tint[c + 2] + fl;
     col[6 * k] = col[6 * k + 3] = r; col[6 * k + 1] = col[6 * k + 4] = g; col[6 * k + 2] = col[6 * k + 5] = b;
   }
   lines.geometry.attributes.color.needsUpdate = true;
@@ -768,7 +768,7 @@ function frame(now) {
     points.geometry.attributes.act.array.set(shown);
     points.geometry.attributes.act.needsUpdate = true;
     updateLines();
-    flash = Math.max(0, flash - dt / 1.4);
+    flash = Math.max(0, flash - dt / 1.8);
     if (!state.paused && lastFrameAt && now - lastFrameAt > 3000) statusEl.textContent = 'waiting · no new decisions';
     if (metrics && now - lastHeadAt > 5000) { lastHeadAt = now; showMetrics(); }
     pick(now);
