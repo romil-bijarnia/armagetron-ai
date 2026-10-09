@@ -8,8 +8,8 @@
 #   ./trainctl status           is it running, latest progress, when the last checkpoint was saved
 #   ./trainctl watch            live charts of how training is going (Ctrl-C closes them, not training)
 #   ./trainctl show [flags]     watch the AI play a match, drawn in the terminal (Ctrl-C quits)
-#   ./trainctl brain [flags]    watch the network think: every neuron live in the browser, following
-#                               the newest weights while training runs (Ctrl-C quits)
+#   ./trainctl brain [flags]    watch the network think: every neuron live in the browser, with pause
+#                               and single-step; follows the newest weights while training runs
 #   ./trainctl log              follow the training log (Ctrl-C stops watching, not training)
 #
 # Extra flags go straight to arma-train, e.g. ./trainctl start --lr 1e-4 or --run runs/exp1.

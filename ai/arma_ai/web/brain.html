@@ -20,10 +20,13 @@
   h1 { font-size: 21px; font-weight: 500; margin: 0; letter-spacing: 0.01em; }
   #status { color: var(--muted); font-size: 14px; margin-top: 4px; }
   #status .flash { color: var(--accent); }
-  .toggles { position: fixed; right: 28px; top: 22px; display: flex; gap: 8px; }
+  .toggles { position: fixed; right: 28px; top: 22px; display: flex; gap: 8px; align-items: center; }
   .toggles button { background: transparent; color: var(--muted); border: 1px solid var(--hair);
-    border-radius: 999px; padding: 6px 15px; font: inherit; font-size: 14px; cursor: pointer; }
+    border-radius: 999px; padding: 6px 15px; font: inherit; font-size: 14px; cursor: pointer;
+    font-variant-numeric: tabular-nums; }
   .toggles button.on { color: var(--text); border-color: rgba(255, 255, 255, 0.28); }
+  .toggles button:disabled { opacity: 0.35; cursor: default; }
+  .toggles .sep { width: 1px; height: 18px; background: rgba(255, 255, 255, 0.14); margin: 0 6px; }
   #moves { position: fixed; right: 28px; bottom: 26px; width: 250px; }
   .row { display: flex; align-items: center; gap: 12px; height: 31px; color: var(--muted); font-size: 15px; }
   .row .name { width: 72px; }
@@ -37,8 +40,18 @@
   #arenaBox { position: fixed; left: 28px; bottom: 26px; }
   #arena { width: 210px; height: 210px; display: block; }
   #result { color: var(--muted); font-size: 13px; margin-top: 8px; height: 18px; }
+  #legend { color: var(--faint); font-size: 12px; margin-top: 2px; }
+  #legend i { display: inline-block; width: 7px; height: 7px; border-radius: 50%; margin: 0 5px 1px 0; }
+  #legend span { margin-right: 12px; }
   .label { position: fixed; transform: translate(-50%, 0); color: var(--faint); font-size: 12px;
     white-space: nowrap; pointer-events: none; }
+  .label.left { transform: translate(0, -50%); }
+  #tip { position: fixed; display: none; pointer-events: none; background: rgba(0, 0, 0, 0.82);
+    border: 1px solid rgba(255, 255, 255, 0.14); border-radius: 8px; padding: 6px 10px; font-size: 13px;
+    line-height: 1.35; white-space: nowrap; font-variant-numeric: tabular-nums; }
+  #tip .d { color: var(--muted); }
+  #keys { position: fixed; left: 50%; bottom: 26px; transform: translateX(-50%); color: var(--faint);
+    font-size: 12px; pointer-events: none; white-space: nowrap; }
   #wait { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center;
     color: var(--muted); font-size: 15px; pointer-events: none; }
 </style>
@@ -56,22 +69,37 @@
   <div id="status">connecting</div>
 </div>
 <div class="toggles">
+  <button id="bPause">Pause</button>
+  <button id="bStep" disabled>Step</button>
+  <button id="bSpeed">1×</button>
+  <span class="sep"></span>
   <button id="tRotate" class="on">Rotate</button>
   <button id="tLines" class="on">Lines</button>
+  <button id="tGlow" class="on">Glow</button>
   <button id="tFlat">Flat</button>
 </div>
-<div id="arenaBox"><canvas id="arena"></canvas><div id="result"></div></div>
+<div id="arenaBox">
+  <canvas id="arena"></canvas>
+  <div id="result"></div>
+  <div id="legend"><span><i style="background:#22d3ee"></i>you</span><span><i style="background:#fb923c"></i>enemy</span><span><i style="background:#d9d9d9"></i>walls</span></div>
+</div>
 <div id="moves"></div>
 <div id="labels"></div>
+<div id="tip"></div>
+<div id="keys">space pause · → step · [ ] speed · drag to turn · hover a neuron</div>
 <div id="wait">waiting for the brain</div>
 
 <script type="module">
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
+import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
+import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
+import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
 
 // ------------------------------------------------------------------ layout
 const COL = 3.2;                                   // distance between layer columns
-const GROUPS = {                                   // vertical band of each branch
+const BAND = {                                     // vertical band of each branch
   local:   { y:  2.35, h: 3.0 },
   global:  { y: -1.05, h: 2.3 },
   scalars: { y: -3.45, h: 1.25 },
@@ -81,6 +109,7 @@ const GROUPS = {                                   // vertical band of each bran
 const CENTER = new THREE.Vector3(COL * 4.0, -1.0, 0);
 const VIEW_ANGLED = new THREE.Vector3(-16, 6.5, 27);
 const VIEW_FLAT = new THREE.Vector3(0, 0, 33);
+const SPEEDS = [0.25, 0.5, 1, 2, 4];
 
 const PLANE_COLORS = {                             // input cells: colour of the most important bit
   'walls': '#d9d9d9', 'own trail': '#22d3ee', 'own head': '#a5f3fc', 'enemy trails': '#fb923c',
@@ -104,32 +133,35 @@ function unitCount(L) { return L.shape.reduce((a, b) => a * b, 1); }
 // positions (and point sizes) of every unit of a layer, in the order the server sends them
 function layoutLayer(L, rand) {
   const n = unitCount(L), pos = new Float32Array(n * 3), size = new Float32Array(n);
-  const g = GROUPS[L.group], x0 = L.col * COL;
+  const g = BAND[L.group], x0 = L.col * COL;
   const put = (i, x, y, z, s) => { pos[3 * i] = x; pos[3 * i + 1] = y; pos[3 * i + 2] = z; size[i] = s; };
   if (L.kind === 'input' && L.shape.length === 2) {
     const [H, W] = L.shape, d = g.h / (H - 1);
     for (let r = 0; r < H; r++) for (let c = 0; c < W; c++)
       put(r * W + c, x0, g.y + g.h / 2 - r * d, -g.h / 2 + c * d, d * 1.15);
   } else if (L.kind === 'conv') {
-    const [C, H, W] = L.shape, tc = Math.ceil(Math.sqrt(C)), tr = Math.ceil(C / tc), gap = 1.6;
-    const d = g.h / (tr * H + (tr - 1) * gap), wt = d * (tc * W + (tc - 1) * gap), ht = g.h;
+    // a slab: the layer's own grid faces the flow, its filters stacked in depth, so an active
+    // region of the slab sits in front of the part of the map it is looking at
+    const [C, H, W] = L.shape, d = g.h / H, depth = Math.min(2.0, 1.1 + 0.6 * Math.log2(C / 32));
+    const s = Math.min(d * 0.3, 0.07), jit = d * (H >= 16 ? 0.35 : 0.5);
     for (let ch = 0; ch < C; ch++) {
-      const R = Math.floor(ch / tc), Cc = ch % tc;
+      const xc = x0 + (ch / (C - 1) - 0.5) * depth;
       for (let y = 0; y < H; y++) for (let xx = 0; xx < W; xx++)
-        put((ch * H + y) * W + xx, x0 + (rand() - 0.5) * 0.22,
-            g.y + ht / 2 - (R * (H + gap) + y) * d, -wt / 2 + (Cc * (W + gap) + xx) * d, d * 1.1);
+        put((ch * H + y) * W + xx, xc + (rand() - 0.5) * depth / C,
+            g.y + g.h / 2 - (y + 0.5) * d + (rand() - 0.5) * jit,
+            -g.h / 2 + (xx + 0.5) * d + (rand() - 0.5) * jit, s);
     }
   } else if (L.kind === 'output') {
     for (let i = 0; i < n; i++)
       put(i, x0, L.id === 'value' ? -2.3 : 1.25 - i * 0.75, 0, 0.26);
-  } else {                                         // dense layers and the scalar input: a thick cloud
-    const side = Math.ceil(Math.sqrt(n)),
-          h = L.kind === 'input' || L.group === 'scalars' ? g.h : Math.min(g.h, 0.62 * g.h + n / 900);
-    const d = h / Math.max(side - 1, 1), depth = L.kind === 'input' ? 0.05 : 0.7;
+  } else {                                         // dense layers and the number inputs: a thick cloud
+    const side = Math.ceil(Math.sqrt(n)), input = L.kind === 'input';
+    const h = input || L.group === 'scalars' ? g.h : Math.min(g.h, 0.62 * g.h + n / 900);
+    const d = h / Math.max(side - 1, 1), depth = input ? 0.05 : 0.5 + 0.4 * Math.log2(n / 128);
     for (let i = 0; i < n; i++) {
       const r = Math.floor(i / side), c = i % side;
       put(i, x0 + (rand() - 0.5) * depth, g.y + h / 2 - r * d + (rand() - 0.5) * d * 0.6,
-          -h / 2 + c * d + (rand() - 0.5) * d * 0.6, Math.max(d * 0.55, 0.035));
+          -h / 2 + c * d + (rand() - 0.5) * d * 0.6, Math.max(d * 0.45, 0.03));
     }
   }
   return { pos, size };
@@ -138,7 +170,8 @@ function layoutLayer(L, rand) {
 // ------------------------------------------------------------------ scene
 const canvas = document.getElementById('scene');
 const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, powerPreference: 'high-performance' });
-renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+const DPR = Math.min(window.devicePixelRatio, 1.5);  // Retina at full scale is wasted on soft glows
+renderer.setPixelRatio(DPR);
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x000000);
 const camera = new THREE.PerspectiveCamera(40, 1, 0.1, 300);
@@ -152,6 +185,13 @@ controls.autoRotateSpeed = 0.35;
 controls.minDistance = 6;
 controls.maxDistance = 80;
 
+const composer = new EffectComposer(renderer);
+composer.setPixelRatio(DPR);
+composer.addPass(new RenderPass(scene, camera));
+const bloom = new UnrealBloomPass(new THREE.Vector2(1, 1), 0.42, 0.4, 0.5);
+composer.addPass(bloom);
+composer.addPass(new OutputPass());
+
 const pointMaterial = new THREE.ShaderMaterial({
   uniforms: { uScale: { value: 1000 } },
   vertexShader: `
@@ -160,7 +200,7 @@ const pointMaterial = new THREE.ShaderMaterial({
     void main() {
       vA = act; vT = tint;
       vec4 mv = modelViewMatrix * vec4(position, 1.0);
-      gl_PointSize = max(2.0, size * (0.9 + 1.7 * act) * uScale / -mv.z);
+      gl_PointSize = max(1.6, size * (0.8 + 1.4 * act) * uScale / -mv.z);
       gl_Position = projectionMatrix * mv;
     }`,
   fragmentShader: `
@@ -169,7 +209,10 @@ const pointMaterial = new THREE.ShaderMaterial({
       vec2 c = gl_PointCoord - 0.5; float r = dot(c, c);
       if (r > 0.25) discard;
       float soft = smoothstep(0.25, 0.0, r);
-      gl_FragColor = vec4(vT * (0.14 + 0.86 * vA), soft * (0.32 + 0.68 * vA));
+      // nearly nothing when silent: a slab stacks dozens of filters on one pixel, and the
+      // picture must come from the neurons that fire, not from the sheer number of them
+      float lit = vA * vA;
+      gl_FragColor = vec4(vT * (0.02 + 0.98 * lit), soft * (0.03 + 0.97 * lit));
     }`,
   transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
 });
@@ -181,6 +224,8 @@ let T = null;          // everything derived from the current topology
 let points = null, lines = null;
 let shown = null, target = null;   // displayed and latest activations of every unit (0..1)
 let flash = 0;         // 1 right after new weights arrive, fading out
+let last = null;       // the latest frame, for the tooltip
+const lastInput = {};  // raw input bytes of the latest frame, by layer id
 
 function b64(s, Type) {
   const bin = atob(s), u8 = new Uint8Array(bin.length);
@@ -206,6 +251,7 @@ function buildPoints(layers) {
   geo.setAttribute('size', new THREE.BufferAttribute(size, 1));
   geo.setAttribute('tint', new THREE.BufferAttribute(tint, 3).setUsage(THREE.DynamicDrawUsage));
   geo.setAttribute('act', new THREE.BufferAttribute(new Float32Array(total), 1).setUsage(THREE.DynamicDrawUsage));
+  geo.computeBoundingSphere();
   if (points) { scene.remove(points); points.geometry.dispose(); }
   points = new THREE.Points(geo, pointMaterial);
   points.frustumCulled = false;
@@ -221,8 +267,8 @@ function buildLines(topo) {
   const groups = topo.edges.map(e => {
     const si = b64(e.si, Uint32Array), di = b64(e.di, Uint32Array), w = b64(e.w), dw = e.dw ? b64(e.dw) : null;
     n += si.length;
-    // many near-parallel lines between two small layers pile up into a solid bar; thin them out
-    return { s0: T.start[idx[e.src]], d0: T.start[idx[e.dst]], si, di, w, dw, gain: Math.min(1, 300 / si.length) };
+    // many near-parallel lines between two layers pile up into a solid bar; thin the big groups
+    return { s0: T.start[idx[e.src]], d0: T.start[idx[e.dst]], si, di, w, dw, gain: Math.min(1, 1500 / si.length) };
   });
   const pos = new Float32Array(n * 6), src = new Uint32Array(n), wt = new Float32Array(n), dwt = new Float32Array(n);
   let k = 0;
@@ -250,7 +296,7 @@ function updateLines() {
   const col = lines.geometry.attributes.color.array, n = T.nLines;
   for (let k = 0; k < n; k++) {
     const w = T.lineW[k], a = shown[T.lineSrc[k]];
-    const white = Math.min(1, w * 0.016 + w * a * a * 0.32);
+    const white = Math.min(1, w * 0.005 + w * a * a * 0.3);
     const blue = T.lineDW[k] * flash * 0.5;
     const r = white + blue * ACCENT.r, g = white + blue * ACCENT.g, b = white + blue * ACCENT.b;
     col[6 * k] = col[6 * k + 3] = r; col[6 * k + 1] = col[6 * k + 4] = g; col[6 * k + 2] = col[6 * k + 5] = b;
@@ -260,28 +306,52 @@ function updateLines() {
 
 // ------------------------------------------------------------------ labels
 const labelBox = document.getElementById('labels');
+function unitPos(u) { return new THREE.Vector3(T.pos[3 * u], T.pos[3 * u + 1], T.pos[3 * u + 2]); }
 function buildLabels(layers) {
   labelBox.innerHTML = '';
-  T.labels = layers.map((L, i) => {
+  T.labels = [];
+  const add = (text, at, pri, anchor) => {
     const el = document.createElement('div');
-    el.className = 'label';
-    el.textContent = L.label;
+    el.className = 'label' + (anchor === 'left' ? ' left' : '');
+    el.textContent = text;
     labelBox.appendChild(el);
+    T.labels.push({ el, at, pri, anchor, w: el.offsetWidth || text.length * 6.6 });
+  };
+  layers.forEach((L, i) => {
+    if (L.kind === 'output') {                     // named at the neuron itself
+      const names = L.names || [L.label];
+      names.forEach((nm, u) => add(nm, unitPos(T.start[i] + u).add(new THREE.Vector3(0.4, 0, 0)), 1, 'left'));
+      return;
+    }
     let minY = Infinity;
     for (let u = 0; u < unitCount(L); u++) minY = Math.min(minY, T.pos[3 * (T.start[i] + u) + 1]);
-    return { el, at: new THREE.Vector3(L.col * COL, minY - 0.28, 0) };
+    add(L.label, new THREE.Vector3(L.col * COL, minY - 0.45, 0), L.kind === 'input' ? 0 : 2, 'center');
   });
 }
 const tmp = new THREE.Vector3();
 function placeLabels() {
   if (!T || !T.labels) return;
-  const w = window.innerWidth, h = window.innerHeight;
-  for (const { el, at } of T.labels) {
-    tmp.copy(at).project(camera);
-    if (tmp.z > 1) { el.style.display = 'none'; continue; }
-    el.style.display = '';
-    el.style.left = `${(tmp.x * 0.5 + 0.5) * w}px`;
-    el.style.top = `${(-tmp.y * 0.5 + 0.5) * h}px`;
+  const w = window.innerWidth, h = window.innerHeight, placed = [];
+  const items = T.labels.map(l => {
+    tmp.copy(l.at).project(camera);
+    return { l, x: (tmp.x * 0.5 + 0.5) * w, y: (-tmp.y * 0.5 + 0.5) * h, z: tmp.z };
+  });
+  items.sort((a, b) => a.l.pri - b.l.pri || a.x - b.x);
+  for (const it of items) {
+    const { l } = it;
+    if (it.z > 1 || it.x < -20 || it.x > w + 20 || it.y < 0 || it.y > h) { l.el.style.display = 'none'; continue; }
+    const r = l.anchor === 'left'
+      ? { x0: it.x, x1: it.x + l.w, y0: it.y - 8, y1: it.y + 8 }
+      : { x0: it.x - l.w / 2, x1: it.x + l.w / 2, y0: it.y, y1: it.y + 16 };
+    // a label that would sit on top of another stays hidden; inputs and outputs have priority
+    if (placed.some(p => r.x0 < p.x1 + 8 && r.x1 > p.x0 - 8 && r.y0 < p.y1 + 3 && r.y1 > p.y0 - 3)) {
+      l.el.style.display = 'none';
+      continue;
+    }
+    placed.push(r);
+    l.el.style.display = '';
+    l.el.style.left = `${it.x}px`;
+    l.el.style.top = `${it.y}px`;
   }
 }
 
@@ -320,8 +390,8 @@ function drawArena(f) {
   actx.strokeRect(X(lx), Y(hy), (hx - lx) * k * dpr, (hy - ly) * k * dpr);
   for (const [pid, x, y, alive, color] of f.cycles) {
     const t = trails[pid] || (trails[pid] = { color, pts: [] });
-    const last = t.pts[t.pts.length - 1];
-    if (alive && (!last || Math.hypot(last[0] - x, last[1] - y) > 0.4)) t.pts.push([x, y]);
+    const lastPt = t.pts[t.pts.length - 1];
+    if (alive && (!lastPt || Math.hypot(lastPt[0] - x, lastPt[1] - y) > 0.4)) t.pts.push([x, y]);
     t.alive = alive;
   }
   for (const [pid, t] of Object.entries(trails)) {
@@ -345,7 +415,8 @@ function drawArena(f) {
 
 // ------------------------------------------------------------------ data
 const statusEl = document.getElementById('status');
-let topoUpdate = 0, lastFrame = 0;
+let lastFrameAt = 0;
+let state = { paused: false, speed: 1 };
 
 function onTopology(topo) {
   const first = !T || T.total !== topo.layers.reduce((a, L) => a + unitCount(L), 0);
@@ -357,7 +428,6 @@ function onTopology(topo) {
   }
   buildLines(topo);
   if (!first && topo.edges.some(e => e.dw)) flash = 1;
-  topoUpdate = topo.update;
   document.getElementById('wait').style.display = 'none';
 }
 
@@ -369,55 +439,147 @@ function inputCells(layerIndex, bytes) {
   const outside = L.planes.indexOf('outside');
   for (let c = 0; c < bytes.length; c++) {
     const b = bytes[c], u = s0 + c;
-    if (!b) { target[u] = 0; tint[3 * u] = tint[3 * u + 1] = tint[3 * u + 2] = 1; continue; }
+    if (!b) { target[u] = 0.25; tint[3 * u] = tint[3 * u + 1] = tint[3 * u + 2] = 1; continue; }  // faint: the plane stays visible
     const bit = order.find(i => b & (1 << i));
     const col = bitColor[bit];
     tint[3 * u] = col.r; tint[3 * u + 1] = col.g; tint[3 * u + 2] = col.b;
-    target[u] = bit === outside ? 0.35 : 1;
+    target[u] = bit === outside ? 0.45 : 1;
   }
 }
 
 function onFrame(f) {
   if (!T) return;
-  lastFrame = performance.now();
+  last = f;
+  lastFrameAt = performance.now();
   const acts = b64(f.acts);
   let k = 0;
   T.layers.forEach((L, i) => {
     const s0 = T.start[i], n = unitCount(L);
     if (L.kind === 'conv' || L.kind === 'dense') {
       for (let u = 0; u < n; u++) target[s0 + u] = acts[k++] / 255;
-    } else if (L.id === 'local_in') inputCells(i, b64(f.local));
-    else if (L.id === 'global_in') inputCells(i, b64(f.global));
-    else if (L.id === 'scalars_in') { const s = b64(f.scalars); for (let u = 0; u < n; u++) target[s0 + u] = s[u] / 255; }
+    } else if (L.id === 'local_in' || L.id === 'global_in') {
+      lastInput[L.id] = b64(L.id === 'local_in' ? f.local : f.global);
+      inputCells(i, lastInput[L.id]);
+    } else if (L.id === 'scalars_in') { const s = b64(f.scalars); for (let u = 0; u < n; u++) target[s0 + u] = s[u] / 255; }
     else if (L.id === 'policy') for (let u = 0; u < n; u++) target[s0 + u] = Math.sqrt(f.probs[u]);
     else if (L.id === 'value') target[s0] = Math.min(1, Math.abs(f.value));
   });
   tintAttr().needsUpdate = true;
   showMoves(f);
   drawArena(f);
-  const training = f.trained_ago != null && f.trained_ago < 120;
+  showStatus();
+}
+
+function showStatus() {
+  if (!last) return;
+  const f = last, training = f.trained_ago != null && f.trained_ago < 120;
+  const head = state.paused ? 'paused' : 'live';
   statusEl.innerHTML = training
-    ? `training · update ${f.update} · <span class="${flash > 0.05 ? 'flash' : ''}">new weights ${Math.round(f.trained_ago)} s ago</span>`
-    : `live · update ${f.update}`;
+    ? `${head} · training · update ${f.update} · <span class="${flash > 0.05 ? 'flash' : ''}">new weights ${Math.round(f.trained_ago)} s ago</span>`
+    : `${head} · update ${f.update}`;
+}
+
+function onState(s) {
+  state = s;
+  bPause.textContent = s.paused ? 'Play' : 'Pause';
+  bPause.classList.toggle('on', s.paused);
+  bStep.disabled = !s.paused;
+  bSpeed.textContent = `${+s.speed.toFixed(2)}×`;
+  showStatus();
 }
 
 function connect() {
   const es = new EventSource('/events');
   es.addEventListener('topology', e => onTopology(JSON.parse(e.data)));
   es.addEventListener('frame', e => onFrame(JSON.parse(e.data)));
+  es.addEventListener('state', e => onState(JSON.parse(e.data)));
   es.onerror = () => { statusEl.textContent = 'reconnecting'; };
 }
 connect();
 
+// ------------------------------------------------------------------ hover: what is this neuron
+const tip = document.getElementById('tip');
+const ray = new THREE.Raycaster();
+const mouse = new THREE.Vector2(2, 2);
+let mouseMoved = false, mx = 0, my = 0, lastPick = 0;
+canvas.addEventListener('pointermove', e => {
+  mx = e.clientX; my = e.clientY;
+  mouse.set(e.clientX / window.innerWidth * 2 - 1, -(e.clientY / window.innerHeight) * 2 + 1);
+  mouseMoved = true;
+});
+canvas.addEventListener('pointerleave', () => { tip.style.display = 'none'; });
+
+function describe(u) {
+  let li = T.layers.length - 1;
+  while (li > 0 && T.start[li] > u) li--;
+  const L = T.layers[li], k = u - T.start[li], a = target[u];
+  if (L.kind === 'input' && L.shape.length === 2) {
+    const r = Math.floor(k / L.shape[1]), c = k % L.shape[1], b = lastInput[L.id] ? lastInput[L.id][k] : 0;
+    const what = L.planes.filter((p, i) => b & (1 << i)).join(', ') || 'empty';
+    return [L.name, `cell ${r}, ${c} · ${what}`];
+  }
+  if (L.id === 'scalars_in') {
+    const v = last && last.numbers ? last.numbers[k] : null;
+    return [L.name, `${L.names[k]}${v == null ? '' : ' · ' + (+v.toFixed(2))}`];
+  }
+  if (L.kind === 'conv') {
+    const [, H, W] = L.shape, ch = Math.floor(k / (H * W)), rem = k % (H * W);
+    return [L.name, `filter ${ch + 1} · cell ${Math.floor(rem / W)}, ${rem % W} · ${a.toFixed(2)}`];
+  }
+  if (L.id === 'policy') return [L.names[k], last ? `${Math.round(last.probs[k] * 100)}%` : ''];
+  if (L.id === 'value') return ['value', last ? (last.value >= 0 ? '+' : '') + last.value.toFixed(2) : ''];
+  return [L.name, `neuron ${k + 1} · ${a.toFixed(2)}`];
+}
+
+function pick(now) {
+  if (!mouseMoved || !T || now - lastPick < 66) return;
+  mouseMoved = false; lastPick = now;
+  ray.params.Points.threshold = 0.004 * camera.position.distanceTo(controls.target);
+  ray.setFromCamera(mouse, camera);
+  const hits = ray.intersectObject(points);
+  if (!hits.length) { tip.style.display = 'none'; return; }
+  // of everything under the cursor, name what the eye sees: the brightest, nearest first on a tie
+  let best = hits[0];
+  for (const h of hits) if (target[h.index] > target[best.index] + 0.05) best = h;
+  const [name, detail] = describe(best.index);
+  tip.innerHTML = `${name}<br><span class="d">${detail}</span>`;
+  tip.style.display = 'block';
+  const w = tip.offsetWidth, h = tip.offsetHeight;
+  tip.style.left = `${Math.min(mx + 16, window.innerWidth - w - 12)}px`;
+  tip.style.top = `${Math.min(my + 16, window.innerHeight - h - 12)}px`;
+}
+
 // ------------------------------------------------------------------ controls
+const bPause = document.getElementById('bPause'), bStep = document.getElementById('bStep'),
+      bSpeed = document.getElementById('bSpeed');
 const tRotate = document.getElementById('tRotate'), tLines = document.getElementById('tLines'),
-      tFlat = document.getElementById('tFlat');
+      tGlow = document.getElementById('tGlow'), tFlat = document.getElementById('tFlat');
 let flat = false, fly = null;
+const post = body => fetch('/control', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+                                         body: JSON.stringify(body) }).catch(() => {});
+function speedStep(dir) {
+  let i = 0;
+  for (let j = 1; j < SPEEDS.length; j++)
+    if (Math.abs(Math.log(SPEEDS[j] / state.speed)) < Math.abs(Math.log(SPEEDS[i] / state.speed))) i = j;
+  return SPEEDS[Math.max(0, Math.min(SPEEDS.length - 1, i + dir))];
+}
+bPause.onclick = () => post({ paused: !state.paused });
+bStep.onclick = () => post({ step: 1 });
+bSpeed.onclick = () => post({ speed: SPEEDS[(SPEEDS.indexOf(speedStep(0)) + 1) % SPEEDS.length] });
+window.addEventListener('keydown', e => {
+  if (e.metaKey || e.ctrlKey || e.altKey) return;
+  if (e.code === 'Space') { e.preventDefault(); post({ paused: !state.paused }); }
+  else if (e.code === 'ArrowRight') { e.preventDefault(); post({ step: 1 }); }
+  else if (e.key === '[') post({ speed: speedStep(-1) });
+  else if (e.key === ']') post({ speed: speedStep(1) });
+});
+
 function flyTo(offset) {
   fly = { from: camera.position.clone(), to: CENTER.clone().add(offset), t: 0 };
 }
 tRotate.onclick = () => { controls.autoRotate = !controls.autoRotate; tRotate.classList.toggle('on', controls.autoRotate); };
 tLines.onclick = () => { if (lines) lines.visible = !lines.visible; tLines.classList.toggle('on', !lines || lines.visible); };
+tGlow.onclick = () => { bloom.enabled = !bloom.enabled; tGlow.classList.toggle('on', bloom.enabled); };
 tFlat.onclick = () => {
   flat = !flat;
   tFlat.classList.toggle('on', flat);
@@ -428,6 +590,7 @@ tFlat.onclick = () => {
 function resize() {
   const w = window.innerWidth, h = window.innerHeight;
   renderer.setSize(w, h, false);
+  composer.setSize(w, h);
   camera.aspect = w / h;
   camera.updateProjectionMatrix();
   pointMaterial.uniforms.uScale.value = renderer.domElement.height / (2 * Math.tan(THREE.MathUtils.degToRad(camera.fov / 2)));
@@ -435,8 +598,11 @@ function resize() {
 window.addEventListener('resize', resize);
 resize();
 
-let prev = performance.now();
+let prev = performance.now(), lastRender = 0;
 function frame(now) {
+  requestAnimationFrame(frame);
+  if (now - lastRender < 15.5) return;              // 60 fps is plenty; ProMotion would double the work
+  lastRender = now;
   const dt = Math.min(0.1, (now - prev) / 1000); prev = now;
   if (fly) {
     fly.t = Math.min(1, fly.t + dt / 0.9);
@@ -452,11 +618,11 @@ function frame(now) {
     points.geometry.attributes.act.needsUpdate = true;
     updateLines();
     flash = Math.max(0, flash - dt / 2.2);
-    if (performance.now() - lastFrame > 3000 && lastFrame) statusEl.textContent = 'paused · no new decisions';
+    if (!state.paused && lastFrameAt && now - lastFrameAt > 3000) statusEl.textContent = 'waiting · no new decisions';
+    pick(now);
   }
   placeLabels();
-  renderer.render(scene, camera);
-  requestAnimationFrame(frame);
+  composer.render();
 }
 requestAnimationFrame(frame);
 </script>

@@ -7,8 +7,10 @@
 A real match runs in a headless engine, as in ./trainctl show. Every time AI 1 decides, the
 activation of every neuron is sent to a page (http://127.0.0.1:8765) that draws the network in 3D:
 one slab of points per layer, lit by how strongly each neuron fires, and the strongest connections
-between layers, glowing where signal flows through them. While training runs, the page follows the
-newest weights (runs/main/actor.pt) and flashes the connections each update changed. Ctrl-C quits.
+between layers, glowing where signal flows through them. Space pauses the match, the right arrow
+steps it one decision at a time, [ and ] change the speed, and hovering a neuron says what it is.
+While training runs, the page follows the newest weights (runs/main/actor.pt) and flashes the
+connections each update changed. Ctrl-C quits.
 """
 
 from __future__ import annotations
@@ -36,13 +38,30 @@ from .train import MASK_TABLE
 PROJECT = Path(__file__).resolve().parent.parent
 PAGE = Path(__file__).with_name("web") / "brain.html"
 MAX_FPS = 20  # activation frames sent per second of wall time
-CONV_LINES = 450  # neurons per conv layer that get lines drawn to their strongest inputs
-DENSE_LINES = 220  # likewise for fully connected layers
+CONV_LINES = 900  # neurons per conv layer that get lines drawn to their strongest inputs
+DENSE_LINES = 600  # likewise for fully connected layers
 LOCAL_PLANES = ["walls", "own trail", "enemy trails", "team trails", "enemy heads", "enemy paths", "outside",
                 "team heads"]
 GLOBAL_PLANES = ["walls", "own trail", "enemy trails", "own head", "enemy heads", "outside", "team trails",
                  "team heads"]
 MOVES = ["Straight", "Left", "Right", "Brake"]
+GROUP_WORD = {"local": "nearby", "global": "arena", "scalars": "numbers", "trunk": "trunk"}
+
+
+def scalar_names() -> list[str]:
+    """What each of the exact numbers is, in the order gNeural.cpp packs them."""
+    n = ["speed", "rubber used", "brake reservoir", "braking", "time since last turn", "can turn left",
+         "can turn right", "turns queued", "arena width", "arena height", "position across the arena",
+         "position along the arena", "round time", "enemies alive", "teammates alive", "base speed"]
+    for k in range(16):  # 16 rays, clockwise from straight ahead
+        n += [f"ray {k * 22.5:g}° distance", f"ray {k * 22.5:g}° closeness"]
+    for k in range(4):
+        n += [f"ray {k * 90}° hits {h}" for h in ("the rim", "an enemy wall", "a teammate's wall", "own wall")]
+    for e in range(3):  # the three nearest enemies
+        n += [f"enemy {e + 1} {w}" for w in ("ahead", "to the side", "distance", "heading ahead",
+                                           "heading sideways", "speed", "braking", "present")]
+    n += ["unused"] * (P.N_SCALARS - len(n))
+    return n
 
 
 # ------------------------------------------------------------------------------------------- network
@@ -92,33 +111,42 @@ def layer_table(net: PolicyNet) -> list[dict]:
     names, shapes = [k for k, _ in outs], dict(outs)
     layers = [
         {"id": "local_in", "group": "local", "kind": "input", "shape": [P.GRID, P.GRID], "col": 0,
-         "label": "what it sees nearby", "planes": LOCAL_PLANES},
+         "label": "what it sees nearby", "name": "what it sees nearby", "planes": LOCAL_PLANES},
         {"id": "global_in", "group": "global", "kind": "input", "shape": [P.GRID, P.GRID], "col": 0,
-         "label": "the whole arena", "planes": GLOBAL_PLANES},
+         "label": "the whole arena", "name": "the whole arena", "planes": GLOBAL_PLANES},
         {"id": "scalars_in", "group": "scalars", "kind": "input", "shape": [P.N_SCALARS], "col": 0,
-         "label": f"{P.N_SCALARS} exact numbers"},
+         "label": f"{P.N_SCALARS} exact numbers", "name": "exact numbers", "names": scalar_names()},
     ]
     seen16 = {"local": 0, "global": 0}
+    convs = {"local": 0, "global": 0}
     for name in names:
         shape = list(shapes[name].shape)
         group = name.split("_")[0] if not name.startswith("trunk") else "trunk"
+        word = GROUP_WORD[group]
         if len(shape) == 3:
             if shape[1] == P.GRID // 4:  # full patch resolution, one column each
                 seen16[group] += 1
                 col = seen16[group]
             else:
                 col = 4 if shape[1] == P.GRID // 8 else 5
+            convs[group] += 1
             label = f"{shape[0]} filters · {shape[1]}×{shape[2]}"
+            human = f"{word} · conv {convs[group]}"
             kind = "conv"
         else:
             col = {"local_fc": 6, "global_fc": 6, "scalars_h1": 3, "scalars_h2": 6,
                    "trunk1": 7, "trunk2": 8}[name]
             label = f"{shape[0]} neurons"
+            human = {"local_fc": "nearby · summary", "global_fc": "arena · summary",
+                     "scalars_h1": "numbers · layer 1", "scalars_h2": "numbers · layer 2",
+                     "trunk1": "trunk · layer 1", "trunk2": "trunk · layer 2"}[name]
             kind = "dense"
-        layers.append({"id": name, "group": group, "kind": kind, "shape": shape, "col": col, "label": label})
+        layers.append({"id": name, "group": group, "kind": kind, "shape": shape, "col": col,
+                       "label": label, "name": human})
     layers.append({"id": "policy", "group": "head", "kind": "output", "shape": [P.N_ACTIONS], "col": 9,
-                   "label": "move", "names": MOVES})
-    layers.append({"id": "value", "group": "head", "kind": "output", "shape": [1], "col": 9, "label": "value"})
+                   "label": "move", "name": "move", "names": MOVES})
+    layers.append({"id": "value", "group": "head", "kind": "output", "shape": [1], "col": 9,
+                   "label": "value", "name": "value"})
     return layers
 
 
@@ -188,30 +216,29 @@ def edges(net: PolicyNet, layers: list[dict], rng: np.random.Generator) -> list[
                 part = int(np.searchsorted(bounds, t, side="right") - 1)
                 sid = srcs[part][0]
                 lines[sid][0].append(int(t - bounds[part]))
-                lines[sid][1].append(j)
-                lines[sid][2].append(j * A.shape[1] + int(t))
+                lines[sid][1].append(int(j))
+                lines[sid][2].append(int(j) * A.shape[1] + int(t))
         for sid, (si, di, pidx) in lines.items():
             if si:
                 add(sid, dst, si, di, param, pidx)
 
     for prefix, tower in (("local", net.local), ("global", net.globl)):
+        attr = "local" if prefix == "local" else "globl"
         convs = [m for m in tower.net if isinstance(m, nn.Conv2d)]
         names = [f"{prefix}_c{i + 1}" for i in range(len(convs))]
         params = [n for n, m in tower.net.named_modules() if isinstance(m, nn.Conv2d)]
-        conv(f"{prefix}_in", names[0], convs[0], f"{'local' if prefix == 'local' else 'globl'}.net.{params[0]}.weight",
-             composite=True)
+        conv(f"{prefix}_in", names[0], convs[0], f"{attr}.net.{params[0]}.weight", composite=True)
         for i in range(1, len(convs)):
-            conv(names[i - 1], names[i], convs[i], f"{'local' if prefix == 'local' else 'globl'}.net.{params[i]}.weight")
+            conv(names[i - 1], names[i], convs[i], f"{attr}.net.{params[i]}.weight")
         last = by_id[names[-1]]["shape"]
-        dense([(names[-1], int(np.prod(last)))], f"{prefix}_fc", tower.fc.weight,
-              f"{'local' if prefix == 'local' else 'globl'}.fc.weight", 2)
-    dense([("scalars_in", P.N_SCALARS)], "scalars_h1", net.scalars[0].weight, "scalars.0.weight", 1, 120)
-    dense([("scalars_h1", 256)], "scalars_h2", net.scalars[2].weight, "scalars.2.weight", 1, 120)
+        dense([(names[-1], int(np.prod(last)))], f"{prefix}_fc", tower.fc.weight, f"{attr}.fc.weight", 2)
+    dense([("scalars_in", P.N_SCALARS)], "scalars_h1", net.scalars[0].weight, "scalars.0.weight", 2)
+    dense([("scalars_h1", 256)], "scalars_h2", net.scalars[2].weight, "scalars.2.weight", 2)
     dense([("local_fc", 256), ("global_fc", 256), ("scalars_h2", 256)], "trunk1", net.trunk[0].weight,
           "trunk.0.weight", 3)
     dense([("trunk1", net.trunk[2].weight.shape[1])], "trunk2", net.trunk[2].weight, "trunk.2.weight", 2)
-    dense([("trunk2", net.pi.weight.shape[1])], "policy", net.pi.weight, "pi.weight", 40)
-    dense([("trunk2", net.v.weight.shape[1])], "value", net.v.weight, "v.weight", 40)
+    dense([("trunk2", net.pi.weight.shape[1])], "policy", net.pi.weight, "pi.weight", 48)
+    dense([("trunk2", net.v.weight.shape[1])], "value", net.v.weight, "v.weight", 48)
     return groups
 
 
@@ -255,30 +282,73 @@ class Scales:
 # ------------------------------------------------------------------------------------------ web page
 
 class Hub:
-    """Fans server-sent events out to every open page; slow pages drop frames, never topology."""
+    """Fans server-sent events out to every open page and holds the page's controls (pause, step,
+    speed). Slow pages drop frames, never the topology or the control state."""
 
-    def __init__(self):
+    def __init__(self, speed: float):
         self.clients: set[queue.Queue] = set()
         self.lock = threading.Lock()
         self.topology: bytes | None = None
+        self.paused = False
+        self.steps = 0  # decisions still to let through while paused
+        self.speed = speed
+        self.state_msg = self._state()
 
+    # ------------------------------------------------------------------ controls
+    def _state(self) -> bytes:
+        return f"event: state\ndata: {json.dumps({'paused': self.paused, 'speed': self.speed})}\n\n".encode()
+
+    def control(self, body: dict) -> None:
+        with self.lock:
+            if "paused" in body:
+                self.paused = bool(body["paused"])
+                if not self.paused:
+                    self.steps = 0
+            if body.get("step"):
+                self.paused = True
+                self.steps += int(body["step"])
+            if "speed" in body:
+                self.speed = min(16.0, max(0.05, float(body["speed"])))
+            self.state_msg = self._state()
+        self._send(self.state_msg)
+
+    def wait_if_paused(self, meanwhile) -> bool:
+        """Block while paused with no step pending, calling MEANWHILE every 20 ms; say whether it waited."""
+        waited = False
+        while self.paused and self.steps <= 0:
+            waited = True
+            time.sleep(0.02)
+            meanwhile()
+        return waited
+
+    def frame_shown(self) -> None:
+        """A decision reached the page: when stepping, that was the step."""
+        with self.lock:
+            if self.paused and self.steps > 0:
+                self.steps -= 1
+
+    # ------------------------------------------------------------------ events
     def publish(self, event: str, data: str) -> None:
         msg = f"event: {event}\ndata: {data}\n\n".encode()
         if event == "topology":
             self.topology = msg
+        self._send(msg)
+
+    def _send(self, msg: bytes) -> None:
         with self.lock:
             clients = list(self.clients)
         for q in clients:
             try:
                 q.put_nowait(msg)
             except queue.Full:
-                if event == "topology":
-                    while not q.empty():
-                        try:
-                            q.get_nowait()
-                        except queue.Empty:
-                            break
-                    q.put_nowait(msg)
+                if msg.startswith(b"event: frame"):
+                    continue  # the page is behind; it gets the next frame
+                while not q.empty():
+                    try:
+                        q.get_nowait()
+                    except queue.Empty:
+                        break
+                q.put_nowait(msg)
 
     def handler(hub):
         class Handler(BaseHTTPRequestHandler):
@@ -302,10 +372,10 @@ class Hub:
                     q: queue.Queue = queue.Queue(maxsize=6)
                     with hub.lock:
                         hub.clients.add(q)
+                        first = (hub.topology or b"") + hub.state_msg
                     try:
-                        if hub.topology:
-                            self.wfile.write(hub.topology)
-                            self.wfile.flush()
+                        self.wfile.write(first)
+                        self.wfile.flush()
                         while True:
                             try:
                                 msg = q.get(timeout=10)
@@ -320,6 +390,20 @@ class Hub:
                             hub.clients.discard(q)
                 else:
                     self.send_error(404)
+
+            def do_POST(self):
+                if self.path != "/control":
+                    self.send_error(404)
+                    return
+                n = int(self.headers.get("Content-Length") or 0)
+                try:
+                    body = json.loads(self.rfile.read(n) or b"{}")
+                    hub.control(body if isinstance(body, dict) else {})
+                except (ValueError, TypeError):
+                    self.send_error(400)
+                    return
+                self.send_response(204)
+                self.end_headers()
         return Handler
 
 
@@ -393,13 +477,18 @@ def main() -> None:
     rng = np.random.default_rng(0)
     layers = layer_table(net)
     groups = edges(net, layers, rng)
-    hub = Hub()
+    hub = Hub(args.speed)
 
     def publish_topology(old: dict | None) -> None:
         hub.publish("topology", json.dumps({
             "layers": layers, "edges": weigh(groups, weights.state, old or None),
             "update": weights.update, "checkpoint": str(path.relative_to(PROJECT) if path.is_relative_to(PROJECT)
                                                         else path)}))
+
+    def follow_weights() -> None:
+        old = weights.poll()
+        if old is not None:
+            publish_topology(old)
 
     publish_topology(None)
     srv, port = serve(hub, args.port)
@@ -416,15 +505,14 @@ def main() -> None:
         conn = pool.conns[0]
         conn.setblocking(True)
         clock = None
+        speed = hub.speed
         last_frame = last_poll = 0.0
         try:
             while True:
                 now = time.monotonic()
                 if now - last_poll > 1.0:
                     last_poll = now
-                    old = weights.poll()
-                    if old is not None:
-                        publish_topology(old)
+                    follow_weights()
                 mtype, payload = pool._read_msg(conn)
                 if mtype != P.MSG_WORLD:
                     continue
@@ -445,7 +533,8 @@ def main() -> None:
                             outs, probs, value = trace(net, s.local, s.globl, s.scalars, mask)
                             a = int(probs.argmax()) if args.greedy else int(np.random.choice(len(probs), p=probs / probs.sum()))
                             acts[k] = a
-                            if k == 0 and time.monotonic() - last_frame >= 1.0 / MAX_FPS:
+                            # every decision counts while paused (stepping must not skip one)
+                            if k == 0 and (hub.paused or time.monotonic() - last_frame >= 1.0 / MAX_FPS):
                                 last_frame = time.monotonic()
                                 acts_q = np.concatenate([np.clip(scales(n, v), 0, 1) for n, v in outs])
                                 me = next((c for c in m.cycles.values() if c.slot == 0), None)
@@ -456,6 +545,7 @@ def main() -> None:
                                     "local": base64.b64encode(np.ascontiguousarray(s.local).tobytes()).decode(),
                                     "global": base64.b64encode(np.ascontiguousarray(s.globl).tobytes()).decode(),
                                     "scalars": _u8(np.tanh(np.abs(s.scalars))),
+                                    "numbers": [round(float(x), 3) for x in s.scalars],
                                     "probs": [round(float(x), 4) for x in probs], "mask": mask.tolist(),
                                     "action": a, "value": round(value, 3),
                                     "round": m.round_id, "time": round(m.time, 2), "bounds": m.bounds,
@@ -464,8 +554,14 @@ def main() -> None:
                                                for c in m.cycles.values()],
                                     "result": m.last_result,
                                 }, separators=(",", ":")))
+                                hub.frame_shown()
+                # paused: hold the match here (the engine waits for its actions); a step lets it run
+                # until the next decision has been shown
+                if hub.wait_if_paused(follow_weights) or hub.speed != speed:
+                    speed = hub.speed
+                    clock = (time.monotonic(), m.time)
                 if not m.over:
-                    delay = clock[0] + (m.time - clock[1]) / args.speed - time.monotonic()
+                    delay = clock[0] + (m.time - clock[1]) / speed - time.monotonic()
                     if delay > 0:
                         time.sleep(delay)
                 body = bytes([len(acts)]) + bytes(acts)
