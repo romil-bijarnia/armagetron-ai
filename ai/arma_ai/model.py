@@ -25,6 +25,11 @@ from .protocol import GRID, MAP_PLANES, N_ACTIONS, N_GLOBAL_PLANES, N_LOCAL_PLAN
 N_AUX = 2  # territory share in 2 s, dead within 2 s
 AUX_HORIZON = 40  # decisions (2 s at 20 a second)
 
+def _masked(dtype) -> float:
+    """The logit of a forbidden move: very negative, but representable in half precision too."""
+    return -1e8 if dtype in (torch.float32, torch.float64) else -3e4
+
+
 _BITS = torch.tensor([[(v >> b) & 1 for b in range(8)] for v in range(256)], dtype=torch.float32)
 
 
@@ -93,7 +98,7 @@ class PolicyNetV1(nn.Module):
         h = self.trunk(h)
         logits = self.pi(h)
         if mask is not None:
-            logits = logits.masked_fill(~mask, -1e8)
+            logits = logits.masked_fill(~mask, _masked(logits.dtype))
         return logits, self.v(h).squeeze(1)
 
 
@@ -205,7 +210,7 @@ class PolicyNet(nn.Module):
         h = self.trunk_out(maps, scalars)
         logits = self.pi(h)
         if mask is not None:
-            logits = logits.masked_fill(~mask, -1e8)
+            logits = logits.masked_fill(~mask, _masked(logits.dtype))
         return logits, self.v(h).squeeze(1)
 
     def heads(self, maps, scalars, mask=None):
@@ -213,7 +218,7 @@ class PolicyNet(nn.Module):
         h = self.trunk_out(maps, scalars)
         logits = self.pi(h)
         if mask is not None:
-            logits = logits.masked_fill(~mask, -1e8)
+            logits = logits.masked_fill(~mask, _masked(logits.dtype))
         return logits, self.v(h).squeeze(1), self.aux(h)
 
 

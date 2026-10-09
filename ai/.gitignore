@@ -8,3 +8,8 @@ checkpoints/
 .lock
 trainctl.pid
 trainctl.stop
+runs
+runtime
+runs.nosync/
+runtime.nosync/
+sim/build/
