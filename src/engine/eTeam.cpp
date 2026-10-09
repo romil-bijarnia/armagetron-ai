@@ -246,6 +246,11 @@ void eTeam::UpdateAppearance()
     if ( !oldest )
     {
         oldest = OldestAIPlayer();
+        // an AI that brought its own team name (the neural brain) owns the name, even if a
+        // built-in bot joined the AI team before it; built-in bots never set one
+        for ( int i = players.Len() - 1; i >= 0; --i )
+            if ( players(i)->teamname.Len() > 1 )
+                oldest = players(i);
     }
     /* Logic:
     	  No more voting about teamnames.

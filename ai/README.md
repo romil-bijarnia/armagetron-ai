@@ -54,7 +54,7 @@ Space pauses the match and the right arrow steps it one decision at a time, so a
 
 ## Playing against it in the game itself
 
-The trained network also lives inside the game, so no Python is needed to play it: open Armagetron Advanced, start a single-player game, and the first AI opponent is the network (named Brain). Game Setup has a "Neural opponents" setting for how many of the AI players it drives; the rest use the game's built-in AI. The weights are the file `brain/policy.bin` in this repository, exported from a checkpoint with
+The trained network also lives inside the game, so no Python is needed to play it: open Armagetron Advanced, choose Play Game, Local Game, and the first AI opponent is the network (named Brain; with several AIs in the game, the AI team is named after it). Game Setup has a "Neural opponents" setting for how many of the AI players it drives; the rest use the game's built-in AI. The weights are the file `brain/policy.bin` in this repository, exported from a checkpoint with
 
 ```bash
 uv run arma-export                      # runs/main/latest.pt -> brain/policy.bin

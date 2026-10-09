@@ -587,6 +587,14 @@ void Rename( ePlayerNetID * ai, size_t slot )
         want << " " << int( slot + 1 );
     if ( want.Len() > 1 && ai->GetName() != want )
         ai->SetName( want );
+    // all AIs of a local game share one team, named after its oldest member; make sure it is
+    // called after the brain, not after whichever built-in bot happened to join first
+    if ( slot == 0 )
+    {
+        ai->SetTeamname( want );
+        if ( ai->CurrentTeam() )
+            ai->CurrentTeam()->UpdateAppearance();
+    }
 }
 
 // ------------------------------------------------------------------ bookkeeping
