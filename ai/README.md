@@ -42,6 +42,14 @@ Reward is +1 for winning a round, up to −1 for dying (scaled by how many oppon
 
 Runs a real match in a headless engine and draws it live in the terminal: every cycle's trail in its own colour, with a scoreboard of wins. `--bots 1 --ais 1` pits it against the game's best bot, `--ais 2 --bots 2` makes a four-player game, `--size 0` uses the full-size arena and `--speed 4` plays at four times real speed. Ctrl-C quits.
 
+## Watching it think
+
+```bash
+./trainctl brain
+```
+
+Opens a page in the browser that draws the network itself while it plays a live headless match: every layer as a slab of neurons in 3D (the two map towers, the scalar branch, the trunk and the move it picks), each neuron lit by how strongly it fires at that moment, and the strongest connections between layers glowing where signal flows. The 64×64 input maps show exactly what the AI sees, a small view of the arena shows the match, and the four move probabilities and the value estimate update with every decision. Drag to turn it, scroll to zoom; Flat turns it side-on into the classic layer diagram. Run it while training and it follows the newest weights after every update, flashing the connections that changed. Takes the same match flags as `show` (`--ais`, `--bots`, `--size`, `--speed`, `--checkpoint`).
+
 ## Playing against it
 
 ```bash

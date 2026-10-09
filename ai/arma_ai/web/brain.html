@@ -1,0 +1,464 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Armagetron Brain</title>
+<style>
+  :root {
+    --bg: #000;
+    --text: #f2f2f2;
+    --muted: #8a8a8a;
+    --faint: #5e5e5e;
+    --hair: rgba(255, 255, 255, 0.08);
+    --accent: #339cff;
+  }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text); overflow: hidden;
+    font: 16px/1.4 -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", sans-serif; }
+  canvas#scene { position: fixed; inset: 0; width: 100vw; height: 100vh; display: block; }
+  .top { position: fixed; left: 28px; top: 22px; pointer-events: none; }
+  h1 { font-size: 21px; font-weight: 500; margin: 0; letter-spacing: 0.01em; }
+  #status { color: var(--muted); font-size: 14px; margin-top: 4px; }
+  #status .flash { color: var(--accent); }
+  .toggles { position: fixed; right: 28px; top: 22px; display: flex; gap: 8px; }
+  .toggles button { background: transparent; color: var(--muted); border: 1px solid var(--hair);
+    border-radius: 999px; padding: 6px 15px; font: inherit; font-size: 14px; cursor: pointer; }
+  .toggles button.on { color: var(--text); border-color: rgba(255, 255, 255, 0.28); }
+  #moves { position: fixed; right: 28px; bottom: 26px; width: 250px; }
+  .row { display: flex; align-items: center; gap: 12px; height: 31px; color: var(--muted); font-size: 15px; }
+  .row .name { width: 72px; }
+  .row .bar { flex: 1; height: 3px; background: var(--hair); border-radius: 2px; overflow: hidden; }
+  .row .bar i { display: block; height: 100%; width: 0; background: #6b6b6b; transition: width 80ms linear; }
+  .row .pct { width: 42px; text-align: right; font-variant-numeric: tabular-nums; }
+  .row.pick { color: var(--text); }
+  .row.pick .bar i { background: #fff; }
+  .row.off { color: #3c3c3c; }
+  #value { color: var(--muted); font-size: 14px; margin-top: 8px; font-variant-numeric: tabular-nums; }
+  #arenaBox { position: fixed; left: 28px; bottom: 26px; }
+  #arena { width: 210px; height: 210px; display: block; }
+  #result { color: var(--muted); font-size: 13px; margin-top: 8px; height: 18px; }
+  .label { position: fixed; transform: translate(-50%, 0); color: var(--faint); font-size: 12px;
+    white-space: nowrap; pointer-events: none; }
+  #wait { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center;
+    color: var(--muted); font-size: 15px; pointer-events: none; }
+</style>
+<script type="importmap">
+{ "imports": {
+  "three": "https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.js",
+  "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.170.0/examples/jsm/"
+} }
+</script>
+</head>
+<body>
+<canvas id="scene"></canvas>
+<div class="top">
+  <h1>Brain</h1>
+  <div id="status">connecting</div>
+</div>
+<div class="toggles">
+  <button id="tRotate" class="on">Rotate</button>
+  <button id="tLines" class="on">Lines</button>
+  <button id="tFlat">Flat</button>
+</div>
+<div id="arenaBox"><canvas id="arena"></canvas><div id="result"></div></div>
+<div id="moves"></div>
+<div id="labels"></div>
+<div id="wait">waiting for the brain</div>
+
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+// ------------------------------------------------------------------ layout
+const COL = 3.2;                                   // distance between layer columns
+const GROUPS = {                                   // vertical band of each branch
+  local:   { y:  2.35, h: 3.0 },
+  global:  { y: -1.05, h: 2.3 },
+  scalars: { y: -3.45, h: 1.25 },
+  trunk:   { y:  0.0,  h: 4.4 },
+  head:    { y:  0.0,  h: 3.0 },
+};
+const CENTER = new THREE.Vector3(COL * 4.0, -1.0, 0);
+const VIEW_ANGLED = new THREE.Vector3(-16, 6.5, 27);
+const VIEW_FLAT = new THREE.Vector3(0, 0, 33);
+
+const PLANE_COLORS = {                             // input cells: colour of the most important bit
+  'walls': '#d9d9d9', 'own trail': '#22d3ee', 'own head': '#a5f3fc', 'enemy trails': '#fb923c',
+  'enemy heads': '#f87171', 'enemy paths': '#a16207', 'team trails': '#4ade80', 'team heads': '#86efac',
+  'outside': '#2e2e2e',
+};
+const PRIORITY = ['enemy heads', 'own head', 'team heads', 'own trail', 'enemy trails', 'team trails',
+                  'walls', 'enemy paths', 'outside'];
+
+function mulberry32(seed) {
+  return () => {
+    seed |= 0; seed = seed + 0x6D2B79F5 | 0;
+    let t = Math.imul(seed ^ seed >>> 15, 1 | seed);
+    t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+    return ((t ^ t >>> 14) >>> 0) / 4294967296;
+  };
+}
+
+function unitCount(L) { return L.shape.reduce((a, b) => a * b, 1); }
+
+// positions (and point sizes) of every unit of a layer, in the order the server sends them
+function layoutLayer(L, rand) {
+  const n = unitCount(L), pos = new Float32Array(n * 3), size = new Float32Array(n);
+  const g = GROUPS[L.group], x0 = L.col * COL;
+  const put = (i, x, y, z, s) => { pos[3 * i] = x; pos[3 * i + 1] = y; pos[3 * i + 2] = z; size[i] = s; };
+  if (L.kind === 'input' && L.shape.length === 2) {
+    const [H, W] = L.shape, d = g.h / (H - 1);
+    for (let r = 0; r < H; r++) for (let c = 0; c < W; c++)
+      put(r * W + c, x0, g.y + g.h / 2 - r * d, -g.h / 2 + c * d, d * 1.15);
+  } else if (L.kind === 'conv') {
+    const [C, H, W] = L.shape, tc = Math.ceil(Math.sqrt(C)), tr = Math.ceil(C / tc), gap = 1.6;
+    const d = g.h / (tr * H + (tr - 1) * gap), wt = d * (tc * W + (tc - 1) * gap), ht = g.h;
+    for (let ch = 0; ch < C; ch++) {
+      const R = Math.floor(ch / tc), Cc = ch % tc;
+      for (let y = 0; y < H; y++) for (let xx = 0; xx < W; xx++)
+        put((ch * H + y) * W + xx, x0 + (rand() - 0.5) * 0.22,
+            g.y + ht / 2 - (R * (H + gap) + y) * d, -wt / 2 + (Cc * (W + gap) + xx) * d, d * 1.1);
+    }
+  } else if (L.kind === 'output') {
+    for (let i = 0; i < n; i++)
+      put(i, x0, L.id === 'value' ? -2.3 : 1.25 - i * 0.75, 0, 0.26);
+  } else {                                         // dense layers and the scalar input: a thick cloud
+    const side = Math.ceil(Math.sqrt(n)),
+          h = L.kind === 'input' || L.group === 'scalars' ? g.h : Math.min(g.h, 0.62 * g.h + n / 900);
+    const d = h / Math.max(side - 1, 1), depth = L.kind === 'input' ? 0.05 : 0.7;
+    for (let i = 0; i < n; i++) {
+      const r = Math.floor(i / side), c = i % side;
+      put(i, x0 + (rand() - 0.5) * depth, g.y + h / 2 - r * d + (rand() - 0.5) * d * 0.6,
+          -h / 2 + c * d + (rand() - 0.5) * d * 0.6, Math.max(d * 0.55, 0.035));
+    }
+  }
+  return { pos, size };
+}
+
+// ------------------------------------------------------------------ scene
+const canvas = document.getElementById('scene');
+const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, powerPreference: 'high-performance' });
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x000000);
+const camera = new THREE.PerspectiveCamera(40, 1, 0.1, 300);
+camera.position.copy(CENTER).add(VIEW_ANGLED);
+const controls = new OrbitControls(camera, canvas);
+controls.target.copy(CENTER);
+controls.enableDamping = true;
+controls.dampingFactor = 0.08;
+controls.autoRotate = true;
+controls.autoRotateSpeed = 0.35;
+controls.minDistance = 6;
+controls.maxDistance = 80;
+
+const pointMaterial = new THREE.ShaderMaterial({
+  uniforms: { uScale: { value: 1000 } },
+  vertexShader: `
+    attribute float act; attribute float size; attribute vec3 tint;
+    uniform float uScale; varying float vA; varying vec3 vT;
+    void main() {
+      vA = act; vT = tint;
+      vec4 mv = modelViewMatrix * vec4(position, 1.0);
+      gl_PointSize = max(2.0, size * (0.9 + 1.7 * act) * uScale / -mv.z);
+      gl_Position = projectionMatrix * mv;
+    }`,
+  fragmentShader: `
+    varying float vA; varying vec3 vT;
+    void main() {
+      vec2 c = gl_PointCoord - 0.5; float r = dot(c, c);
+      if (r > 0.25) discard;
+      float soft = smoothstep(0.25, 0.0, r);
+      gl_FragColor = vec4(vT * (0.14 + 0.86 * vA), soft * (0.32 + 0.68 * vA));
+    }`,
+  transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
+});
+const lineMaterial = new THREE.LineBasicMaterial({
+  vertexColors: true, transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
+});
+
+let T = null;          // everything derived from the current topology
+let points = null, lines = null;
+let shown = null, target = null;   // displayed and latest activations of every unit (0..1)
+let flash = 0;         // 1 right after new weights arrive, fading out
+
+function b64(s, Type) {
+  const bin = atob(s), u8 = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) u8[i] = bin.charCodeAt(i);
+  return Type === Uint32Array ? new Uint32Array(u8.buffer) : u8;
+}
+
+function buildPoints(layers) {
+  const rand = mulberry32(7);
+  const start = [], parts = [];
+  let total = 0;
+  for (const L of layers) {
+    start.push(total);
+    const p = layoutLayer(L, rand);
+    parts.push(p);
+    total += unitCount(L);
+  }
+  const pos = new Float32Array(total * 3), size = new Float32Array(total), tint = new Float32Array(total * 3);
+  parts.forEach((p, i) => { pos.set(p.pos, start[i] * 3); size.set(p.size, start[i]); });
+  tint.fill(1);
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+  geo.setAttribute('size', new THREE.BufferAttribute(size, 1));
+  geo.setAttribute('tint', new THREE.BufferAttribute(tint, 3).setUsage(THREE.DynamicDrawUsage));
+  geo.setAttribute('act', new THREE.BufferAttribute(new Float32Array(total), 1).setUsage(THREE.DynamicDrawUsage));
+  if (points) { scene.remove(points); points.geometry.dispose(); }
+  points = new THREE.Points(geo, pointMaterial);
+  points.frustumCulled = false;
+  scene.add(points);
+  shown = new Float32Array(total);
+  target = new Float32Array(total);
+  return { start, pos, total };
+}
+
+function buildLines(topo) {
+  const idx = Object.fromEntries(topo.layers.map((L, i) => [L.id, i]));
+  let n = 0;
+  const groups = topo.edges.map(e => {
+    const si = b64(e.si, Uint32Array), di = b64(e.di, Uint32Array), w = b64(e.w), dw = e.dw ? b64(e.dw) : null;
+    n += si.length;
+    // many near-parallel lines between two small layers pile up into a solid bar; thin them out
+    return { s0: T.start[idx[e.src]], d0: T.start[idx[e.dst]], si, di, w, dw, gain: Math.min(1, 300 / si.length) };
+  });
+  const pos = new Float32Array(n * 6), src = new Uint32Array(n), wt = new Float32Array(n), dwt = new Float32Array(n);
+  let k = 0;
+  for (const g of groups) for (let j = 0; j < g.si.length; j++, k++) {
+    const a = g.s0 + g.si[j], b = g.d0 + g.di[j];
+    pos.set(T.pos.subarray(3 * a, 3 * a + 3), 6 * k);
+    pos.set(T.pos.subarray(3 * b, 3 * b + 3), 6 * k + 3);
+    src[k] = a; wt[k] = g.w[j] / 255 * g.gain; dwt[k] = g.dw ? g.dw[j] / 255 : 0;
+  }
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+  geo.setAttribute('color', new THREE.BufferAttribute(new Float32Array(n * 6), 3).setUsage(THREE.DynamicDrawUsage));
+  const visible = lines ? lines.visible : true;
+  if (lines) { scene.remove(lines); lines.geometry.dispose(); }
+  lines = new THREE.LineSegments(geo, lineMaterial);
+  lines.frustumCulled = false;
+  lines.visible = visible;
+  scene.add(lines);
+  T.lineSrc = src; T.lineW = wt; T.lineDW = dwt; T.nLines = n;
+}
+
+const ACCENT = new THREE.Color('#339cff');
+function updateLines() {
+  if (!lines || !lines.visible) return;
+  const col = lines.geometry.attributes.color.array, n = T.nLines;
+  for (let k = 0; k < n; k++) {
+    const w = T.lineW[k], a = shown[T.lineSrc[k]];
+    const white = Math.min(1, w * 0.016 + w * a * a * 0.32);
+    const blue = T.lineDW[k] * flash * 0.5;
+    const r = white + blue * ACCENT.r, g = white + blue * ACCENT.g, b = white + blue * ACCENT.b;
+    col[6 * k] = col[6 * k + 3] = r; col[6 * k + 1] = col[6 * k + 4] = g; col[6 * k + 2] = col[6 * k + 5] = b;
+  }
+  lines.geometry.attributes.color.needsUpdate = true;
+}
+
+// ------------------------------------------------------------------ labels
+const labelBox = document.getElementById('labels');
+function buildLabels(layers) {
+  labelBox.innerHTML = '';
+  T.labels = layers.map((L, i) => {
+    const el = document.createElement('div');
+    el.className = 'label';
+    el.textContent = L.label;
+    labelBox.appendChild(el);
+    let minY = Infinity;
+    for (let u = 0; u < unitCount(L); u++) minY = Math.min(minY, T.pos[3 * (T.start[i] + u) + 1]);
+    return { el, at: new THREE.Vector3(L.col * COL, minY - 0.28, 0) };
+  });
+}
+const tmp = new THREE.Vector3();
+function placeLabels() {
+  if (!T || !T.labels) return;
+  const w = window.innerWidth, h = window.innerHeight;
+  for (const { el, at } of T.labels) {
+    tmp.copy(at).project(camera);
+    if (tmp.z > 1) { el.style.display = 'none'; continue; }
+    el.style.display = '';
+    el.style.left = `${(tmp.x * 0.5 + 0.5) * w}px`;
+    el.style.top = `${(-tmp.y * 0.5 + 0.5) * h}px`;
+  }
+}
+
+// ------------------------------------------------------------------ side panels
+const movesBox = document.getElementById('moves');
+function buildMoves(names) {
+  movesBox.innerHTML = names.map(n =>
+    `<div class="row"><span class="name">${n}</span><span class="bar"><i></i></span><span class="pct"></span></div>`
+  ).join('') + '<div id="value"></div>';
+}
+function showMoves(f) {
+  const rows = movesBox.querySelectorAll('.row');
+  rows.forEach((row, i) => {
+    const p = f.probs[i];
+    row.classList.toggle('pick', i === f.action);
+    row.classList.toggle('off', !f.mask[i]);
+    row.querySelector('i').style.width = `${(p * 100).toFixed(1)}%`;
+    row.querySelector('.pct').textContent = f.mask[i] ? `${Math.round(p * 100)}%` : '';
+  });
+  const v = f.value;
+  document.getElementById('value').textContent = `Value ${v >= 0 ? '+' : ''}${v.toFixed(2)}`;
+}
+
+const arena = document.getElementById('arena'), actx = arena.getContext('2d');
+let trails = {}, lastRound = null;
+function drawArena(f) {
+  const dpr = Math.min(window.devicePixelRatio, 2), S = 210;
+  if (arena.width !== S * dpr) { arena.width = arena.height = S * dpr; }
+  if (f.round !== lastRound) { trails = {}; lastRound = f.round; }
+  const [lx, ly, hx, hy] = f.bounds, pad = 8, span = Math.max(hx - lx, hy - ly) || 1;
+  const k = (S - 2 * pad) / span, ox = pad + ((S - 2 * pad) - (hx - lx) * k) / 2, oy = pad + ((S - 2 * pad) - (hy - ly) * k) / 2;
+  const X = x => (ox + (x - lx) * k) * dpr, Y = y => (S - (oy + (y - ly) * k)) * dpr;
+  actx.clearRect(0, 0, arena.width, arena.height);
+  actx.strokeStyle = 'rgba(255,255,255,0.14)';
+  actx.lineWidth = dpr;
+  actx.strokeRect(X(lx), Y(hy), (hx - lx) * k * dpr, (hy - ly) * k * dpr);
+  for (const [pid, x, y, alive, color] of f.cycles) {
+    const t = trails[pid] || (trails[pid] = { color, pts: [] });
+    const last = t.pts[t.pts.length - 1];
+    if (alive && (!last || Math.hypot(last[0] - x, last[1] - y) > 0.4)) t.pts.push([x, y]);
+    t.alive = alive;
+  }
+  for (const [pid, t] of Object.entries(trails)) {
+    if (t.pts.length < 1) continue;
+    const me = Number(pid) === f.me;
+    actx.strokeStyle = t.color;
+    actx.globalAlpha = t.alive ? 1 : 0.35;
+    actx.lineWidth = (me ? 2 : 1.4) * dpr;
+    actx.beginPath();
+    t.pts.forEach(([x, y], i) => i ? actx.lineTo(X(x), Y(y)) : actx.moveTo(X(x), Y(y)));
+    actx.stroke();
+    if (t.alive) {
+      const [x, y] = t.pts[t.pts.length - 1];
+      actx.fillStyle = t.color;
+      actx.beginPath(); actx.arc(X(x), Y(y), (me ? 3 : 2.4) * dpr, 0, Math.PI * 2); actx.fill();
+    }
+  }
+  actx.globalAlpha = 1;
+  document.getElementById('result').textContent = f.result ? `last round: ${f.result}` : '';
+}
+
+// ------------------------------------------------------------------ data
+const statusEl = document.getElementById('status');
+let topoUpdate = 0, lastFrame = 0;
+
+function onTopology(topo) {
+  const first = !T || T.total !== topo.layers.reduce((a, L) => a + unitCount(L), 0);
+  if (first) {
+    T = buildPoints(topo.layers);
+    T.layers = topo.layers;
+    buildLabels(topo.layers);
+    buildMoves(topo.layers.find(L => L.id === 'policy').names);
+  }
+  buildLines(topo);
+  if (!first && topo.edges.some(e => e.dw)) flash = 1;
+  topoUpdate = topo.update;
+  document.getElementById('wait').style.display = 'none';
+}
+
+const tintAttr = () => points.geometry.attributes.tint;
+function inputCells(layerIndex, bytes) {
+  const L = T.layers[layerIndex], s0 = T.start[layerIndex], tint = tintAttr().array;
+  const bitColor = L.planes.map(p => new THREE.Color(PLANE_COLORS[p] || '#ffffff'));
+  const order = PRIORITY.map(p => L.planes.indexOf(p)).filter(i => i >= 0);
+  const outside = L.planes.indexOf('outside');
+  for (let c = 0; c < bytes.length; c++) {
+    const b = bytes[c], u = s0 + c;
+    if (!b) { target[u] = 0; tint[3 * u] = tint[3 * u + 1] = tint[3 * u + 2] = 1; continue; }
+    const bit = order.find(i => b & (1 << i));
+    const col = bitColor[bit];
+    tint[3 * u] = col.r; tint[3 * u + 1] = col.g; tint[3 * u + 2] = col.b;
+    target[u] = bit === outside ? 0.35 : 1;
+  }
+}
+
+function onFrame(f) {
+  if (!T) return;
+  lastFrame = performance.now();
+  const acts = b64(f.acts);
+  let k = 0;
+  T.layers.forEach((L, i) => {
+    const s0 = T.start[i], n = unitCount(L);
+    if (L.kind === 'conv' || L.kind === 'dense') {
+      for (let u = 0; u < n; u++) target[s0 + u] = acts[k++] / 255;
+    } else if (L.id === 'local_in') inputCells(i, b64(f.local));
+    else if (L.id === 'global_in') inputCells(i, b64(f.global));
+    else if (L.id === 'scalars_in') { const s = b64(f.scalars); for (let u = 0; u < n; u++) target[s0 + u] = s[u] / 255; }
+    else if (L.id === 'policy') for (let u = 0; u < n; u++) target[s0 + u] = Math.sqrt(f.probs[u]);
+    else if (L.id === 'value') target[s0] = Math.min(1, Math.abs(f.value));
+  });
+  tintAttr().needsUpdate = true;
+  showMoves(f);
+  drawArena(f);
+  const training = f.trained_ago != null && f.trained_ago < 120;
+  statusEl.innerHTML = training
+    ? `training · update ${f.update} · <span class="${flash > 0.05 ? 'flash' : ''}">new weights ${Math.round(f.trained_ago)} s ago</span>`
+    : `live · update ${f.update}`;
+}
+
+function connect() {
+  const es = new EventSource('/events');
+  es.addEventListener('topology', e => onTopology(JSON.parse(e.data)));
+  es.addEventListener('frame', e => onFrame(JSON.parse(e.data)));
+  es.onerror = () => { statusEl.textContent = 'reconnecting'; };
+}
+connect();
+
+// ------------------------------------------------------------------ controls
+const tRotate = document.getElementById('tRotate'), tLines = document.getElementById('tLines'),
+      tFlat = document.getElementById('tFlat');
+let flat = false, fly = null;
+function flyTo(offset) {
+  fly = { from: camera.position.clone(), to: CENTER.clone().add(offset), t: 0 };
+}
+tRotate.onclick = () => { controls.autoRotate = !controls.autoRotate; tRotate.classList.toggle('on', controls.autoRotate); };
+tLines.onclick = () => { if (lines) lines.visible = !lines.visible; tLines.classList.toggle('on', !lines || lines.visible); };
+tFlat.onclick = () => {
+  flat = !flat;
+  tFlat.classList.toggle('on', flat);
+  controls.autoRotate = !flat && tRotate.classList.contains('on');
+  flyTo(flat ? VIEW_FLAT : VIEW_ANGLED);
+};
+
+function resize() {
+  const w = window.innerWidth, h = window.innerHeight;
+  renderer.setSize(w, h, false);
+  camera.aspect = w / h;
+  camera.updateProjectionMatrix();
+  pointMaterial.uniforms.uScale.value = renderer.domElement.height / (2 * Math.tan(THREE.MathUtils.degToRad(camera.fov / 2)));
+}
+window.addEventListener('resize', resize);
+resize();
+
+let prev = performance.now();
+function frame(now) {
+  const dt = Math.min(0.1, (now - prev) / 1000); prev = now;
+  if (fly) {
+    fly.t = Math.min(1, fly.t + dt / 0.9);
+    const e = fly.t < 0.5 ? 2 * fly.t * fly.t : 1 - Math.pow(-2 * fly.t + 2, 2) / 2;
+    camera.position.lerpVectors(fly.from, fly.to, e);
+    if (fly.t >= 1) fly = null;
+  }
+  controls.update();
+  if (T) {
+    const a = 1 - Math.exp(-dt * 18);
+    for (let i = 0; i < shown.length; i++) shown[i] += (target[i] - shown[i]) * a;
+    points.geometry.attributes.act.array.set(shown);
+    points.geometry.attributes.act.needsUpdate = true;
+    updateLines();
+    flash = Math.max(0, flash - dt / 2.2);
+    if (performance.now() - lastFrame > 3000 && lastFrame) statusEl.textContent = 'paused · no new decisions';
+  }
+  placeLabels();
+  renderer.render(scene, camera);
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>

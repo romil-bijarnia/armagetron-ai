@@ -21,9 +21,13 @@ arma-league = "arma_ai.league:main"
 arma-smoke = "arma_ai.smoke:main"
 arma-dash = "arma_ai.dashboard:main"
 arma-show = "arma_ai.show:main"
+arma-brain = "arma_ai.brain:main"
 
 [dependency-groups]
 dev = ["pytest>=8,<10"]
 
 [tool.setuptools.packages.find]
 include = ["arma_ai*"]
+
+[tool.setuptools.package-data]
+arma_ai = ["web/*.html"]

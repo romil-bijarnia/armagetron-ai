@@ -124,3 +124,6 @@ wget-log*
 /build-dedicated/
 /build-macos/
 /build-asan/
+
+# the brain visualizer page is source, not a generated doc
+!/ai/arma_ai/web/*.html
