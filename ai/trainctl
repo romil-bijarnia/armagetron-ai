@@ -1,12 +1,12 @@
 #!/bin/sh
 # trainctl: start, stop and watch Armagetron AI training from any terminal.
 #
-#   ./trainctl start [flags]    train in the background with the Mac kept awake and show live charts;
-#                               restarts itself from the last checkpoint if it crashes
+#   ./trainctl start [flags]    train in the background with the Mac kept awake and open the brain page
+#                               in the browser; restarts itself from the last checkpoint if it crashes
 #   ./trainctl gentle [flags]   same, but 6 engines at low priority so the laptop stays usable
 #   ./trainctl stop             stop training (it saves a checkpoint on the way out)
 #   ./trainctl status           is it running, latest progress, when the last checkpoint was saved
-#   ./trainctl watch            live charts of how training is going (Ctrl-C closes them, not training)
+#   ./trainctl watch            terminal charts of how training is going (Ctrl-C closes them, not training)
 #   ./trainctl show [flags]     watch the AI play a match, drawn in the terminal (Ctrl-C quits)
 #   ./trainctl brain [flags]    watch the network think: every neuron live in the browser, with pause
 #                               and single-step; follows the newest weights while training runs
@@ -38,14 +38,20 @@ short="$(printf '%s' "$self" | sed "s|^$HOME|~|")"  # how to call this script, f
 
 running() { [ -f "$pidfile" ] && kill -0 "$(cat "$pidfile")" 2>/dev/null; }
 dashboard() { exec uv run -q arma-dash --run "$run"; }
+brainpage() {
+    # the brain page follows runs/<run>/actor.pt, which exists after the first update: wait for it
+    # in the background, then start the page (it opens the browser itself); the brain log is beside train.log
+    pkill -f "bin/arma-brain" 2>/dev/null
+    nohup sh -c 'i=0; while [ ! -f "'"$run"'/actor.pt" ] && [ $i -lt 600 ]; do sleep 1; i=$((i+1)); done; exec uv run -q arma-brain --checkpoint "'"$run"'/actor.pt"' >> "$run/brain.log" 2>&1 &
+}
 trainer_pids() { pgrep -f "bin/arma-train"; }
 stamp() { date '+%Y-%m-%d %H:%M:%S'; }
 
 case "$cmd" in
 start | gentle)
     if running; then
-        echo "already training"
-        [ -t 1 ] && dashboard  # in a terminal, show the live charts
+        echo "already training in $run"
+        pgrep -f "bin/arma-brain" >/dev/null || brainpage
         exit 0
     fi
     if [ -n "$(trainer_pids)" ]; then
@@ -62,11 +68,9 @@ start | gentle)
     fi
     echo $! > "$pidfile"
     echo "training started ($cmd) in $run"
-    if [ -t 1 ]; then
-        sleep 1
-        dashboard  # live charts right here; Ctrl-C closes them and training keeps going
-    fi
-    echo "watch it: $short watch"
+    mkdir -p "$run"
+    brainpage
+    echo "the brain page opens in your browser once the first update has landed (a minute or two)"
     echo "stop it:  $short stop"
     ;;
 
@@ -100,11 +104,13 @@ _supervise)
 stop)
     if ! running && [ -z "$(trainer_pids)" ]; then
         echo "not training"
+        pkill -f "bin/arma-brain" 2>/dev/null
         pkill -f "/runtime/$(basename "$run")/engine" 2>/dev/null
         rm -f "$pidfile" "$stopflag"
         exit 0
     fi
     touch "$stopflag"
+    pkill -f "bin/arma-brain" 2>/dev/null
     pids=$(trainer_pids)
     [ -n "$pids" ] && kill -TERM $pids
     echo "stopping and saving a checkpoint..."
