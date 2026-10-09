@@ -92,7 +92,7 @@
 <div id="arenaBox">
   <canvas id="arena"></canvas>
   <div id="result"></div>
-  <div id="legend"><span><i style="background:#22d3ee"></i>you</span><span><i style="background:#fb923c"></i>enemy</span><span><i style="background:#d9d9d9"></i>walls</span></div>
+  <div id="legend"><span><i style="background:#22d3ee"></i>you</span><span><i style="background:#fb923c"></i>enemy</span><span><i style="background:#9ca3af"></i>walls</span></div>
 </div>
 <div id="moves"></div>
 <div id="labels"></div>
@@ -123,7 +123,7 @@ const VIEW_FLAT = new THREE.Vector3(0, 0, 33);
 const SPEEDS = [0.25, 0.5, 1, 2, 4];
 
 const PLANE_COLORS = {                             // input cells: colour of the most important bit
-  'walls': '#d9d9d9', 'own trail': '#22d3ee', 'own head': '#a5f3fc', 'enemy trails': '#fb923c',
+  'walls': '#9ca3af', 'own trail': '#22d3ee', 'own head': '#a5f3fc', 'enemy trails': '#fb923c',
   'enemy heads': '#f87171', 'enemy paths': '#a16207', 'team trails': '#4ade80', 'team heads': '#86efac',
   'outside': '#2e2e2e',
 };
@@ -492,7 +492,8 @@ function inputCells(layerIndex, bytes) {
     const bit = order.find(i => b & (1 << i));
     const col = bitColor[bit];
     tint[3 * u] = col.r; tint[3 * u + 1] = col.g; tint[3 * u + 2] = col.b;
-    target[u] = bit === outside ? 0.45 : 1;
+    // the rim is the dullest wall on the map: it stays a quiet grey while trails and heads burn
+    target[u] = bit === outside ? 0.4 : L.planes[bit] === 'walls' ? 0.5 : 1;
   }
 }
 
