@@ -31,7 +31,7 @@ import torch.nn as nn
 
 from . import protocol as P
 from .engine import ArenaConfig, EnginePool, _parse_step
-from .model import PolicyNet, make_net, net_version
+from .model import TOWER_MAPS, TOWER_NAMES, PolicyNet, make_net, net_version
 from .show import Match
 from .train import MASK_TABLE
 
@@ -69,10 +69,9 @@ MAP_IDS = ("local_in", "close_in", "global_in", "territory_in")
 MAP_LABELS = ("what it sees nearby", "up close", "the whole arena", "who gets there first")
 MAP_PLANE_NAMES = (LOCAL_PLANES, LOCAL_PLANES, GLOBAL_PLANES,
                    ["mine first", "enemy first", "d1", "d2", "d4", "d8", "d16", "d32"])
-GROUP_OF = {"local": "local", "close": "close", "global": "global", "territory": "territory"}
-GROUP_WORD = {"local": "nearby", "close": "close", "global": "arena", "territory": "territory", "scalars": "numbers",
-              "trunk": "trunk"}
-TOWER_GROUPS = ("local", "close", "global", "territory")  # v2 tower order == map order
+MAP_GROUPS = ("local", "close", "global", "territory")  # the page's colour band of each input map
+GROUP_WORD = {"player": "player view", "arena": "arena view", "scalars": "numbers", "trunk": "trunk"}
+TOWER_GROUPS = TOWER_NAMES  # one conv tower per frame of reference: ("player", "arena")
 
 
 def stacked(maps: np.ndarray, prev: np.ndarray | None) -> np.ndarray:
@@ -100,11 +99,9 @@ def trace(net: PolicyNet, maps: np.ndarray, scalars: np.ndarray, mask: np.ndarra
         return h
 
     parts = []
-    for m, group in enumerate(TOWER_GROUPS):
-        tower = net.towers[m]
-        cur = net.unpack[m](x_in[:, m])
-        prev = net.unpack[m](x_in[:, P.N_MAPS + m])
-        x = torch.relu(tower.stem(torch.cat([cur, prev], 1)))
+    for t, group in enumerate(TOWER_GROUPS):
+        tower = net.towers[t]
+        x = torch.relu(tower.stem(net.tower_input(x_in, t)))
         out.append((f"{group}_c1", x[0]))
         n = 1
         for b in tower.res:
@@ -132,7 +129,7 @@ def layer_table(net: PolicyNet) -> list[dict]:
     outs = trace(net, blank, np.zeros(P.N_SCALARS, np.float32), np.ones(P.N_ACTIONS, bool))[0]
     names, shapes = [k for k, _ in outs], dict(outs)
     layers = []
-    for mid, label, planes, group in zip(MAP_IDS, MAP_LABELS, MAP_PLANE_NAMES, TOWER_GROUPS):
+    for mid, label, planes, group in zip(MAP_IDS, MAP_LABELS, MAP_PLANE_NAMES, MAP_GROUPS):
         layers.append({"id": mid, "group": group, "kind": "input", "shape": [P.GRID, P.GRID], "col": 0,
                        "label": label, "name": label, "planes": planes})
     layers.append({"id": "scalars_in", "group": "scalars", "kind": "input", "shape": [P.N_SCALARS], "col": 0,
@@ -185,17 +182,40 @@ def edges(net: PolicyNet, layers: list[dict], rng: np.random.Generator) -> list[
         groups.append({"src": src, "dst": dst, "si": np.asarray(si, np.int64), "di": np.asarray(di, np.int64),
                        "param": param, "pidx": np.asarray(pidx, np.int64)})
 
-    def conv(src, dst, mod, param, composite=False):
+    def stem(t, dst, mod, param):
+        """Lines from the tower's input maps into its first layer: each map is drawn as one point
+        per cell (all its planes together, current frame only), and every sampled stem unit gets
+        a line from the cell of each map it weighs most."""
+        W = mod.weight.detach().numpy()
+        co_n, ci_n, k, _ = W.shape
+        s = mod.stride[0]
+        A = np.abs(W)
+        _, ho, wo = by_id[dst]["shape"]
+        units = rng.choice(co_n * ho * wo, size=min(CONV_LINES, co_n * ho * wo), replace=False)
+        first = 0
+        for m in TOWER_MAPS[t]:
+            planes = P.MAP_PLANES[m]
+            Am = A[:, first:first + planes]  # this map's current-frame planes
+            si, di, pidx = [], [], []
+            for u in units:
+                co, rem = divmod(int(u), ho * wo)
+                y, x = divmod(rem, wo)
+                flat = Am[co].reshape(-1)  # (planes, k, k): stride == kernel, so every tap is inside
+                tap = int(flat.argmax())
+                ci, rem2 = divmod(tap, k * k)
+                ky, kx = divmod(rem2, k)
+                si.append((y * s + ky) * P.GRID + x * s + kx)
+                di.append(int(u))
+                pidx.append(((co * ci_n + first + ci) * k + ky) * k + kx)
+            add(MAP_IDS[m], dst, si, di, param, pidx)
+            first += planes
+
+    def conv(src, dst, mod, param):
         W = mod.weight.detach().numpy()
         co_n, ci_n, k, _ = W.shape
         s, p = mod.stride[0], mod.padding[0]
         A = np.abs(W)
-        if composite:  # the input is drawn as one point per cell, all planes together (current frame only)
-            hi = wi = P.GRID
-            A = A[:, :A.shape[1] // 2]  # ignore the stacked previous-frame planes for the picture
-            ci_n_pic = A.shape[1]
-        else:
-            _, hi, wi = by_id[src]["shape"]
+        _, hi, wi = by_id[src]["shape"]
         _, ho, wo = by_id[dst]["shape"]
         units = rng.choice(co_n * ho * wo, size=min(CONV_LINES, co_n * ho * wo), replace=False)
         si, di, pidx = [], [], []
@@ -205,23 +225,15 @@ def edges(net: PolicyNet, layers: list[dict], rng: np.random.Generator) -> list[
             ys, xs = y * s - p + np.arange(k), x * s - p + np.arange(k)
             valid = ((ys >= 0) & (ys < hi))[:, None] & ((xs >= 0) & (xs < wi))[None, :]
             cand = np.where(valid[None], A[co], -1.0)  # (ci, k, k)
-            if composite:
-                best_ci = cand.argmax(0)
-                cand = cand.max(0)[None]
             flat = cand.reshape(-1)
             for t in _top(flat, 2):
                 if flat[t] < 0:
                     continue
                 ci, rem2 = divmod(int(t), k * k)
                 ky, kx = divmod(rem2, k)
-                if composite:
-                    ci_w = int(best_ci[ky, kx])
-                    si.append(int(ys[ky]) * wi + int(xs[kx]))
-                else:
-                    ci_w = ci
-                    si.append(ci * hi * wi + int(ys[ky]) * wi + int(xs[kx]))
+                si.append(ci * hi * wi + int(ys[ky]) * wi + int(xs[kx]))
                 di.append(int(u))
-                pidx.append(((co * ci_n + ci_w) * k + ky) * k + kx)
+                pidx.append(((co * ci_n + ci) * k + ky) * k + kx)
         add(src, dst, si, di, param, pidx)
 
     def dense(srcs, dst, W, param, per_unit, units=DENSE_LINES):
@@ -252,8 +264,8 @@ def edges(net: PolicyNet, layers: list[dict], rng: np.random.Generator) -> list[
         # the page shows one slab per ReLU output: stem, each residual block (after its 2nd conv), two downs
         names = [f"{group}_c1"] + [f"{group}_c{2 + i}" for i in range(len(tower.res))] + \
                 [f"{group}_c{2 + len(tower.res)}", f"{group}_c{3 + len(tower.res)}"]
-        # stem: from the input map
-        conv(f"{group}_in", names[0], tower.stem, seq[0][0], composite=True)
+        # stem: from the tower's input maps
+        stem(m, names[0], tower.stem, seq[0][0])
         prev_name = names[0]
         for b_i, b in enumerate(tower.res):
             # a residual block is drawn as one slab; its lines come from the block's second conv
@@ -527,7 +539,11 @@ class Weights:
         old = self.state
         if net_version(ck["model"]) != 2:
             raise SystemExit("the brain page shows v2 networks; export/convert older checkpoints first")
-        self.net.load_state_dict(ck["model"])
+        try:
+            self.net.load_state_dict(ck["model"])
+        except RuntimeError:
+            raise SystemExit(f"{self.path} holds an older v2 layout (one tower per map); the page shows the "
+                             "two-tower network") from None
         self.state = {k: v.clone() for k, v in self.net.state_dict().items()}
         self.update = int(ck.get("update", 0))
         if self.mtime:

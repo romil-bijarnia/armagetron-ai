@@ -40,8 +40,11 @@ def test_edges_point_at_real_units_and_weights():
     by_id = {L["id"]: L for L in layers}
     groups = edges(net, layers, np.random.default_rng(1))
     state = net.state_dict()
-    assert {g["dst"] for g in groups} >= {"local_c1", "close_c1", "global_c1", "territory_c1", "local_fc", "trunk1",
+    assert {g["dst"] for g in groups} >= {"player_c1", "arena_c1", "player_fc", "arena_fc", "trunk1",
                                           "trunk2", "policy", "value"}
+    # every input map feeds its tower's first layer
+    assert {(g["src"], g["dst"]) for g in groups} >= {("local_in", "player_c1"), ("close_in", "player_c1"),
+                                                      ("global_in", "arena_c1"), ("territory_in", "arena_c1")}
     for g in groups:
         assert g["si"].min() >= 0 and g["si"].max() < _units(by_id[g["src"]])
         assert g["di"].min() >= 0 and g["di"].max() < _units(by_id[g["dst"]])

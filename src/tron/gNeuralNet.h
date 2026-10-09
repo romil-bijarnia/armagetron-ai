@@ -63,6 +63,7 @@ namespace gNeuralNet
     {
         std::vector< Conv > convs;  //!< in forward order; residual pairs are flagged by `resPair`
         std::vector< int > resPair; //!< for each conv: 0 = plain, 1 = first of a residual pair, 2 = second
+        std::vector< int > maps;    //!< which maps feed it, in the order their planes are stacked
         Linear fc;
         bool hasFc;
         Tower(): hasFc( false ) {}
@@ -79,8 +80,8 @@ namespace gNeuralNet
         int Update() const { return update_; } //!< the training update the weights come from
         int Version() const { return version_; } //!< 1 or 2
 
-        //! one decision. MAPS points at NumMaps() grids of Grid()*Grid() bytes (v1: local,
-        //! global; v2: local, close, global, territory). SCALARS has NumScalars() floats, MASK has
+        //! one decision. MAPS points at NumMaps() grids of Grid()*Grid() bytes, the game's four
+        //! maps in order: local, close, global, territory (a v1 net reads only local and global). SCALARS has NumScalars() floats, MASK has
         //! bit a set when move a is allowed. Fills PROBS (NumActions() entries) and VALUE, and
         //! returns the move: the most likely one, or a draw from the distribution when SAMPLE is
         //! set (RNG is advanced then). A v2 net keeps the previous frame's maps itself (frame
@@ -104,8 +105,9 @@ namespace gNeuralNet
         int version_, grid_, nMaps_, nScalars_, nActions_, update_;
         std::vector< int > mapPlanes_;      //!< planes per map (v1: 8, 8; v2: 8, 8, 8, 8)
         bool stackPrev_;                    //!< v2: the previous frame's maps are stacked under the current ones
-        std::vector< Tower > towers_;       //!< one per map in v1; in v2 one per map too (territory shares the global one's shape)
-        Linear scalars0_, scalars2_, trunk0_, trunk2_, pi_, v_;
+        std::vector< Tower > towers_;       //!< v1: one per map; v2: as the file's tower table says
+        Linear scalars0_, scalars2_, trunk0_, trunk2_, pi_, v_, aux_;
+        bool hasAux_;
         // frame stacking state
         bool havePrev_;
         std::vector< std::vector< uint8_t > > prev_;

@@ -42,7 +42,7 @@ namespace
 // written by ai/arma_ai/export.py:
 //   char magic[8] = "ARMABRN1" (v1) or "ARMABRN2" (v2)
 //   u32 grid, localPlanes, globalPlanes, nScalars, nActions, update, dtype (16 or 32), nLayers
-//   v2 only, then: u32 nMaps, u32 planes[nMaps], u32 stackPrev
+//   v2 only, then: u32 nMaps, u32 planes[nMaps], u32 stackPrev, u32 nTowers, per tower u32 k, u32 mapIdx[k]
 //   per layer: u8 kind (1 conv, 2 linear), u8 nameLen, name,
 //              conv: u32 cout, cin, k, stride, pad; weights [cout*cin*k*k]; bias [cout]
 //              linear: u32 out, in; weights [out*in]; bias [out]
@@ -227,7 +227,7 @@ bool StartsWith( std::string const & s, char const * p )
 // ------------------------------------------------------------------ Net
 gNeuralNet::Net::Net()
     : loaded_( false ), version_( 0 ), grid_( 0 ), nMaps_( 0 ), nScalars_( 0 ), nActions_( 0 ), update_( 0 ),
-      stackPrev_( false ), havePrev_( false )
+      stackPrev_( false ), hasAux_( false ), havePrev_( false )
 {
 }
 
@@ -237,6 +237,7 @@ bool gNeuralNet::Net::Load( std::istream & in, std::string & error )
     towers_.clear();
     mapPlanes_.clear();
     havePrev_ = false;
+    hasAux_ = false;
     char magic[8];
     if ( !in.read( magic, 8 ) || memcmp( magic, "ARMABRN", 7 ) != 0 || ( magic[7] != '1' && magic[7] != '2' ) )
     {
@@ -262,11 +263,17 @@ bool gNeuralNet::Net::Load( std::istream & in, std::string & error )
     update_ = int( update );
     if ( version_ == 1 )
     {
-        nMaps_ = 2;
+        // callers always pass the game's four maps (local, close, global, territory); a v1 net
+        // reads the local one and the global one
+        nMaps_ = 4;
         mapPlanes_.push_back( int( lp ) );
+        mapPlanes_.push_back( int( lp ) );
+        mapPlanes_.push_back( int( gp ) );
         mapPlanes_.push_back( int( gp ) );
         stackPrev_ = false;
         towers_.resize( 2 );
+        towers_[0].maps.push_back( 0 );
+        towers_[1].maps.push_back( 2 );
     }
     else
     {
@@ -293,7 +300,32 @@ bool gNeuralNet::Net::Load( std::istream & in, std::string & error )
             return false;
         }
         stackPrev_ = stack != 0;
-        towers_.resize( nMaps_ );
+        uint32_t nTowers;
+        if ( !ReadU32( in, nTowers ) || nTowers == 0 || nTowers > 8 )
+        {
+            error = "bad tower count";
+            return false;
+        }
+        towers_.resize( nTowers );
+        for ( uint32_t t = 0; t < nTowers; ++t )
+        {
+            uint32_t k;
+            if ( !ReadU32( in, k ) || k == 0 || k > nMaps )
+            {
+                error = "bad tower table";
+                return false;
+            }
+            for ( uint32_t j = 0; j < k; ++j )
+            {
+                uint32_t m;
+                if ( !ReadU32( in, m ) || m >= nMaps )
+                {
+                    error = "bad tower table";
+                    return false;
+                }
+                towers_[t].maps.push_back( int( m ) );
+            }
+        }
     }
 
     bool haveS0 = false, haveS2 = false, haveT0 = false, haveT2 = false, havePi = false, haveV = false;
@@ -388,6 +420,7 @@ bool gNeuralNet::Net::Load( std::istream & in, std::string & error )
             else if ( name == "trunk.2" ) { trunk2_ = L; haveT2 = true; }
             else if ( name == "pi" ) { pi_ = L; havePi = true; }
             else if ( name == "v" ) { v_ = L; haveV = true; }
+            else if ( name == "aux" ) { aux_ = L; hasAux_ = true; }
             else
             {
                 error = "unexpected linear layer " + name;
@@ -463,15 +496,30 @@ int gNeuralNet::Net::Decide( uint8_t const * const * maps, float const * scalars
                              bool sample, float * probs, float * value, uint32_t & rng )
 {
     std::vector< float > h, part, t, x;
-    for ( int m = 0; m < nMaps_; ++m )
+    for ( size_t ti = 0; ti < towers_.size(); ++ti )
     {
-        int planes = mapPlanes_[m];
-        size_t total = stackPrev_ ? 2 * planes : planes;
+        Tower const & tw = towers_[ti];
+        // the tower's input: its maps' current planes in order, then (v2) the same maps' previous planes
+        size_t cur = 0;
+        for ( size_t j = 0; j < tw.maps.size(); ++j )
+            cur += mapPlanes_[tw.maps[j]];
+        size_t total = stackPrev_ ? 2 * cur : cur;
         x.clear();
-        Unpack( maps[m], planes, x, 0, total );
+        size_t off = 0;
+        for ( size_t j = 0; j < tw.maps.size(); ++j )
+        {
+            int m = tw.maps[j];
+            Unpack( maps[m], mapPlanes_[m], x, off, total );
+            off += mapPlanes_[m];
+        }
         if ( stackPrev_ )
-            Unpack( havePrev_ ? &prev_[m][0] : maps[m], planes, x, planes, total );
-        RunTower( towers_[m], x, grid_, grid_, part );
+            for ( size_t j = 0; j < tw.maps.size(); ++j )
+            {
+                int m = tw.maps[j];
+                Unpack( havePrev_ ? &prev_[m][0] : maps[m], mapPlanes_[m], x, off, total );
+                off += mapPlanes_[m];
+            }
+        RunTower( tw, x, grid_, grid_, part );
         h.insert( h.end(), part.begin(), part.end() );
     }
     if ( stackPrev_ )

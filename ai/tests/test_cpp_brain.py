@@ -22,7 +22,7 @@ REPO = HERE.parent.parent
 def test_cpp_matches_pytorch(tmp_path, version):
     torch.manual_seed(1)
     net = (PolicyNet() if version == 2 else PolicyNetV1()).eval()
-    n_maps, stack = net.n_maps, net.stack_prev
+    n_maps, stack = P.N_MAPS, net.stack_prev  # the game always hands over all four maps
     ck = tmp_path / "ck.pt"
     torch.save({"model": net.state_dict(), "update": 7}, ck)
     policy = tmp_path / "policy.bin"

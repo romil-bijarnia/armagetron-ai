@@ -22,6 +22,9 @@ import torch.nn as nn
 
 from .protocol import GRID, MAP_PLANES, N_ACTIONS, N_GLOBAL_PLANES, N_LOCAL_PLANES, N_MAPS, N_SCALARS
 
+N_AUX = 2  # territory share in 2 s, dead within 2 s
+AUX_HORIZON = 40  # decisions (2 s at 20 a second)
+
 _BITS = torch.tensor([[(v >> b) & 1 for b in range(8)] for v in range(256)], dtype=torch.float32)
 
 
@@ -138,16 +141,21 @@ class ResTower(nn.Module):
         return out
 
 
-TOWER_SPECS = (  # per map: (width, residual blocks, output dim)
-    (64, 3, 256),  # local, 2 m
-    (64, 3, 256),  # close, 1 m
-    (48, 2, 192),  # global
-    (48, 2, 192),  # territory
+# The four maps come in two frames of reference, and maps that share one are fed to one tower, so
+# their planes meet in the very first filter ("a wall that borders my region", "a gap in the close
+# view that the 2 m view shows leads somewhere"): the player tower sees the 2 m and 1 m views
+# (both centred on the cycle, rotated with it), the arena tower sees the minimap and territory
+# (both arena-aligned, cell for cell). Each gets the previous frame's planes stacked underneath.
+TOWER_MAPS = ((0, 1), (2, 3))  # indices into the N_MAPS maps
+TOWER_SPECS = (  # per tower: (width, residual blocks, output dim)
+    (80, 3, 320),  # player: local + close
+    (64, 3, 256),  # arena: global + territory
 )
+TOWER_NAMES = ("player", "arena")
 
 
 class PolicyNet(nn.Module):
-    """v2: four maps through residual towers, with the previous frame stacked under the current one."""
+    """v2: two residual towers (player view, arena view), each fed its maps with the previous frame stacked."""
 
     version = 2
     n_maps = N_MAPS
@@ -156,18 +164,24 @@ class PolicyNet(nn.Module):
     def __init__(self, hidden: int = 768):
         super().__init__()
         self.unpack = nn.ModuleList([Unpack(p) for p in MAP_PLANES])
-        self.towers = nn.ModuleList([ResTower(2 * p, w, b, d) for p, (w, b, d) in zip(MAP_PLANES, TOWER_SPECS)])
+        self.towers = nn.ModuleList([
+            ResTower(2 * sum(MAP_PLANES[m] for m in maps), w, b, d) for maps, (w, b, d) in zip(TOWER_MAPS, TOWER_SPECS)])
         fused = sum(d for _, _, d in TOWER_SPECS) + 256
         self.scalars = nn.Sequential(nn.Linear(N_SCALARS, 256), nn.ReLU(inplace=True), nn.Linear(256, 256), nn.ReLU(inplace=True))
         self.trunk = nn.Sequential(nn.Linear(fused, hidden), nn.ReLU(inplace=True), nn.Linear(hidden, hidden), nn.ReLU(inplace=True))
         self.pi = nn.Linear(hidden, N_ACTIONS)
         self.v = nn.Linear(hidden, 1)
+        # auxiliary predictions, trained by the teacher and ignored at play time: my share of the
+        # territory two seconds from now, and whether I am dead within two seconds. They cost
+        # nothing in the game and sharpen the features the move and value heads read.
+        self.aux = nn.Linear(hidden, N_AUX)
         for m in self.modules():
             if isinstance(m, (nn.Conv2d, nn.Linear)):
                 nn.init.orthogonal_(m.weight, gain=2**0.5)
                 nn.init.zeros_(m.bias)
         nn.init.orthogonal_(self.pi.weight, gain=0.01)
         nn.init.orthogonal_(self.v.weight, gain=1.0)
+        nn.init.orthogonal_(self.aux.weight, gain=0.1)
 
     def act(self, maps, feats, greedy: bool = False):
         """maps: (B, 2*N_MAPS, G, G) uint8, current maps then the previous frame's; feats: (B, N_SCALARS +
@@ -175,18 +189,32 @@ class PolicyNet(nn.Module):
         logits, value = self(maps, feats[:, :N_SCALARS], feats[:, N_SCALARS:] > 0.5)
         return _pick(logits, value, greedy)
 
-    def forward(self, maps, scalars, mask=None):
-        parts = []
-        for m in range(N_MAPS):
-            cur = self.unpack[m](maps[:, m])
-            prev = self.unpack[m](maps[:, N_MAPS + m]) if maps.shape[1] >= 2 * N_MAPS else cur
-            parts.append(self.towers[m](torch.cat([cur, prev], 1)))
+    def tower_input(self, maps, t: int) -> torch.Tensor:
+        """The planes tower T sees: its maps' current planes, then the same maps' previous planes."""
+        stacked = maps.shape[1] >= 2 * N_MAPS
+        cur = [self.unpack[m](maps[:, m]) for m in TOWER_MAPS[t]]
+        prev = [self.unpack[m](maps[:, N_MAPS + m]) for m in TOWER_MAPS[t]] if stacked else cur
+        return torch.cat(cur + prev, 1)
+
+    def trunk_out(self, maps, scalars) -> torch.Tensor:
+        parts = [self.towers[t](self.tower_input(maps, t)) for t in range(len(TOWER_MAPS))]
         parts.append(self.scalars(scalars))
-        h = self.trunk(torch.cat(parts, 1))
+        return self.trunk(torch.cat(parts, 1))
+
+    def forward(self, maps, scalars, mask=None):
+        h = self.trunk_out(maps, scalars)
         logits = self.pi(h)
         if mask is not None:
             logits = logits.masked_fill(~mask, -1e8)
         return logits, self.v(h).squeeze(1)
+
+    def heads(self, maps, scalars, mask=None):
+        """(logits, value, aux logits): the teacher trains all three."""
+        h = self.trunk_out(maps, scalars)
+        logits = self.pi(h)
+        if mask is not None:
+            logits = logits.masked_fill(~mask, -1e8)
+        return logits, self.v(h).squeeze(1), self.aux(h)
 
 
 def _pick(logits, value, greedy):

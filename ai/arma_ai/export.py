@@ -10,7 +10,7 @@ weights into the game.
 
 File format (little-endian):
     char magic[8] = "ARMABRN1" (v1) or "ARMABRN2" (v2)
-    v2 only: u32 n_maps, u32 planes[n_maps], u32 stack_prev
+    v2 only: u32 n_maps, u32 planes[n_maps], u32 stack_prev, u32 n_towers, per tower u32 k, u32 map_idx[k]
     u32 grid, local_planes, global_planes, n_scalars, n_actions, update, dtype (16 or 32), n_layers
     per layer: u8 kind (1 conv, 2 linear), u8 name_len, name,
                conv:   u32 cout, cin, k, stride, pad, then weights [cout*cin*k*k] and bias [cout]
@@ -29,7 +29,7 @@ import torch
 import torch.nn as nn
 
 from . import protocol as P
-from .model import PolicyNet, PolicyNetV1, make_net, net_version
+from .model import TOWER_MAPS, PolicyNet, PolicyNetV1, make_net, net_version
 
 PROJECT = Path(__file__).resolve().parent.parent
 REPO = PROJECT.parent
@@ -53,6 +53,8 @@ def layers_of(net) -> list[tuple[str, nn.Module]]:
                 out.append((f"{prefix}.{i}", m))
     out.append(("pi", net.pi))
     out.append(("v", net.v))
+    if hasattr(net, "aux"):
+        out.append(("aux", net.aux))
     return out
 
 
@@ -68,6 +70,10 @@ def export(checkpoint: Path, out: Path, half: bool = True) -> dict:
                                  update, 16 if half else 32, len(layers))]
     if net.version == 2:
         chunks.append(struct.pack("<I", P.N_MAPS) + struct.pack(f"<{P.N_MAPS}I", *P.MAP_PLANES) + struct.pack("<I", 1))
+        # which maps feed which tower, in the order their planes are concatenated
+        chunks.append(struct.pack("<I", len(TOWER_MAPS)))
+        for maps in TOWER_MAPS:
+            chunks.append(struct.pack("<I", len(maps)) + struct.pack(f"<{len(maps)}I", *maps))
     n_params = 0
     for name, m in layers:
         nm = name.encode()

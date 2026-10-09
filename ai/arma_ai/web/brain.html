@@ -115,6 +115,8 @@ const BAND = {                                     // vertical band of each bran
   close:     { y:  1.45, h: 2.4 },                  // the player view, 1 m
   global:    { y: -1.2,  h: 2.4 },                  // the minimap
   territory: { y: -3.85, h: 2.4 },                  // who gets where first
+  player:    { y:  2.78, h: 4.4 },                  // the player-view tower: both views around the cycle
+  arena:     { y: -2.52, h: 4.4 },                  // the arena tower: minimap and territory
   scalars:   { y: -5.9,  h: 1.1 },
   trunk:     { y:  0.0,  h: 5.0 },
   head:      { y:  0.0,  h: 3.0 },
@@ -135,6 +137,7 @@ const PRIORITY = ['enemy heads', 'own head', 'team heads', 'own trail', 'enemy t
 // each branch has its own hue, so you can see where a signal came from; the trunk, where the
 // three meet, stays neutral, and each move has its own colour
 const BRANCH_COLORS = { local: '#38bdf8', close: '#2dd4bf', global: '#a78bfa', territory: '#f472b6', scalars: '#fbbf24',
+                        player: '#38bdf8', arena: '#a78bfa',
                         trunk: '#f1f5f9', head: '#ffffff' };
 const MOVE_COLORS = ['#4ade80', '#60a5fa', '#e879f9', '#f87171'];
 
