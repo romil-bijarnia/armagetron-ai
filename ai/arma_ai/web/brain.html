@@ -332,8 +332,9 @@ function updateLines() {
   for (let k = 0; k < n; k++) {
     const w = T.lineW[k], a = shown[T.lineSrc[k]], c = 3 * T.lineCol[k];
     const lum = Math.min(1, w * 0.004 + w * a * a * 0.24);
-    const fl = T.lineDW[k] * flash * 0.5;  // new weights: a white pulse on the connections that changed
-    const r = lum * tint[c] + fl, g = lum * tint[c + 1] + fl, b = lum * tint[c + 2] + fl;
+    // new weights: a faint blue ripple on the few connections that moved most (dw cubed keeps the rest dark)
+    const dw = T.lineDW[k], fl = dw * dw * dw * flash * 0.18;
+    const r = lum * tint[c] + fl * 0.2, g = lum * tint[c + 1] + fl * 0.6, b = lum * tint[c + 2] + fl;
     col[6 * k] = col[6 * k + 3] = r; col[6 * k + 1] = col[6 * k + 4] = g; col[6 * k + 2] = col[6 * k + 5] = b;
   }
   lines.geometry.attributes.color.needsUpdate = true;
@@ -767,7 +768,7 @@ function frame(now) {
     points.geometry.attributes.act.array.set(shown);
     points.geometry.attributes.act.needsUpdate = true;
     updateLines();
-    flash = Math.max(0, flash - dt / 2.2);
+    flash = Math.max(0, flash - dt / 1.4);
     if (!state.paused && lastFrameAt && now - lastFrameAt > 3000) statusEl.textContent = 'waiting · no new decisions';
     if (metrics && now - lastHeadAt > 5000) { lastHeadAt = now; showMetrics(); }
     pick(now);
