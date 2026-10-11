@@ -79,7 +79,7 @@ def lib() -> ctypes.CDLL:
         i64p = ctypes.POINTER(ctypes.c_int64)
         sig.update({
             "sp_new": ([i32], vp), "sp_free": ([vp], None),
-            "sp_config": ([vp, i32, i32, f32, f32, f32, f32, f32, f32, i32, i32, i32], None),
+            "sp_config": ([vp, i32, i32, f32, f32, f32, f32, f32, f32, i32, i32, i32, i32], None),
             "sp_set_ring": ([vp, i32, u8p, fp, u8p, fp, u8p, fp, fp, i64p, i64p, u8p, i64p, ctypes.c_int64], None),
             "sp_start": ([vp, i32, f32, i32, ip, ip, i32, ctypes.c_ulonglong], None),
             "sp_collect": ([vp, u8p, fp, u8p, ip, ip, i32], i32),
@@ -212,9 +212,9 @@ class Ring:
     def written(self) -> int:
         return int(self.counter[0])
 
-    def window(self, margin: int = 64) -> np.ndarray:
-        """Slots holding samples whose round is over (the oldest MARGIN are skipped: the writer is
-        about to overwrite them)."""
+    def window(self, margin: int = 4096) -> np.ndarray:
+        """Slots holding samples whose targets are written (the oldest MARGIN are skipped: the
+        writer may overwrite them while a batch is being copied out)."""
         total = self.written()
         lo = max(0, total - self.cap + margin)
         if total <= lo:
@@ -257,12 +257,13 @@ class SelfPlay:
 
     def __init__(self, games: int, *, sims: int = 32, macro: int = 2, gamma: float = 0.999, c_visit: float = 50,
                  c_scale: float = 0.1, search_prob: float = 0.25, temperature: float = 1.0, gumbel: float = 1.0,
-                 max_decisions: int = 6000, aux_horizon: int = 40, threads: int = 8, max_players: int = 4):
+                 max_decisions: int = 6000, aux_horizon: int = 40, threads: int = 8, max_players: int = 4,
+                 value_steps: int = 100):
         self.L = lib()
         self.games = games
         self.h = self.L.sp_new(games)
         self.L.sp_config(self.h, sims, macro, gamma, c_visit, c_scale, search_prob, temperature, gumbel,
-                         max_decisions, aux_horizon, threads)
+                         max_decisions, aux_horizon, threads, value_steps)
         cap = games * max_players
         self.maps = np.zeros((cap, 2 * P.N_MAPS, P.GRID, P.GRID), np.uint8)
         self.scalars = np.zeros((cap, P.N_SCALARS), np.float32)

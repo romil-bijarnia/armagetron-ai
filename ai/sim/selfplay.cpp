@@ -95,6 +95,7 @@ void SelfPlay::Start( int gi, float size, int n, int const * agents, int const *
         g.died[p] = false;
         g.havePrev[p] = false;
         g.traj[p].clear();
+        g.filled[p] = 0;
     }
     g.rng = seed * 0x9E3779B97F4A7C15ULL + 0x632BE59BD9B4E019ULL;
     if ( g.rng == 0 )
@@ -174,8 +175,8 @@ void SelfPlay::Record( Game & g, int p, bool searched, float const * policy )
         return;
     int64_t idx = __atomic_fetch_add( R.counter, int64_t( 1 ), __ATOMIC_SEQ_CST );
     int64_t slot = idx % R.cap;
-    R.ready[slot] = 0;
-    R.gen[slot] = idx;
+    __atomic_store_n( &R.ready[slot], uint8_t( 0 ), __ATOMIC_RELAXED );
+    __atomic_store_n( &R.gen[slot], idx, __ATOMIC_RELEASE );
     uint8_t const * cur = &g.curMaps[size_t( p ) * kMapBytes];
     std::memcpy( R.maps + slot * kMapBytes, cur, kMapBytes );
     std::memcpy( R.scalars + slot * World::kScalars, &g.curScalars[size_t( p ) * World::kScalars], World::kScalars * sizeof( float ) );
@@ -189,8 +190,43 @@ void SelfPlay::Record( Game & g, int p, bool searched, float const * policy )
     if ( !g.traj[p].empty() && g.traj[p].back().decision == g.decision - 1 )
         prev = g.traj[p].back().index;
     R.prev[slot] = prev;
-    g.traj[p].push_back( Game::Entry{ idx, g.decision, TerritoryShare( cur + 3 * World::kGrid * World::kGrid ) } );
+    g.traj[p].push_back( Game::Entry{ idx, g.decision, TerritoryShare( cur + 3 * World::kGrid * World::kGrid ), g.rootValue[p] } );
     statSamples++;
+    Fill( g, p, R );
+}
+
+// a sample's targets, written only if its slot still holds it; another thread may be reusing the slot
+// right now, so the sample is marked ready only if it is still there after the writes
+static void WriteTargets( Ring & R, Game::Entry const & e, float value, float share, float dead )
+{
+    int64_t slot = e.index % R.cap;
+    if ( __atomic_load_n( &R.gen[slot], __ATOMIC_ACQUIRE ) != e.index )
+        return;  // overwritten already
+    R.value[slot] = value;
+    R.aux[slot * 2] = share;
+    R.aux[slot * 2 + 1] = dead;
+    if ( __atomic_load_n( &R.gen[slot], __ATOMIC_ACQUIRE ) == e.index )
+        __atomic_store_n( &R.ready[slot], uint8_t( 1 ), __ATOMIC_RELEASE );
+}
+
+// n-step targets: once a player is valueSteps decisions past a sample (and alive, or the round would
+// have finished it), the sample's value is the discounted value estimate of the newest decision, and
+// its aux targets are known (alive auxHorizon decisions later, territory share then)
+void SelfPlay::Fill( Game & g, int p, Ring & R )
+{
+    std::vector< Game::Entry > const & tr = g.traj[p];
+    Game::Entry const & now = tr.back();
+    int const H = cfg.auxHorizon, N = std::max( cfg.valueSteps, H + 1 );
+    while ( g.filled[p] < tr.size() && tr[g.filled[p]].decision + N <= now.decision )
+    {
+        size_t i = g.filled[p]++;
+        // the share auxHorizon decisions later: the entry at that decision (entries are consecutive
+        // decisions within a life, so it is i + H; search the few around it if one was skipped)
+        size_t j = std::min( i + size_t( H ), tr.size() - 1 );
+        while ( j > i && tr[j].decision > tr[i].decision + H )
+            --j;
+        WriteTargets( R, tr[i], now.value * std::pow( cfg.gamma, float( now.decision - tr[i].decision ) ), tr[j].share, 0.f );
+    }
 }
 
 void SelfPlay::MarkDeaths( Game & g, World const & before, World const & after, int decision )
@@ -202,6 +238,7 @@ void SelfPlay::MarkDeaths( Game & g, World const & before, World const & after, 
             g.endDecision[p] = decision;
             g.outcome[p] = g.n > 1 ? -float( alive ) / float( g.n - 1 ) : -1.f;
             g.died[p] = true;
+            FinishPlayer( g, p );
         }
     bool over = after.Over() || decision >= cfg.maxDecisions;
     if ( over )
@@ -231,37 +268,39 @@ void SelfPlay::FinishDecision( Game & g, int const * acts )
     statDecisions++;
 }
 
+// a player's result is known: the samples not yet filled get the discounted outcome (they are the
+// last valueSteps decisions of the life). Called at a death, so a long round does not hold them
+// back until the ring has overwritten them, and for everyone left when the round ends.
+void SelfPlay::FinishPlayer( Game & g, int p )
+{
+    std::vector< Game::Entry > const & tr = g.traj[p];
+    if ( g.filled[p] >= tr.size() )
+        return;
+    Ring & R = rings[g.agents[p]];
+    if ( !R.Valid() )
+        return;
+    int const H = cfg.auxHorizon;
+    int T = g.endDecision[p] >= 0 ? g.endDecision[p] : g.decision;
+    float u = g.outcome[p];
+    bool died = g.died[p];
+    for ( size_t i = g.filled[p]; i < tr.size(); ++i )
+    {
+        Game::Entry const & e = tr[i];
+        float share;
+        if ( i + H < tr.size() )
+            share = tr[i + H].share;
+        else
+            share = died ? 0.f : tr.back().share;
+        WriteTargets( R, e, u * std::pow( cfg.gamma, float( T - e.decision ) ), share,
+                      ( died && T - e.decision <= H ) ? 1.f : 0.f );
+    }
+    g.filled[p] = tr.size();
+}
+
 void SelfPlay::Finish( Game & g )
 {
-    int const H = cfg.auxHorizon;
     for ( int p = 0; p < g.n; ++p )
-    {
-        if ( g.traj[p].empty() )
-            continue;
-        Ring & R = rings[g.agents[p]];
-        if ( !R.Valid() )
-            continue;
-        int T = g.endDecision[p] >= 0 ? g.endDecision[p] : g.decision;
-        float u = g.outcome[p];
-        bool died = g.died[p];
-        std::vector< Game::Entry > const & tr = g.traj[p];
-        for ( size_t i = 0; i < tr.size(); ++i )
-        {
-            Game::Entry const & e = tr[i];
-            int64_t slot = e.index % R.cap;
-            if ( R.gen[slot] != e.index )
-                continue;  // overwritten already
-            R.value[slot] = u * std::pow( cfg.gamma, float( T - e.decision ) );
-            float share;
-            if ( i + H < tr.size() )
-                share = tr[i + H].share;
-            else
-                share = died ? 0.f : tr.back().share;
-            R.aux[slot * 2] = share;
-            R.aux[slot * 2 + 1] = ( died && T - e.decision <= H ) ? 1.f : 0.f;
-            R.ready[slot] = 1;
-        }
-    }
+        FinishPlayer( g, p );
     g.finished = true;
     g.active = false;
 }

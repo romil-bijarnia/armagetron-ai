@@ -102,3 +102,17 @@ def test_kill_after_death_reaches_final_transition(tmp_path):
     # slot 1 then crashes into slot 0's wall, which ends the round
     actor.act(pool, [Step(0, 1, 2, 0.2, True, 0, 2, [SlotStep(0, 1, 0), SlotStep(P.FLAG_DIED, 0, 0)])])
     assert abs(actor.store.reward[last] - (-1.0 + cfg.kill_bonus)) < 1e-6
+
+
+def test_engine_that_dies_after_asking_is_relaunched_with_new_round_ids(tmp_path):
+    from arma_ai.engine import ArenaConfig, EnginePool
+
+    with EnginePool([ArenaConfig(slots=2)], workdir=tmp_path / "engines", command=fake_command) as pool:
+        first = pool.poll()[0]
+        pool.procs[0].kill()
+        pool.procs[0].wait()
+        pool.act(0, [0, 0])  # the engine is gone: relaunch instead of raising
+        again = pool.poll()[0]
+        assert pool.restarts[0] == 1
+        assert again.round_id != first.round_id  # both engines started at round 1
+        pool.act(0, [0, 0])

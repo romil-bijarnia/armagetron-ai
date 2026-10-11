@@ -132,7 +132,7 @@ void sp_free( void * h )
 }
 
 void sp_config( void * h, int sims, int macro, float gamma, float cVisit, float cScale, float searchProb,
-                float temperature, float gumbel, int maxDecisions, int auxHorizon, int threads )
+                float temperature, float gumbel, int maxDecisions, int auxHorizon, int threads, int valueSteps )
 {
     tron::SPConfig & c = static_cast< SelfPlay * >( h )->cfg;
     c.sims = sims;
@@ -146,6 +146,7 @@ void sp_config( void * h, int sims, int macro, float gamma, float cVisit, float 
     c.maxDecisions = maxDecisions;
     c.auxHorizon = auxHorizon;
     c.threads = threads;
+    c.valueSteps = valueSteps;
 }
 
 void sp_set_ring( void * h, int agent, uint8_t * maps, float * scalars, uint8_t * mask, float * policy, uint8_t * hasPolicy,

@@ -39,6 +39,9 @@ struct SPConfig
     float gumbel = 1;           //!< scale of the root's Gumbel noise (0: none)
     int maxDecisions = 6000;    //!< a round is a draw after this many decisions (300 s)
     int auxHorizon = 40;        //!< decisions ahead for the auxiliary targets (2 s)
+    int valueSteps = 100;       //!< a sample's value target is the discounted value estimate this many
+                                //!< decisions later (5 s), or the outcome if the round ends sooner: it is
+                                //!< ready long before the shared ring overwrites the sample
     int threads = 8;
 };
 
@@ -124,8 +127,9 @@ public:
     std::vector< float > reqScalars;    //!< [k][96]
     std::vector< uint8_t > reqMask;
     // the trajectory of each learning player: (global ring index, decision, territory share)
-    struct Entry { int64_t index; int decision; float share; };
+    struct Entry { int64_t index; int decision; float share, value; };
     std::vector< Entry > traj[kMaxPlayers];
+    size_t filled[kMaxPlayers];  //!< entries of traj whose targets are written
     // stats
     int searches = 0, sims = 0;
 };
@@ -157,6 +161,8 @@ private:
     void Expand( Game & g, int parent, uint32_t code, int & child );
     void Ask( Game & g, int node, int player, World const & now, World const & before );
     void Record( Game & g, int p, bool searched, float const * policy );
+    void Fill( Game & g, int p, Ring & R );
+    void FinishPlayer( Game & g, int p );
     void Finish( Game & g );
     void MarkDeaths( Game & g, World const & before, World const & after, int decision );
     float RootScore( Game & g, int p, int a ) const;

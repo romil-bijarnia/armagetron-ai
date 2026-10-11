@@ -575,6 +575,9 @@ class Learner:
                 if self.update % cfg.save_every == 0:
                     self.save()
         finally:
+            # a second stop signal must not cut the save short
+            for sig in (signal.SIGINT, signal.SIGTERM):
+                signal.signal(sig, signal.SIG_IGN)
             stop.set()
             actor.join(timeout=30)
             if actor.is_alive():

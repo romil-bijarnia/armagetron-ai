@@ -89,7 +89,8 @@ class Config:
     exploiter_games: int = 400  # ... over this many of its recent rounds
     exploiter_patience: int = 30_000  # or after this many of its updates, whichever is first
     bootstrap: str = "runs/main/latest.pt"  # the old brain that guides the search at first ("" for none)
-    bootstrap_samples: int = 300_000  # samples (one per player and decision)
+    bootstrap_trained: int = 1_500_000  # samples the network has learned from before it takes over the search
+    value_steps: int = 100  # a sample's value target: the value estimate 5 s later (or the outcome, if sooner)
     device: str = "mps" if torch.backends.mps.is_available() else "cpu"
     seed: int = 0
     resume: bool = True
@@ -130,7 +131,8 @@ class Actor:
         self.half = self.device.type == "mps"
         self.rng = random.Random(cfg.seed + 17)
         self.sp = SelfPlay(cfg.games, sims=cfg.sims, macro=cfg.macro, search_prob=cfg.search_prob,
-                           temperature=cfg.temperature, gumbel=cfg.gumbel, threads=cfg.threads)
+                           temperature=cfg.temperature, gumbel=cfg.gumbel, threads=cfg.threads,
+                           value_steps=cfg.value_steps)
         self.sp.set_ring(AGENT_MAIN, rings[0])
         self.sp.set_ring(AGENT_EXPLOITER, rings[1])
         self.nets: dict[int, torch.nn.Module] = {}
@@ -372,6 +374,7 @@ class Learner:
         self.generated = [0, 0]  # samples generated per agent, over the whole run
         self.base = [0, 0]  # ... before this session (the rings start empty every session)
         self.session_trained = [0, 0]  # what the replay-ratio gate compares with the rings
+        self.boundary = [0, 0]  # ring samples older than this belong to a previous exploiter
         self.decisions = 0
         self.games = 0
         self.bootstrapping = bool(cfg.bootstrap) and (PROJECT / cfg.bootstrap).exists()
@@ -398,13 +401,21 @@ class Learner:
             self.base = list(self.generated)
             self.decisions = ck.get("decisions", 0)
             self.games = ck.get("games", 0)
-            self.bootstrapping = self.bootstrapping and self.generated[0] < cfg.bootstrap_samples
+            # once over, the warm start stays over (even if --bootstrap-trained is raised later)
+            self.bootstrapping = (self.bootstrapping and ck.get("bootstrapping", True)
+                                  and self.trained[0] < cfg.bootstrap_trained)
             print(f"resumed {self.run_dir.name} at update {self.update} ({self.decisions:,} decisions)", flush=True)
         else:
             self.exploiter.load_state_dict(self.main.state_dict())
-            print(f"new run in {self.run_dir.name}" + (f", guided by {cfg.bootstrap} for the first "
-                                                         f"{cfg.bootstrap_samples:,} samples" if self.bootstrapping else ""),
+            print(f"new run in {self.run_dir.name}" + (f", guided by {cfg.bootstrap} until the network has learned "
+                                                         f"from {cfg.bootstrap_trained:,} samples" if self.bootstrapping else ""),
                   flush=True)
+        # a sample needs value_steps more decisions of its round before it can be learned from; the
+        # ring must hold it that long even when every round has four learning players
+        wrap = cfg.ring // (cfg.games * 4)
+        if cfg.value_steps > wrap // 2:
+            print(f"warning: --ring {cfg.ring:,} turns over every ~{wrap} decisions with {cfg.games} rounds; "
+                  f"--value-steps {cfg.value_steps} needs a bigger ring or fewer --games", flush=True)
         self.rings = [Ring(cfg.ring, create=True), Ring(cfg.exploiter_ring, create=True)]
         self.log = open(self.run_dir / "metrics.jsonl", "a")
         self.publish(main=True, exploiter=True, target=not (self.run_dir / "target.pt").exists())
@@ -440,6 +451,7 @@ class Learner:
               "exploiter": self.exploiter.state_dict(), "exploiter_opt": self.xopt.state_dict(),
               "update": self.update, "xupdates": self.xupdates, "generation": self.generation,
               "trained": self.trained, "generated": self.generated, "decisions": self.decisions,
+              "bootstrapping": self.bootstrapping,
               "games": self.games, "config": asdict(self.cfg)}
         latest = self.run_dir / "latest.pt"
         tmp = self.run_dir / "latest.pt.tmp"
@@ -474,19 +486,29 @@ class Learner:
         _atomic_save({"model": _half(self.exploiter.state_dict()), "update": self.update, "kind": "exploiter",
                       "why": why}, self.run_dir / "pool" / f"x{self.generation:04d}-u{self.update:07d}.pt")
         self.prune_pool()
-        self.exploiter.load_state_dict(self.main.state_dict())
-        self.xopt = self._optimizer(self.exploiter)
-        self.xupdates = 0
-        self.publish(main=False, exploiter=True, target=True)
+        self.fresh_exploiter()
         self._write_league()
         print(f"exploiter {self.generation} joins the pool ({why}); a new one starts from update {self.update}",
               flush=True)
 
+    def fresh_exploiter(self) -> None:
+        """A new exploiter, a copy of the current network, against a frozen copy of it (the target).
+        It learns only from its own rounds: the ring's older samples are its predecessor's."""
+        self.exploiter.load_state_dict(self.main.state_dict())
+        self.xopt = self._optimizer(self.exploiter)
+        self.xupdates = 0
+        self.boundary[1] = self.rings[1].written()
+        self.session_trained[1] = 0
+        self.publish(main=False, exploiter=True, target=True)
+
     # ---------------------------------------------------------------- learning
-    def batch(self, ring, n: int):
+    def batch(self, ring, n: int, boundary: int = 0):
         """Half the batch from searched decisions (policy targets), half from any decision; None
-        until enough rounds are over for a full batch of each."""
+        until enough samples have targets for a full batch of each. Samples older than BOUNDARY
+        are skipped."""
         ready = ring.window()
+        if boundary:
+            ready = ready[ring.gen[ready] >= boundary]
         a = ring.sample(n // 2, self.rng, policy_only=True, ready=ready)
         b = ring.sample(n - n // 2, self.rng, ready=ready)
         if len(a) < n // 2 or len(b) < n - n // 2 or len(ready) < self.cfg.warmup // 2:
@@ -569,19 +591,21 @@ class Learner:
                 if not actor.is_alive():
                     raise RuntimeError("actor process died")
                 self.generated = [b + r.written() for b, r in zip(self.base, self.rings)]
-                if self.bootstrapping and self.generated[0] >= cfg.bootstrap_samples:
+                if self.bootstrapping and self.trained[0] >= cfg.bootstrap_trained:
                     self.bootstrapping = False
+                    self.fresh_exploiter()  # the first exploiter hunts the warmed-up network, not a random one
                     self._write_league()
-                    print(f"warm start done after {self.generated[0]:,} samples: the network guides its own search now",
-                          flush=True)
+                    print(f"warm start done after learning from {self.trained[0]:,} samples (update {self.update}): "
+                          f"the network guides its own search now", flush=True)
                 trained_any = False
                 for agent, (net, opt) in enumerate(((self.main, self.opt), (self.exploiter, self.xopt))):
                     ring = self.rings[agent]
-                    if ring.written() < cfg.warmup:
+                    fresh = ring.written() - self.boundary[agent]
+                    if fresh < cfg.warmup:
                         continue
-                    if self.session_trained[agent] > cfg.replay_ratio * max(ring.written() - cfg.warmup // 2, 1):
+                    if self.session_trained[agent] > cfg.replay_ratio * max(fresh - cfg.warmup // 2, 1):
                         continue
-                    data = self.batch(ring, cfg.batch)
+                    data = self.batch(ring, cfg.batch, self.boundary[agent])
                     if data is None:
                         continue
                     out = self.step(net, opt, data)
@@ -614,6 +638,9 @@ class Learner:
                 if not trained_any:
                     time.sleep(0.05)
         finally:
+            # a second stop signal (a double Ctrl-C, or uv passing a TERM on) must not cut the save short
+            for sig in (signal.SIGINT, signal.SIGTERM):
+                signal.signal(sig, signal.SIG_IGN)
             stop.set()
             actor.join(timeout=30)
             if actor.is_alive():

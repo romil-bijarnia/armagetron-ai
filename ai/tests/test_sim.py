@@ -112,3 +112,37 @@ def test_self_play_writes_complete_samples():
     assert np.all((ring.aux[ready] >= 0) & (ring.aux[ready] <= 1))
     prev = ring.prev_maps(ready[:50])
     assert prev.shape == (min(50, len(ready)), P.N_MAPS, P.GRID, P.GRID)
+
+
+def test_samples_get_targets_long_before_their_round_ends():
+    """n-step targets: a sample is ready value_steps decisions later, valued at the network's estimate
+    then; only a life's last value_steps decisions wait for the outcome. Nothing is left unscored."""
+    steps, gamma, v = 60, 0.999, 0.5  # (at least aux_horizon + 1: the aux targets need that much)
+    sp = SelfPlay(4, sims=4, search_prob=0.25, threads=2, value_steps=steps, gamma=gamma)
+    ring = Ring(50_000)
+    sp.set_ring(0, ring)
+    for g in range(4):
+        sp.start(g, -1.0, [0, 0], [True, True], seed=g + 1)  # a big arena: driving straight takes a while
+    logits = np.array([4.0, 0.0, 0.0, 0.0], np.float32)  # mostly straight on
+    ready_before_any_end = 0
+    finished = set()
+    for _ in range(20_000):
+        n = sp.collect()
+        if n:
+            sp.feed(np.tile(logits, (n, 1)), np.full(n, v, np.float32))
+        for g in range(4):
+            if g not in finished and sp.info(g) is not None:
+                finished.add(g)
+        if not finished:
+            ready_before_any_end = len(ring.window())
+        if len(finished) == 4:
+            break
+    assert len(finished) == 4
+    assert ready_before_any_end > 0  # targets arrive while every round is still going
+    total = ring.written()
+    assert total < ring.cap and np.all(ring.ready[:total] == 1)  # every sample got its targets
+    vals = ring.value[:total]
+    boot = np.isclose(vals, v * gamma**steps, atol=1e-5)
+    assert boot.mean() > 0.3  # most samples are valued 60 decisions on ...
+    assert np.all(boot | (np.abs(vals) <= 1.0))  # ... the rest by the outcome
+    assert np.all((ring.aux[:total] >= 0) & (ring.aux[:total] <= 1))

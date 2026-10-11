@@ -124,6 +124,8 @@ void World::Observe( int self, uint8_t * local, uint8_t * close, uint8_t * globa
         {
             REAL x0, y0, d0, x1, y1, d1;
             WallEnds( c, seg, x0, y0, d0, x1, y1, d1, true );
+            if ( d1 <= d0 )
+                continue;  // no wall yet (a cycle that has not moved): the engine has none either
             // IsDangerousAnywhere: the whole wall is behind the trail's end
             if ( s.wallsLength > 0 )
             {

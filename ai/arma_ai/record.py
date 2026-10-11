@@ -92,10 +92,10 @@ class NetDriver:
 
     def __call__(self, mask: int, maps=None, scalars=None) -> int:
         torch = self.torch
+        x = np.concatenate([maps, maps if self.prev is None else self.prev])[None]
+        self.prev = np.array(maps)  # also when the move is a random one: the next decision stacks this frame
         if self.rng.random() < self.noise:
             return self.rng.choice([a for a in range(P.N_ACTIONS) if mask >> a & 1])
-        x = np.concatenate([maps, maps if self.prev is None else self.prev])[None]
-        self.prev = np.array(maps)
         feats = np.concatenate([scalars, [(mask >> a) & 1 for a in range(P.N_ACTIONS)]]).astype(np.float32)[None]
         with torch.no_grad():
             a, _, _ = self.net.act(torch.from_numpy(x), torch.from_numpy(feats))

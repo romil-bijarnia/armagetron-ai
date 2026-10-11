@@ -186,6 +186,7 @@ class EnginePool:
         self.conns: list[socket.socket | None] = [None] * self.n
         self.sel = selectors.DefaultSelector()
         self.waiting: set[int] = set()  # engines blocked on our ACTIONS
+        self.restarts = [0] * self.n  # a relaunched engine counts its rounds from 1 again
         for i in range(self.n):
             self._spawn(i)
         self._accept_all()
@@ -251,6 +252,7 @@ class EnginePool:
             self.procs[i].kill()
             self.procs[i].wait()
         self.waiting.discard(i)
+        self.restarts[i] += 1
         self._spawn(i)
         self._accept_all()
 
@@ -314,7 +316,9 @@ class EnginePool:
                     continue
                 if mtype != P.MSG_STEP:
                     raise RuntimeError(f"engine {i}: unexpected message type {mtype}")
-                steps.append(_parse_step(i, payload))
+                step = _parse_step(i, payload)
+                step.round_id += self.restarts[i] << 32  # so round ids never repeat across a restart
+                steps.append(step)
                 self.waiting.add(i)
                 if first is None:
                     first = time.monotonic()
@@ -327,5 +331,9 @@ class EnginePool:
         if engine not in self.waiting:
             raise RuntimeError(f"engine {engine} is not waiting for actions")
         body = bytes([len(actions)]) + bytes(int(a) for a in actions)
-        self.conns[engine].sendall(P.HEADER.pack(P.MAGIC, P.MSG_ACTIONS, len(body)) + body)
+        try:
+            self.conns[engine].sendall(P.HEADER.pack(P.MAGIC, P.MSG_ACTIONS, len(body)) + body)
+        except OSError:
+            self.restart(engine)  # it died after asking; the relaunched one starts a new round
+            return
         self.waiting.discard(engine)
