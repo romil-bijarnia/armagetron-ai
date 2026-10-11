@@ -92,7 +92,7 @@
 <div id="arenaBox">
   <canvas id="arena"></canvas>
   <div id="result"></div>
-  <div id="legend"><span><i style="background:#22d3ee"></i>you</span><span><i style="background:#fb923c"></i>enemy</span><span><i style="background:#9ca3af"></i>walls</span><span><i style="background:#f472b6"></i>territory</span></div>
+  <div id="legend"><span><i style="background:#22d3ee"></i>you</span><span><i style="background:#fb923c"></i>enemy</span><span><i style="background:#9ca3af"></i>walls</span><span id="legendTerritory"><i style="background:#f472b6"></i>territory</span></div>
 </div>
 <div id="moves"></div>
 <div id="labels"></div>
@@ -482,6 +482,7 @@ function onTopology(topo) {
     T.layers = topo.layers;
     buildLabels(topo.layers);
     buildMoves(topo.layers.find(L => L.id === 'policy').names);
+    document.getElementById('legendTerritory').hidden = !topo.layers.some(L => L.id === 'territory_in');  // v1 has no territory map
   }
   buildLines(topo);
   if (!first && topo.edges.some(e => e.dw)) flash = 1;

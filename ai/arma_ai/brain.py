@@ -10,7 +10,8 @@ one slab of points per layer, lit by how strongly each neuron fires, and the str
 between layers, glowing where signal flows through them. Space pauses the match, the right arrow
 steps it one decision at a time, [ and ] change the speed, and hovering a neuron says what it is.
 While training runs, the page follows the newest weights (runs/v2/actor.pt) and flashes the
-connections each update changed. Ctrl-C quits.
+connections each update changed; until v2 has weights it shows the trained v1 brain (runs/main).
+Ctrl-C quits.
 """
 
 from __future__ import annotations
@@ -70,8 +71,16 @@ MAP_LABELS = ("what it sees nearby", "up close", "the whole arena", "who gets th
 MAP_PLANE_NAMES = (LOCAL_PLANES, LOCAL_PLANES, GLOBAL_PLANES,
                    ["mine first", "enemy first", "d1", "d2", "d4", "d8", "d16", "d32"])
 MAP_GROUPS = ("local", "close", "global", "territory")  # the page's colour band of each input map
-GROUP_WORD = {"player": "player view", "arena": "arena view", "scalars": "numbers", "trunk": "trunk"}
+GROUP_WORD = {"player": "player view", "arena": "arena view", "local": "nearby", "global": "arena",
+              "scalars": "numbers", "trunk": "trunk"}
 TOWER_GROUPS = TOWER_NAMES  # one conv tower per frame of reference: ("player", "arena")
+# v1 (runs/main): one plain conv tower per map, fed only the 2 m view and the minimap
+V1_TOWERS = (("local", "local", "unpack_local", 0), ("global", "globl", "unpack_global", 2))  # group, attr, unpack, map
+
+
+def input_maps(net: nn.Module) -> tuple[int, ...]:
+    """Indices of the maps NET reads (v1 ignores the close view and territory)."""
+    return tuple(m for *_, m in V1_TOWERS) if net.version == 1 else tuple(range(P.N_MAPS))
 
 
 def stacked(maps: np.ndarray, prev: np.ndarray | None) -> np.ndarray:
@@ -98,8 +107,22 @@ def trace(net: PolicyNet, maps: np.ndarray, scalars: np.ndarray, mask: np.ndarra
                 out.append((f"{prefix}{n}", h[0]))
         return h
 
+    def plain(group: str, tower, unpack, m: int) -> torch.Tensor:  # a v1 tower: convs, then fc
+        x = unpack(x_in[:, m])
+        n = 0
+        for mod in tower.net:
+            x = mod(x)
+            if isinstance(mod, nn.ReLU):
+                n += 1
+                out.append((f"{group}_c{n}", x[0]))
+        h = torch.relu(tower.fc(x.flatten(1)))
+        out.append((f"{group}_fc", h[0]))
+        return h
+
     parts = []
-    for t, group in enumerate(TOWER_GROUPS):
+    if net.version == 1:
+        parts = [plain(group, getattr(net, attr), getattr(net, unpack), m) for group, attr, unpack, m in V1_TOWERS]
+    for t, group in enumerate(TOWER_GROUPS if net.version == 2 else ()):
         tower = net.towers[t]
         x = torch.relu(tower.stem(net.tower_input(x_in, t)))
         out.append((f"{group}_c1", x[0]))
@@ -129,7 +152,8 @@ def layer_table(net: PolicyNet) -> list[dict]:
     outs = trace(net, blank, np.zeros(P.N_SCALARS, np.float32), np.ones(P.N_ACTIONS, bool))[0]
     names, shapes = [k for k, _ in outs], dict(outs)
     layers = []
-    for mid, label, planes, group in zip(MAP_IDS, MAP_LABELS, MAP_PLANE_NAMES, MAP_GROUPS):
+    for m in input_maps(net):
+        mid, label, planes, group = MAP_IDS[m], MAP_LABELS[m], MAP_PLANE_NAMES[m], MAP_GROUPS[m]
         layers.append({"id": mid, "group": group, "kind": "input", "shape": [P.GRID, P.GRID], "col": 0,
                        "label": label, "name": label, "planes": planes})
     layers.append({"id": "scalars_in", "group": "scalars", "kind": "input", "shape": [P.N_SCALARS], "col": 0,
@@ -182,7 +206,7 @@ def edges(net: PolicyNet, layers: list[dict], rng: np.random.Generator) -> list[
         groups.append({"src": src, "dst": dst, "si": np.asarray(si, np.int64), "di": np.asarray(di, np.int64),
                        "param": param, "pidx": np.asarray(pidx, np.int64)})
 
-    def stem(t, dst, mod, param):
+    def stem(maps, dst, mod, param):
         """Lines from the tower's input maps into its first layer: each map is drawn as one point
         per cell (all its planes together, current frame only), and every sampled stem unit gets
         a line from the cell of each map it weighs most."""
@@ -193,7 +217,7 @@ def edges(net: PolicyNet, layers: list[dict], rng: np.random.Generator) -> list[
         _, ho, wo = by_id[dst]["shape"]
         units = rng.choice(co_n * ho * wo, size=min(CONV_LINES, co_n * ho * wo), replace=False)
         first = 0
-        for m in TOWER_MAPS[t]:
+        for m in maps:
             planes = P.MAP_PLANES[m]
             Am = A[:, first:first + planes]  # this map's current-frame planes
             si, di, pidx = [], [], []
@@ -255,7 +279,17 @@ def edges(net: PolicyNet, layers: list[dict], rng: np.random.Generator) -> list[
                 add(sid, dst, si, di, param, pidx)
 
     fused_srcs = []
-    for m, group in enumerate(TOWER_GROUPS):
+    for group, attr, _, m in V1_TOWERS if net.version == 1 else ():
+        tower = getattr(net, attr)
+        convs = [(i, mod) for i, mod in tower.net.named_children() if isinstance(mod, nn.Conv2d)]
+        names = [f"{group}_c{i + 1}" for i in range(len(convs))]
+        stem((m,), names[0], convs[0][1], f"{attr}.net.{convs[0][0]}.weight")
+        for i in range(1, len(convs)):
+            conv(names[i - 1], names[i], convs[i][1], f"{attr}.net.{convs[i][0]}.weight")
+        last = by_id[names[-1]]["shape"]
+        dense([(names[-1], int(np.prod(last)))], f"{group}_fc", tower.fc.weight, f"{attr}.fc.weight", 2)
+        fused_srcs.append((f"{group}_fc", tower.fc.out_features))
+    for m, group in enumerate(TOWER_GROUPS if net.version == 2 else ()):
         tower = net.towers[m]
         seq = [(f"towers.{m}.stem.weight", tower.stem, True)]
         for b_i, b in enumerate(tower.res):
@@ -265,7 +299,7 @@ def edges(net: PolicyNet, layers: list[dict], rng: np.random.Generator) -> list[
         names = [f"{group}_c1"] + [f"{group}_c{2 + i}" for i in range(len(tower.res))] + \
                 [f"{group}_c{2 + len(tower.res)}", f"{group}_c{3 + len(tower.res)}"]
         # stem: from the tower's input maps
-        stem(m, names[0], tower.stem, seq[0][0])
+        stem(TOWER_MAPS[m], names[0], tower.stem, seq[0][0])
         prev_name = names[0]
         for b_i, b in enumerate(tower.res):
             # a residual block is drawn as one slab; its lines come from the block's second conv
@@ -538,8 +572,11 @@ class Weights:
         except Exception:
             return None  # being replaced right now; next time
         old = self.state
-        if net_version(ck["model"]) != 2:
-            raise SystemExit("the brain page shows v2 networks; export/convert older checkpoints first")
+        version = net_version(ck["model"])
+        if version != self.net.version:
+            if old is not None:
+                raise SystemExit(f"{self.path} now holds a v{version} network; restart the brain page")
+            self.net = make_net(version).eval()
         try:
             self.net.load_state_dict(ck["model"])
         except RuntimeError:
@@ -561,7 +598,8 @@ def main() -> None:
     ap.add_argument("--speed", type=float, default=1.0, help="playback speed, 1 = real time")
     ap.add_argument("--walls", type=float, default=600, help="trail length in metres (-1 = endless)")
     ap.add_argument("--checkpoint", type=Path, default=None,
-                    help="weights to show (default: runs/v2/actor.pt, which training rewrites every update)")
+                    help="weights to show (default: runs/v2/actor.pt, which training rewrites every update; "
+                         "runs/main, the trained v1 brain, while v2 has none)")
     ap.add_argument("--greedy", action="store_true", help="always take the top move")
     ap.add_argument("--port", type=int, default=8765)
     ap.add_argument("--no-open", action="store_true", help="don't open the page in the browser")
@@ -569,14 +607,15 @@ def main() -> None:
     # one decision at a time needs no thread pool; a wide one only fights the trainer for the CPU
     torch.set_num_threads(2)
 
-    run = PROJECT / "runs/v2"
-    path = args.checkpoint or next((f for f in (run / "actor.pt", run / "latest.pt") if f.exists()), run / "actor.pt")
+    path = args.checkpoint or next((PROJECT / run / f for run in ("runs/v2", "runs/main") for f in ("actor.pt", "latest.pt")
+                                    if (PROJECT / run / f).exists()), PROJECT / "runs/v2/actor.pt")
     weights = Weights(path)
     if weights.poll() is None:
         raise SystemExit(f"no checkpoint at {path}")
     run_dir = path.parent.parent if path.parent.name == "pool" else path.parent
     metrics = Metrics(run_dir / "metrics.jsonl")
     net = weights.net
+    shown = input_maps(net)
     rng = np.random.default_rng(0)
     layers = layer_table(net)
     groups = edges(net, layers, rng)
@@ -654,8 +693,8 @@ def main() -> None:
                                     "update": weights.update, "trained_ago": (time.time() - weights.changed_at)
                                     if weights.changed_at else None,
                                     "acts": _u8(acts_q),
-                                    "maps": {mid: base64.b64encode(np.ascontiguousarray(s.maps[i]).tobytes()).decode()
-                                             for i, mid in enumerate(MAP_IDS)},
+                                    "maps": {MAP_IDS[i]: base64.b64encode(np.ascontiguousarray(s.maps[i]).tobytes()).decode()
+                                             for i in shown},
                                     "scalars": _u8(np.tanh(np.abs(s.scalars))),
                                     "numbers": [round(float(x), 3) for x in s.scalars],
                                     "probs": [round(float(x), 4) for x in probs], "mask": mask.tolist(),
