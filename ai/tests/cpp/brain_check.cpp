@@ -35,6 +35,7 @@ int main( int argc, char ** argv )
     std::vector< float > scalars( net.NumScalars() ), probs( net.NumActions() );
     double total = 0;
     uint32_t rng = 1;
+    gNeuralNet::Net::Memory memory; // the cases are one cycle's decisions in a row
     for ( uint32_t i = 0; i < n; ++i )
     {
         uint8_t mask;
@@ -44,7 +45,7 @@ int main( int argc, char ** argv )
         in.read( reinterpret_cast< char * >( &mask ), 1 );
         float value = 0;
         auto t0 = std::chrono::steady_clock::now();
-        int a = net.Decide( &mapPtrs[0], &scalars[0], mask, false, &probs[0], &value, rng );
+        int a = net.Decide( &mapPtrs[0], &scalars[0], mask, false, &probs[0], &value, rng, memory );
         total += std::chrono::duration< double, std::milli >( std::chrono::steady_clock::now() - t0 ).count();
         std::printf( "%d", a );
         for ( int k = 0; k < net.NumActions(); ++k )

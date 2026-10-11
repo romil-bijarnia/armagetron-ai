@@ -227,7 +227,7 @@ bool StartsWith( std::string const & s, char const * p )
 // ------------------------------------------------------------------ Net
 gNeuralNet::Net::Net()
     : loaded_( false ), version_( 0 ), grid_( 0 ), nMaps_( 0 ), nScalars_( 0 ), nActions_( 0 ), update_( 0 ),
-      stackPrev_( false ), hasAux_( false ), havePrev_( false )
+      stackPrev_( false ), hasAux_( false )
 {
 }
 
@@ -236,7 +236,6 @@ bool gNeuralNet::Net::Load( std::istream & in, std::string & error )
     loaded_ = false;
     towers_.clear();
     mapPlanes_.clear();
-    havePrev_ = false;
     hasAux_ = false;
     char magic[8];
     if ( !in.read( magic, 8 ) || memcmp( magic, "ARMABRN", 7 ) != 0 || ( magic[7] != '1' && magic[7] != '2' ) )
@@ -452,7 +451,6 @@ bool gNeuralNet::Net::Load( std::istream & in, std::string & error )
         error = "policy file layers do not fit together";
         return false;
     }
-    prev_.assign( nMaps_, std::vector< uint8_t >( size_t( grid_ ) * grid_, 0 ) );
     loaded_ = true;
     return true;
 }
@@ -493,8 +491,13 @@ void gNeuralNet::Net::RunTower( Tower const & t, std::vector< float > & x, int h
 }
 
 int gNeuralNet::Net::Decide( uint8_t const * const * maps, float const * scalars, unsigned mask,
-                             bool sample, float * probs, float * value, uint32_t & rng )
+                             bool sample, float * probs, float * value, uint32_t & rng, Memory & memory )
 {
+    if ( stackPrev_ && memory.maps.size() != size_t( nMaps_ ) )
+    {
+        memory.maps.assign( nMaps_, std::vector< uint8_t >( size_t( grid_ ) * grid_, 0 ) );
+        memory.have = false;
+    }
     std::vector< float > h, part, t, x;
     for ( size_t ti = 0; ti < towers_.size(); ++ti )
     {
@@ -516,7 +519,7 @@ int gNeuralNet::Net::Decide( uint8_t const * const * maps, float const * scalars
             for ( size_t j = 0; j < tw.maps.size(); ++j )
             {
                 int m = tw.maps[j];
-                Unpack( havePrev_ ? &prev_[m][0] : maps[m], mapPlanes_[m], x, off, total );
+                Unpack( memory.have ? &memory.maps[m][0] : maps[m], mapPlanes_[m], x, off, total );
                 off += mapPlanes_[m];
             }
         RunTower( tw, x, grid_, grid_, part );
@@ -525,8 +528,8 @@ int gNeuralNet::Net::Decide( uint8_t const * const * maps, float const * scalars
     if ( stackPrev_ )
     {
         for ( int m = 0; m < nMaps_; ++m )
-            memcpy( &prev_[m][0], maps[m], size_t( grid_ ) * grid_ );
-        havePrev_ = true;
+            memcpy( &memory.maps[m][0], maps[m], size_t( grid_ ) * grid_ );
+        memory.have = true;
     }
     RunLinear( scalars0_, scalars, t );
     ReluInPlace( t );

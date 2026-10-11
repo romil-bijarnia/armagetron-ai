@@ -665,13 +665,13 @@ bool LocalBrain()
 }
 
 int LocalDecide( uint8_t const * local, uint8_t const * close, uint8_t const * global, uint8_t const * territory,
-                 float const * scalars, uint8_t mask )
+                 float const * scalars, uint8_t mask, gNeuralNet::Net::Memory & memory )
 {
     static uint32_t rng = 2463534242u;
     float probs[16], value = 0;
     std::chrono::steady_clock::time_point t0 = std::chrono::steady_clock::now();
     uint8_t const * maps[4] = { local, close, global, territory };
-    int a = sg_net.Decide( maps, scalars, mask, sg_sample, probs, &value, rng );
+    int a = sg_net.Decide( maps, scalars, mask, sg_sample, probs, &value, rng, memory );
     sg_decideMs += std::chrono::duration< double, std::milli >( std::chrono::steady_clock::now() - t0 ).count();
     if ( ++sg_decisions % 400 == 0 && sg_debug > 0 )
     {
@@ -704,6 +704,7 @@ struct Slot
 {
     ePlayerNetID * player;
     bool wasAlive;
+    gNeuralNet::Net::Memory memory; // the in-game brain's previous frame of this slot's cycle
     Slot(): player( NULL ), wasAlive( false ) {}
 };
 
@@ -795,7 +796,6 @@ void gNeural::NewRound()
 {
     if ( !Active() )
         return;
-    sg_net.NewLife();
     ++sg_roundID;
     sg_tick = 0;
     sg_roundOver = false;
@@ -805,7 +805,10 @@ void gNeural::NewRound()
     sg_wasAlive.clear();
     AssignSlots();
     for ( size_t k = 0; k < sg_slots.size(); ++k )
+    {
         sg_slots[k].wasAlive = false;
+        sg_slots[k].memory.Reset();
+    }
 }
 
 void gNeural::Timestep( REAL time )
@@ -1006,8 +1009,11 @@ void gNeural::Timestep( REAL time )
                 }
                 else
                 {
-                    // the brain is in the game: decide right here
-                    Apply( c, LocalDecide( &local[0], &close[0], &global[0], &territory[0], &scalars[0], ActionMask( c ) ) );
+                    // the brain is in the game: decide right here, with this cycle's own memory
+                    if ( !sg_slots[k].wasAlive )
+                        sg_slots[k].memory.Reset(); // a new life: nothing to stack yet
+                    Apply( c, LocalDecide( &local[0], &close[0], &global[0], &territory[0], &scalars[0], ActionMask( c ),
+                                           sg_slots[k].memory ) );
                 }
             }
             sg_slots[k].wasAlive = alive;
