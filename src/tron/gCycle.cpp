@@ -4292,7 +4292,8 @@ void gCycleWallsDisplayListManager::RenderAll( eCamera const * camera, gCycle * 
     while( run )
     {
         gNetPlayerWall * next = run->Next();
-        run->RenderList( true, gNetPlayerWall::gWallRenderMode_Lines );
+        if (run->BegPos() + EPS < run->EndPos())
+            run->RenderList(true, gNetPlayerWall::gWallRenderMode_Lines);
         run = next;
     }
 
@@ -4305,7 +4306,8 @@ void gCycleWallsDisplayListManager::RenderAll( eCamera const * camera, gCycle * 
     while( run )
     {
         gNetPlayerWall * next = run->Next();
-        run->RenderList( true, gNetPlayerWall::gWallRenderMode_Quads );
+        if (run->BegPos() + EPS < run->EndPos())
+            run->RenderList(true, gNetPlayerWall::gWallRenderMode_Quads);
         run = next;
     }
 
