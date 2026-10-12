@@ -317,7 +317,15 @@ tValue::BasePtr cCockpit::cb_TopOtherScore(void){
 
 tValue::BasePtr cCockpit::cb_CurrentScoreTeam(void){
     if(m_Type == VIEWPORT_TOP) return tValue::BasePtr(new tValue::Base());
-    return tValue::BasePtr(new tValue::Int(GetCurrentOrFocusedPlayer()->CurrentTeam()->Score()));
+    int val = 0;
+    if (auto* pPlayer = GetCurrentOrFocusedPlayer())
+    {
+        if (auto* pTeam = pPlayer->CurrentTeam())
+        {
+            val = pTeam->Score();
+        }
+    }
+    return tValue::BasePtr(new tValue::Int(val));
 }
 tValue::BasePtr cCockpit::cb_TopScoreTeam(void){
     int max = 0;
