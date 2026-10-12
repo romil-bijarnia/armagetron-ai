@@ -1373,7 +1373,12 @@ bool sr_MotionBlur( double time, std::unique_ptr< rTextureRenderTarget > & blurT
     return true;
 }
 
+#ifdef DEBUG
+int sr_maxFPS = 60;
+#else
 int sr_maxFPS = 360;
+#endif
+
 static tConfItem<int> sr_maxFPSConf("MAX_FPS", sr_maxFPS,
                                     [](const int& val) { return (val >= 0); });
 
