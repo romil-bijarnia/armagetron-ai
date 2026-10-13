@@ -354,6 +354,10 @@ public:
 static struct tTime timeStart;        // the time at the start of the program
 static struct tTime timeRelative;     // the time since the system start ( eventually from a playback )
 
+static bool st_lockstep = false;
+static double st_lockstepTime = 0;
+static double st_lockstepDT = 0;
+
 void tAdvanceFrameSys( tTime & start, tTime & relative )
 {
     struct tTime time;
@@ -373,7 +377,8 @@ void tAdvanceFrameSys( tTime & start, tTime & relative )
     // detect and counter timer hiccups
     tTime newRelative = time - start;
     tTime timeStep = newRelative - relative;
-    if ( !tRecorder::IsPlayingBack() && ( timeStep.seconds < 0 || ( !st_timerIsStrictlyMonotonic && timeStep.seconds > 10 ) ) )
+    // (in lockstep the real clock is read rarely, so long gaps between readings are normal, not hiccups)
+    if ( !tRecorder::IsPlayingBack() && ( timeStep.seconds < 0 || ( !st_timerIsStrictlyMonotonic && !st_lockstep && timeStep.seconds > 10 ) ) )
     {
         static bool warn = true;
         if ( warn )
@@ -399,9 +404,6 @@ void tAdvanceFrameSys( tTime & start, tTime & relative )
 }
 
 static bool s_delayedInPlayback = false;
-static bool st_lockstep = false;
-static double st_lockstepTime = 0;
-static double st_lockstepDT = 0;
 
 void tDelay( int usecdelay )
 {

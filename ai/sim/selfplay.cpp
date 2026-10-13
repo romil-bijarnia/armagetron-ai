@@ -190,7 +190,7 @@ void SelfPlay::Record( Game & g, int p, bool searched, float const * policy )
     if ( !g.traj[p].empty() && g.traj[p].back().decision == g.decision - 1 )
         prev = g.traj[p].back().index;
     R.prev[slot] = prev;
-    g.traj[p].push_back( Game::Entry{ idx, g.decision, TerritoryShare( cur + 3 * World::kGrid * World::kGrid ), g.rootValue[p] } );
+    g.traj[p].push_back( Game::Entry{ idx, g.decision, TerritoryShare( cur + 3 * World::kGrid * World::kGrid ), g.rootBoot[p], !std::isnan( g.rootBoot[p] ) } );
     statSamples++;
     Fill( g, p, R );
 }
@@ -216,6 +216,8 @@ void SelfPlay::Fill( Game & g, int p, Ring & R )
 {
     std::vector< Game::Entry > const & tr = g.traj[p];
     Game::Entry const & now = tr.back();
+    if ( !now.hasValue )
+        return;  // targets wait for the next decision that has a value
     int const H = cfg.auxHorizon, N = std::max( cfg.valueSteps, H + 1 );
     while ( g.filled[p] < tr.size() && tr[g.filled[p]].decision + N <= now.decision )
     {
@@ -659,6 +661,7 @@ void SelfPlay::Advance( Game & g )
                 for ( int a = 0; a < kActions; ++a )
                     g.rootLogits[p][a] = g.outLogits[k * kActions + a];
                 g.rootValue[p] = g.outValue[k];
+                g.rootBoot[p] = g.outBoot[k];
             }
             g.requests.clear();
             bool search = g.decision > 0 && cfg.searchProb > 0 && cfg.sims > 0 && Uniform( g.rng ) < cfg.searchProb;
@@ -752,7 +755,8 @@ void SelfPlay::Advance( Game & g )
     }
 }
 
-int SelfPlay::Collect( uint8_t * maps, float * scalars, uint8_t * masks, int * agentIds, int * gameIds, int maxBatch )
+int SelfPlay::Collect( uint8_t * maps, float * scalars, uint8_t * masks, int * agentIds, int * gameIds, int maxBatch,
+                       uint8_t * roots )
 {
     int const nGames = int( games.size() );
     int nThreads = std::max( 1, std::min( cfg.threads, nGames ) );
@@ -782,6 +786,7 @@ int SelfPlay::Collect( uint8_t * maps, float * scalars, uint8_t * masks, int * a
             break;
         g.outLogits.assign( g.requests.size() * kActions, 0.f );
         g.outValue.assign( g.requests.size(), 0.f );
+        g.outBoot.assign( g.requests.size(), 0.f );
         for ( size_t k = 0; k < g.requests.size(); ++k, ++b )
         {
             std::memcpy( maps + size_t( b ) * 2 * kMapBytes, &g.reqMaps[k * 2 * kMapBytes], 2 * kMapBytes );
@@ -789,13 +794,15 @@ int SelfPlay::Collect( uint8_t * maps, float * scalars, uint8_t * masks, int * a
             masks[b] = g.reqMask[k];
             agentIds[b] = g.agents[g.requests[k].player];
             gameIds[b] = i;
+            if ( roots )
+                roots[b] = g.requests[k].node < 0 ? 1 : 0;
             batchGames_.push_back( i );
         }
     }
     return b;
 }
 
-void SelfPlay::Feed( float const * logits, float const * values, int batch )
+void SelfPlay::Feed( float const * logits, float const * values, int batch, float const * boots )
 {
     int b = 0;
     while ( b < batch && b < int( batchGames_.size() ) )
@@ -806,6 +813,7 @@ void SelfPlay::Feed( float const * logits, float const * values, int batch )
             for ( int a = 0; a < kActions; ++a )
                 g.outLogits[k * kActions + a] = logits[size_t( b ) * kActions + a];
             g.outValue[k] = values[b];
+            g.outBoot[k] = boots ? boots[b] : values[b];
         }
         g.fed = true;
     }

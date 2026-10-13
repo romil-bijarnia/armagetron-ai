@@ -39,9 +39,9 @@ struct SPConfig
     float gumbel = 1;           //!< scale of the root's Gumbel noise (0: none)
     int maxDecisions = 6000;    //!< a round is a draw after this many decisions (300 s)
     int auxHorizon = 40;        //!< decisions ahead for the auxiliary targets (2 s)
-    int valueSteps = 100;       //!< a sample's value target is the discounted value estimate this many
-                                //!< decisions later (5 s), or the outcome if the round ends sooner: it is
-                                //!< ready long before the shared ring overwrites the sample
+    int valueSteps = 60;        //!< a sample's value target is the discounted value estimate this many
+                                //!< decisions later (3 s; at least auxHorizon + 1), or the outcome if the
+                                //!< round ends sooner: it is ready long before the shared ring overwrites it
     int threads = 8;
 };
 
@@ -105,6 +105,7 @@ public:
     // network outputs at the real decision
     float rootLogits[kMaxPlayers][kActions];
     float rootValue[kMaxPlayers];
+    float rootBoot[kMaxPlayers];  //!< the value n-step targets are built from (see Feed)
     // search
     bool searching = false;
     std::vector< Node > nodes;
@@ -122,12 +123,12 @@ public:
     bool died[kMaxPlayers];
     // what Collect handed out and Feed must answer
     std::vector< Request > requests;
-    std::vector< float > outLogits, outValue;
+    std::vector< float > outLogits, outValue, outBoot;
     std::vector< uint8_t > reqMaps;     //!< [k][8][64][64]: current maps then the previous decision's
     std::vector< float > reqScalars;    //!< [k][96]
     std::vector< uint8_t > reqMask;
     // the trajectory of each learning player: (global ring index, decision, territory share)
-    struct Entry { int64_t index; int decision; float share, value; };
+    struct Entry { int64_t index; int decision; float share, value; bool hasValue; };
     std::vector< Entry > traj[kMaxPlayers];
     size_t filled[kMaxPlayers];  //!< entries of traj whose targets are written
     // stats
@@ -144,8 +145,13 @@ public:
     explicit SelfPlay( int nGames );
     void Start( int g, float size, int n, int const * agents, int const * learn, int rotate, uint64_t seed );
     //! advance every round to its next network evaluation; returns the batch size
-    int Collect( uint8_t * maps, float * scalars, uint8_t * masks, int * agentIds, int * gameIds, int maxBatch );
-    void Feed( float const * logits, float const * values, int batch );
+    //! ROOTS (may be null) gets 1 for a request that is a real decision (not a look-ahead position)
+    int Collect( uint8_t * maps, float * scalars, uint8_t * masks, int * agentIds, int * gameIds, int maxBatch,
+                 uint8_t * roots = 0 );
+    //! BOOTS (may be null: VALUES then) is the value the samples' n-step targets are built from; it differs
+    //! from VALUES during the warm start, when an old network steers but the new one's values count. NaN:
+    //! no value for this decision (a target then looks a little further ahead, to the next one that has one)
+    void Feed( float const * logits, float const * values, int batch, float const * boots = 0 );
 
     // stats since the last call
     std::atomic< int64_t > statDecisions{ 0 }, statSearches{ 0 }, statSims{ 0 }, statSamples{ 0 };

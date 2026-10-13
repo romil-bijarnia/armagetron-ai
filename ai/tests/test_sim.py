@@ -146,3 +146,59 @@ def test_samples_get_targets_long_before_their_round_ends():
     assert boot.mean() > 0.3  # most samples are valued 60 decisions on ...
     assert np.all(boot | (np.abs(vals) <= 1.0))  # ... the rest by the outcome
     assert np.all((ring.aux[:total] >= 0) & (ring.aux[:total] <= 1))
+
+
+def test_requests_say_which_are_real_decisions_and_boots_feed_the_targets():
+    """During the warm start the old network steers and the new one's values build the targets:
+    collect() marks real decisions, and feed()'s BOOTS (not VALUES) end up in the n-step targets."""
+    steps, gamma = 60, 0.999
+    sp = SelfPlay(4, sims=4, search_prob=0.5, threads=2, value_steps=steps, gamma=gamma)
+    ring = Ring(50_000)
+    sp.set_ring(0, ring)
+    for g in range(4):
+        sp.start(g, -1.0, [0, 0], [True, True], seed=g + 1)
+    logits = np.array([4.0, 0.0, 0.0, 0.0], np.float32)
+    seen_root = seen_search = False
+    for _ in range(3000):
+        n = sp.collect()
+        if n:
+            roots = sp.roots[:n].copy()
+            seen_root |= bool(roots.any())
+            seen_search |= bool((roots == 0).any())
+            sp.feed(np.tile(logits, (n, 1)), np.full(n, 0.9, np.float32), np.full(n, 0.25, np.float32))
+        if len(ring.window()) > 200:
+            break
+    assert seen_root and seen_search
+    vals = ring.value[ring.window()]
+    assert np.any(np.isclose(vals, 0.25 * gamma**steps, atol=1e-5))
+    assert not np.any(np.isclose(vals, 0.9 * gamma**steps, atol=1e-5))
+
+
+def test_decisions_without_a_value_make_targets_reach_to_the_next_one():
+    """Warm start: only some decisions get the new network's value (NaN for the rest). A sample's
+    target then comes from the next decision that has one, a few decisions further on, and every
+    sample still gets a target."""
+    steps, gamma, v = 60, 0.999, 0.5
+    sp = SelfPlay(4, sims=4, search_prob=0.25, threads=2, value_steps=steps, gamma=gamma)
+    ring = Ring(50_000)
+    sp.set_ring(0, ring)
+    for g in range(4):
+        sp.start(g, -1.0, [0, 0], [True, True], seed=g + 11)
+    logits = np.array([4.0, 0.0, 0.0, 0.0], np.float32)
+    rng = np.random.default_rng(0)
+    finished = set()
+    for _ in range(20_000):
+        n = sp.collect()
+        if n:
+            boots = np.where(rng.random(n) < 1 / 8, v, np.nan).astype(np.float32)
+            sp.feed(np.tile(logits, (n, 1)), np.full(n, 0.9, np.float32), boots)
+        finished |= {g for g in range(4) if sp.info(g) is not None}
+        if len(finished) == 4:
+            break
+    total = ring.written()
+    assert len(finished) == 4 and np.all(ring.ready[:total] == 1)
+    vals = ring.value[:total]
+    from_value = vals[(vals > 0.1) & (vals <= v + 1e-6)]  # (outcomes score +1, -1 or 0, discounted a little)
+    gaps = np.log(from_value / v) / np.log(gamma)  # targets built from a value: v * gamma^gap
+    assert len(gaps) > 0 and gaps.min() > steps - 0.5 and np.median(gaps) < steps + 20
+    assert not np.any(np.isclose(vals, 0.9 * gamma**steps, atol=1e-4))

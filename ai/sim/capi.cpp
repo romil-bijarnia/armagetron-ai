@@ -174,14 +174,15 @@ void sp_start( void * h, int g, float size, int n, int const * agents, int const
     static_cast< SelfPlay * >( h )->Start( g, size, n, agents, learn, rotate, seed );
 }
 
-int sp_collect( void * h, uint8_t * maps, float * scalars, uint8_t * masks, int * agents, int * games, int maxBatch )
+int sp_collect( void * h, uint8_t * maps, float * scalars, uint8_t * masks, int * agents, int * games, int maxBatch,
+                uint8_t * roots )
 {
-    return static_cast< SelfPlay * >( h )->Collect( maps, scalars, masks, agents, games, maxBatch );
+    return static_cast< SelfPlay * >( h )->Collect( maps, scalars, masks, agents, games, maxBatch, roots );
 }
 
-void sp_feed( void * h, float const * logits, float const * values, int batch )
+void sp_feed( void * h, float const * logits, float const * values, int batch, float const * boots )
 {
-    static_cast< SelfPlay * >( h )->Feed( logits, values, batch );
+    static_cast< SelfPlay * >( h )->Feed( logits, values, batch, boots );
 }
 
 //! 1 if round G is over; OUT gets: n, decisions, size, then per player: agent, outcome, died, kills

@@ -82,8 +82,8 @@ def lib() -> ctypes.CDLL:
             "sp_config": ([vp, i32, i32, f32, f32, f32, f32, f32, f32, i32, i32, i32, i32], None),
             "sp_set_ring": ([vp, i32, u8p, fp, u8p, fp, u8p, fp, fp, i64p, i64p, u8p, i64p, ctypes.c_int64], None),
             "sp_start": ([vp, i32, f32, i32, ip, ip, i32, ctypes.c_ulonglong], None),
-            "sp_collect": ([vp, u8p, fp, u8p, ip, ip, i32], i32),
-            "sp_feed": ([vp, fp, fp, i32], None),
+            "sp_collect": ([vp, u8p, fp, u8p, ip, ip, i32, u8p], i32),
+            "sp_feed": ([vp, fp, fp, i32, fp], None),
             "sp_game_info": ([vp, i32, fp], i32),
             "sp_stats": ([vp, ctypes.POINTER(ctypes.c_longlong)], None),
         })
@@ -258,7 +258,7 @@ class SelfPlay:
     def __init__(self, games: int, *, sims: int = 32, macro: int = 2, gamma: float = 0.999, c_visit: float = 50,
                  c_scale: float = 0.1, search_prob: float = 0.25, temperature: float = 1.0, gumbel: float = 1.0,
                  max_decisions: int = 6000, aux_horizon: int = 40, threads: int = 8, max_players: int = 4,
-                 value_steps: int = 100):
+                 value_steps: int = 60):
         self.L = lib()
         self.games = games
         self.h = self.L.sp_new(games)
@@ -270,6 +270,7 @@ class SelfPlay:
         self.masks = np.zeros(cap, np.uint8)
         self.agents = np.zeros(cap, np.int32)
         self.game_ids = np.zeros(cap, np.int32)
+        self.roots = np.zeros(cap, np.uint8)  # 1: a real decision, 0: a position inside a search
         self._info = np.zeros(self.INFO, np.float32)
         self._rings = {}
 
@@ -294,12 +295,17 @@ class SelfPlay:
     def collect(self) -> int:
         return int(self.L.sp_collect(self.h, _ptr(self.maps, ctypes.c_uint8), _ptr(self.scalars, ctypes.c_float),
                                      _ptr(self.masks, ctypes.c_uint8), _ptr(self.agents, ctypes.c_int),
-                                     _ptr(self.game_ids, ctypes.c_int), len(self.masks)))
+                                     _ptr(self.game_ids, ctypes.c_int), len(self.masks), _ptr(self.roots, ctypes.c_uint8)))
 
-    def feed(self, logits: np.ndarray, values: np.ndarray) -> None:
+    def feed(self, logits: np.ndarray, values: np.ndarray, boots: np.ndarray | None = None) -> None:
+        """The network's answers to the last collect(). BOOTS: the values the samples' n-step targets
+        are built from, if not VALUES (during the warm start the old network steers, the new one values);
+        NaN where a decision has none (targets then reach a little further, to the next one that has)."""
         lg = np.ascontiguousarray(logits, np.float32)
         v = np.ascontiguousarray(values, np.float32)
-        self.L.sp_feed(self.h, _ptr(lg, ctypes.c_float), _ptr(v, ctypes.c_float), len(v))
+        b = None if boots is None else np.ascontiguousarray(boots, np.float32)
+        self.L.sp_feed(self.h, _ptr(lg, ctypes.c_float), _ptr(v, ctypes.c_float), len(v),
+                       None if b is None else _ptr(b, ctypes.c_float))
 
     def info(self, g: int) -> dict | None:
         """The result of round G if it is over, else None."""

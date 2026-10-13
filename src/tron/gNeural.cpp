@@ -100,6 +100,8 @@ bool sg_controlAfterRound = false;
 tSettingItem<bool> sg_controlAfterRoundConf( "NEURAL_CONTROL_AFTER_ROUND", sg_controlAfterRound );
 bool sg_spectate = false; // also send every cycle's position each tick, for a match viewer
 tSettingItem<bool> sg_spectateConf( "NEURAL_SPECTATE", sg_spectate );
+REAL sg_roundTimeLimit = 0; // seconds; 0 = none. The tools set it: two cycles circling forever end in a draw
+tSettingItem<REAL> sg_roundTimeLimitConf( "NEURAL_ROUND_TIME_LIMIT", sg_roundTimeLimit );
 // the brain inside the game, used when no trainer is attached
 tString sg_modelPath("brain/policy.bin");
 tSettingItemLine sg_modelPathConf( "NEURAL_MODEL", sg_modelPath );
@@ -824,6 +826,16 @@ void gNeural::Timestep( REAL time )
         Connect();
     AssignSlots();
 
+    // out of time: everyone still alive goes down at once, a draw (and nobody's kill)
+    bool timeUp = sg_roundTimeLimit > 0 && time > sg_roundTimeLimit && !sg_roundOver;
+    if ( timeUp )
+        for ( int i = se_PlayerNetIDs.Len() - 1; i >= 0; --i )
+        {
+            gCycle * c = dynamic_cast< gCycle * >( se_PlayerNetIDs( i )->Object() );
+            if ( c && c->Alive() )
+                c->Kill();
+        }
+
     // census of all cycles: who is alive, who died since the last decision and who killed them
     std::vector< int > kills( sg_slots.size(), 0 );
     std::set< void const * > teamsAlive;
@@ -841,7 +853,7 @@ void gNeural::Timestep( REAL time )
             teamsAlive.insert( c->Team() ? static_cast< void const * >( c->Team() ) : static_cast< void const * >( c ) );
         }
         std::map< ePlayerNetID const *, bool >::iterator it = sg_wasAlive.find( p );
-        if ( it != sg_wasAlive.end() && it->second && !alive )
+        if ( it != sg_wasAlive.end() && it->second && !alive && !timeUp )
         {
             // a teamkill earns nothing, as in gCycle::KillAt
             ePlayerNetID const * hunter = c->Hunter();

@@ -45,6 +45,7 @@ class ArenaConfig:
     lockstep_dt: float = 0.025  # >= the dedicated server's 0.9/DEDICATED_FPS physics step
     decision_interval: float = 0.05
     debug: int = 0
+    round_time_limit: float = 300  # seconds; then everyone still alive goes down at once (a draw), as in the teacher's sim
     extra: dict[str, str] = field(default_factory=dict)
 
     def settings(self) -> dict[str, str]:
@@ -59,6 +60,7 @@ class ArenaConfig:
             "LOCKSTEP_DT": f"{self.lockstep_dt:g}",
             "LADDERLOG_WRITE_ALL": "0",
             "NEURAL_DEBUG": str(self.debug),
+            "NEURAL_ROUND_TIME_LIMIT": f"{self.round_time_limit:g}",
         }
         # With no humans connected the server uses the single-player (SP_) settings; set both.
         # Every cycle gets its own team: TEAMS_MIN teams of exactly one player each, filled with AIs

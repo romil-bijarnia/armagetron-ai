@@ -90,7 +90,8 @@ class Config:
     exploiter_patience: int = 30_000  # or after this many of its updates, whichever is first
     bootstrap: str = "runs/main/latest.pt"  # the old brain that guides the search at first ("" for none)
     bootstrap_trained: int = 1_500_000  # samples the network has learned from before it takes over the search
-    value_steps: int = 100  # a sample's value target: the value estimate 5 s later (or the outcome, if sooner)
+    value_steps: int = 60  # a sample's value target: the value estimate 3 s later (or the outcome, if sooner)
+    warm_value_every: int = 8  # warm start: the new network values one decision in this many (it is ~10x v1's cost)
     device: str = "mps" if torch.backends.mps.is_available() else "cpu"
     seed: int = 0
     resume: bool = True
@@ -136,6 +137,8 @@ class Actor:
         self.sp.set_ring(AGENT_MAIN, rings[0])
         self.sp.set_ring(AGENT_EXPLOITER, rings[1])
         self.nets: dict[int, torch.nn.Module] = {}
+        self.value_net: torch.nn.Module | None = None  # warm start: the new network, for the value targets
+        self.np_rng = np.random.default_rng(cfg.seed + 29)
         self.mtimes: dict[tuple, float] = {}
         self.pool_files: dict[int, Path] = {}  # agent id -> pool file, for the opponents new rounds may use
         self.next_pool_agent = AGENT_POOL
@@ -181,6 +184,19 @@ class Actor:
                     self.exploiter_gen = gen
                     self.exploiter_results.clear()
                     self.promotion_sent = False
+        # while the old network steers, the samples' value targets still come from the new one: the
+        # old one learned other rewards and another discount, so its values are on another scale
+        if self.bootstrapping:
+            f = self._file(AGENT_MAIN)
+            try:
+                m = f.stat().st_mtime
+                if self.mtimes.get(("value", str(f))) != m:
+                    self.value_net, _ = _load_net(f, self.device, self.half)
+                    self.mtimes[("value", str(f))] = m
+            except Exception:
+                pass  # not written yet, or being replaced; next time
+        else:
+            self.value_net = None
         self._reload_pool()
 
     def _league_state(self) -> dict:
@@ -229,6 +245,7 @@ class Actor:
         values = np.zeros(n, np.float32)
         agents = sp.agents[:n]
         mask_bits = ((sp.masks[:n, None] >> np.arange(P.N_ACTIONS)) & 1).astype(bool)
+        boots = None
         for agent in np.unique(agents):
             idx = np.flatnonzero(agents == agent)
             net = self.nets.get(int(agent))
@@ -241,7 +258,17 @@ class Actor:
             lg, v = net(maps, sc, mk)
             logits[idx] = lg.float().cpu().numpy()
             values[idx] = v.float().cpu().numpy()
-        sp.feed(logits, values)
+            if agent == AGENT_MAIN and self.value_net is not None:
+                roots = np.flatnonzero(sp.roots[idx] == 1)
+                if len(roots):
+                    boots = values.copy() if boots is None else boots
+                    boots[idx[roots]] = np.nan  # the old network's values are not what the targets want
+                    pick = roots[self.np_rng.random(len(roots)) < 1 / max(self.cfg.warm_value_every, 1)]
+                    if len(pick):
+                        r = torch.from_numpy(pick).to(self.device)
+                        _, bv = self.value_net(maps[r], sc[r], mk[r])
+                        boots[idx[pick]] = bv.float().cpu().numpy()
+        sp.feed(logits, values, boots)
 
     # ---------------------------------------------------------------- matchups
     def start(self, g: int) -> None:

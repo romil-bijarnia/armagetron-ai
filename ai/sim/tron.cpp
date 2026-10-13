@@ -922,8 +922,7 @@ bool World::TimestepCore( int i, REAL currentTime, bool calcAccel )
             // no straw left
             cc.rubber = rubberGranted;
             cc.distance += ( cc.x - lastX ) * cc.dx + ( cc.y - lastY ) * cc.dy;
-            cc.lastTime = currentTime;
-            return true;
+            return true;  // lastTime stays at the step's start, as in the engine: the death (and explosion) time
         }
         // rubber saves the cycle this time: it stays where it was
         cc.diedWhileMoving = false;
@@ -944,8 +943,7 @@ bool World::TimestepCore( int i, REAL currentTime, bool calcAccel )
         cc.deathPosX = cc.x;
         cc.deathPosY = cc.y;
         cc.killer = -1;
-        cc.lastTime = currentTime;
-        return true;
+        return true;  // the engine dies before lastTime moves on, too
     }
 
     cc.brakingReservoir -= cc.brakeUsage * ts;
