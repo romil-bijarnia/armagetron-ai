@@ -131,6 +131,8 @@ bool is_aligned_16(void *ptr, size_t space)
 
 void fill_audio(void *udata, Uint8 *stream, int len)
 {
+    eSoundLocker locker;
+
     if(is_aligned_16(stream, len))
     {
         // aligment is good
@@ -172,26 +174,6 @@ static bool se_SoundInitPrepare()
 }
 #endif
 #endif
-
-#ifndef DEDICATED
-static unsigned int locks;
-#endif
-
-void se_SoundLock(){
-#ifndef DEDICATED
-    if (!locks)
-        SDL_LockAudio();
-    locks++;
-#endif
-}
-
-void se_SoundUnlock(){
-#ifndef DEDICATED
-    locks--;
-    if (!locks)
-        SDL_UnlockAudio();
-#endif
-}
 
 void se_SoundPause(bool p){
 #ifndef DEDICATED
@@ -757,12 +739,11 @@ void se_SoundMenu(){
 }
 #endif
 
-eSoundLocker::eSoundLocker()
+namespace
 {
-    se_SoundLock();
+static boost::recursive_mutex se_soundMutex;
 }
 
-eSoundLocker::~eSoundLocker()
+eSoundLocker::eSoundLocker() : lock_(se_soundMutex)
 {
-    se_SoundUnlock();
 }
