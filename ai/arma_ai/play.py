@@ -3,7 +3,7 @@
 Starts a local Armagetron server whose AI opponents are driven by a checkpoint, then waits for you
 to join from your normal Armagetron client (Play Game > Multiplayer > Custom Connect > 127.0.0.1).
 
-    arma-play                                  # latest checkpoint of runs/v2, one neural opponent
+    arma-play                                  # latest checkpoint of runs/v3, one neural opponent
     arma-play --neural 3 --builtin 1 --size -1 # three neural opponents plus one built-in AI
 """
 
@@ -100,7 +100,7 @@ def server_settings(args, sock_path: str) -> dict[str, str]:
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--checkpoint", type=Path, default=PROJECT / "runs/v2/latest.pt")
+    ap.add_argument("--checkpoint", type=Path, default=PROJECT / "runs/v3/latest.pt")
     ap.add_argument("--neural", type=int, default=1, help="opponents driven by the network")
     ap.add_argument("--builtin", type=int, default=0, help="extra built-in AI opponents")
     ap.add_argument("--size", type=float, default=-3, help="arena SIZE_FACTOR (-3 is the single-player default)")

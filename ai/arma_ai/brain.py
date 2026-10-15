@@ -9,7 +9,7 @@ activation of every neuron is sent to a page (http://127.0.0.1:8765) that draws 
 one slab of points per layer, lit by how strongly each neuron fires, and the strongest connections
 between layers, glowing where signal flows through them. Space pauses the match, the right arrow
 steps it one decision at a time, [ and ] change the speed, and hovering a neuron says what it is.
-While training runs, the page follows the newest weights (runs/v2/actor.pt) and flashes the
+While training runs, the page follows the newest weights (runs/v3/actor.pt) and flashes the
 connections each update changed; until v2 has weights it shows the trained v1 brain (runs/main).
 Ctrl-C quits.
 """
@@ -626,8 +626,8 @@ def main() -> None:
     ap.add_argument("--speed", type=float, default=1.0, help="playback speed, 1 = real time")
     ap.add_argument("--walls", type=float, default=600, help="trail length in metres (-1 = endless)")
     ap.add_argument("--checkpoint", type=Path, default=None,
-                    help="weights to show (default: runs/v2/actor.pt, which training rewrites every update; "
-                         "runs/main, the trained v1 brain, while v2 has none)")
+                    help="weights to show (default: runs/v3/actor.pt, which training rewrites every update; "
+                         "runs/main, the trained v1 brain, while v3 has none)")
     ap.add_argument("--greedy", action="store_true", help="always take the top move")
     ap.add_argument("--port", type=int, default=8765)
     ap.add_argument("--no-open", action="store_true", help="don't open the page in the browser")
@@ -635,8 +635,8 @@ def main() -> None:
     # one decision at a time needs no thread pool; a wide one only fights the trainer for the CPU
     torch.set_num_threads(2)
 
-    path = args.checkpoint or next((PROJECT / run / f for run in ("runs/v2", "runs/main") for f in ("actor.pt", "latest.pt")
-                                    if (PROJECT / run / f).exists()), PROJECT / "runs/v2/actor.pt")
+    path = args.checkpoint or next((PROJECT / run / f for run in ("runs/v3", "runs/main") for f in ("actor.pt", "latest.pt")
+                                    if (PROJECT / run / f).exists()), PROJECT / "runs/v3/actor.pt")
     weights = Weights(path)
     if weights.poll() is None:
         raise SystemExit(f"no checkpoint at {path}")

@@ -1,7 +1,7 @@
 """Export a checkpoint as a policy file the game loads itself (src/tron/gNeuralNet.cpp).
 
-    uv run arma-export                              # runs/v2/latest.pt -> <repo>/brain/policy.bin
-    uv run arma-export --checkpoint runs/v2/pool/u000200.pt --out /tmp/old.bin
+    uv run arma-export                              # runs/v3/latest.pt -> <repo>/brain/policy.bin
+    uv run arma-export --checkpoint runs/v3/pool/u000200.pt --out /tmp/old.bin
 
 The game looks for brain/policy.bin in its data folders (the app bundle ships the one in the
 repository; a copy in ~/Library/Application Support/Armagetron Advanced/brain/ wins over it), so
@@ -110,7 +110,7 @@ def export(checkpoint: Path, out: Path, half: bool = True) -> dict:
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--checkpoint", type=Path, default=PROJECT / "runs/v2/latest.pt")
+    ap.add_argument("--checkpoint", type=Path, default=PROJECT / "runs/v3/latest.pt")
     ap.add_argument("--out", type=Path, default=REPO / "brain/policy.bin")
     ap.add_argument("--float32", action="store_true", help="store full precision (twice the size)")
     args = ap.parse_args()

@@ -7,7 +7,7 @@
 #   ./trainctl gentle [flags]   same, but fewer rounds at once and at low priority so the laptop stays usable
 #   ./trainctl ppo [flags]      the old trainer instead (PPO against the real engine), in runs/ppo
 #   ./trainctl ladder [flags]   rate the network in the real game: duels against the built-in AI, the old
-#                               brain and the league pool, fitted into Elo ratings (runs/v2/ratings.json)
+#                               brain and the league pool, fitted into Elo ratings (runs/v3/ratings.json)
 #   ./trainctl stop             stop training (it saves a checkpoint on the way out)
 #   ./trainctl status           is it running, latest progress, when the last checkpoint was saved
 #   ./trainctl watch            terminal charts of how training is going (Ctrl-C closes them, not training)
@@ -26,8 +26,8 @@ cd "$(dirname "$self")" || exit 1
 cmd="${1:-help}"
 [ $# -gt 0 ] && shift
 
-# the run folder is the value after --run: runs/v2 by default, runs/ppo for the old trainer
-run=runs/v2
+# the run folder is the value after --run: runs/v3 by default, runs/ppo for the old trainer
+run=runs/v3
 [ "$cmd" = ppo ] && run=runs/ppo
 prev=""
 for a in "$@"; do

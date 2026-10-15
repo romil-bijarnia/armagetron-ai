@@ -128,7 +128,7 @@ def table(ratings: dict[str, float], rows: list[dict]) -> str:
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--run", default="runs/v2")
+    ap.add_argument("--run", default="runs/v3")
     ap.add_argument("--checkpoint", type=Path, default=None, help="the network to rate (default: <run>/latest.pt)")
     ap.add_argument("--opponents", type=int, default=5)
     ap.add_argument("--games", type=int, default=40)

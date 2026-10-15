@@ -1,6 +1,6 @@
 """The teacher: search-guided self-play in the simulator, a league, and a learner.
 
-    arma-teach                         # train runs/v2, resuming where it stopped
+    arma-teach                         # train runs/v3, resuming where it stopped
     arma-teach --games 128 --sims 24   # lighter
 
 How it works:
@@ -60,7 +60,7 @@ MAX_POOL_LOADED = 4
 
 @dataclass
 class Config:
-    run: str = "runs/v2"
+    run: str = "runs/v3"
     games: int = 256  # rounds played at once
     sims: int = 24  # simulations per searched decision
     macro: int = 2  # decisions per search step (0.1 s, the turn delay)
