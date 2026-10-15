@@ -129,13 +129,20 @@ class ResTower(nn.Module):
         self.down1 = nn.Conv2d(2 * width, 2 * width, 3, stride=2, padding=1)  # 4x4
         self.fc = nn.Linear(2 * width * (GRID // 16) ** 2, out_dim)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def features(self, x: torch.Tensor) -> torch.Tensor:
+        """The 16x16 map after the residual blocks (what the ownership head reads)."""
         x = torch.relu(self.stem(x))
         for b in self.res:
             x = b(x)
+        return x
+
+    def head(self, x: torch.Tensor) -> torch.Tensor:
         x = torch.relu(self.down0(x))
         x = torch.relu(self.down1(x))
         return torch.relu(self.fc(x.flatten(1)))
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.head(self.features(x))
 
     def export_layers(self, prefix: str):
         """(name, module) in forward order, the names the game's loader expects."""
@@ -180,6 +187,9 @@ class PolicyNet(nn.Module):
         # territory two seconds from now, and whether I am dead within two seconds. They cost
         # nothing in the game and sharpen the features the move and value heads read.
         self.aux = nn.Linear(hidden, N_AUX)
+        # ownership: who reaches each minimap cell first two seconds from now (nobody, me, an enemy),
+        # read off the arena tower's 16x16 map and trained by the teacher; the game never runs it.
+        self.own = nn.Conv2d(TOWER_SPECS[1][0], 3, 1)
         for m in self.modules():
             if isinstance(m, (nn.Conv2d, nn.Linear)):
                 nn.init.orthogonal_(m.weight, gain=2**0.5)
@@ -206,6 +216,12 @@ class PolicyNet(nn.Module):
         parts.append(self.scalars(scalars))
         return self.trunk(torch.cat(parts, 1))
 
+    def trunk_and_arena(self, maps, scalars):
+        """The trunk output and the arena tower's 16x16 features, for the training heads."""
+        arena = self.towers[1].features(self.tower_input(maps, 1))
+        parts = [self.towers[0](self.tower_input(maps, 0)), self.towers[1].head(arena), self.scalars(scalars)]
+        return self.trunk(torch.cat(parts, 1)), arena
+
     def forward(self, maps, scalars, mask=None):
         h = self.trunk_out(maps, scalars)
         logits = self.pi(h)
@@ -214,12 +230,13 @@ class PolicyNet(nn.Module):
         return logits, self.v(h).squeeze(1)
 
     def heads(self, maps, scalars, mask=None):
-        """(logits, value, aux logits): the teacher trains all three."""
-        h = self.trunk_out(maps, scalars)
+        """(logits, value, aux logits, ownership logits (B, 3, G, G)): the teacher trains all four."""
+        h, arena = self.trunk_and_arena(maps, scalars)
         logits = self.pi(h)
         if mask is not None:
             logits = logits.masked_fill(~mask, _masked(logits.dtype))
-        return logits, self.v(h).squeeze(1), self.aux(h)
+        own = nn.functional.interpolate(self.own(arena), size=(GRID, GRID), mode="bilinear", align_corners=False)
+        return logits, self.v(h).squeeze(1), self.aux(h), own
 
 
 def _pick(logits, value, greedy):

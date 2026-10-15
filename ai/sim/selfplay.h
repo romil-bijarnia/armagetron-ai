@@ -27,6 +27,7 @@ namespace tron
 int const kMaxPlayers = 8;
 int const kMapBytes = 4 * World::kGrid * World::kGrid;  // one decision's four maps
 int const kActions = 4;
+int const kAgentHunter = -1;  //!< a seat played by the built-in space fighter; it asks no network
 
 struct SPConfig
 {
@@ -43,6 +44,10 @@ struct SPConfig
                                 //!< decisions later (3 s; at least auxHorizon + 1), or the outcome if the
                                 //!< round ends sooner: it is ready long before the shared ring overwrites it
     int threads = 8;
+    int hunterDepth = 2;        //!< plies the space fighter looks ahead over the real physics (1 or 2)
+    int hunterReplan = 2;       //!< decisions between the space fighter's decisions (it holds in between)
+    int hunterPly = 4;          //!< decisions per ply of its look-ahead (0.2 s: a turn and the drive after it)
+    int hunterProbe = 6;        //!< decisions it drives straight on past the last ply, to feel a wall coming
 };
 
 //! where a learning agent's samples go (shared memory owned by the trainer)
@@ -59,6 +64,8 @@ struct Ring
     int64_t * gen = 0;      //!< global index of the sample a slot holds
     uint8_t * ready = 0;    //!< targets filled in (the round is over)
     int64_t * counter = 0;  //!< samples ever written
+    int64_t * future = 0;   //!< [cap]: ring index of the sample whose territory map is the ownership target
+    uint8_t * heading = 0;  //!< [cap]: the player's heading quadrant (0 up, 1 right, 2 down, 3 left)
     int64_t cap = 0;
     bool Valid() const { return cap > 0 && counter; }
 };
@@ -99,6 +106,8 @@ public:
     int decision = 0;
     int endDecision[kMaxPlayers];
     float outcome[kMaxPlayers];
+    int hunterAct[kMaxPlayers];   //!< the space fighter's last planned move ...
+    int hunterAt[kMaxPlayers];    //!< ... and the decision it was planned at
     std::vector< uint8_t > prevMaps, curMaps;  //!< per player
     std::vector< float > curScalars;
     bool havePrev[kMaxPlayers];
@@ -160,6 +169,10 @@ private:
     std::vector< int > batchGames_;  //!< game of each request in the last batch, in order
     void Advance( Game & g );
     void BeginDecision( Game & g );
+    void Decide( Game & g );
+    int HunterAction( Game & g, int p );
+    int HunterMove( Game const & g, int p ) const;
+    float HunterEval( World const & w, int p, int e ) const;
     void FinishDecision( Game & g, int const * acts );
     void BeginSearch( Game & g );
     void RunSimulations( Game & g );

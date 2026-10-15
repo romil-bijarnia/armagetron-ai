@@ -27,7 +27,9 @@ def test_cpp_matches_pytorch(tmp_path, version):
     torch.save({"model": net.state_dict(), "update": 7}, ck)
     policy = tmp_path / "policy.bin"
     info = export(ck, policy)
-    assert info["update"] == 7 and info["parameters"] == sum(p.numel() for p in net.parameters())
+    # the game's file carries every layer but the ownership head, which only the teacher uses
+    assert info["update"] == 7
+    assert info["parameters"] == sum(p.numel() for name, p in net.named_parameters() if not name.startswith("own"))
 
     cxx = shutil.which("clang++") or shutil.which("g++")
     exe = tmp_path / "brain_check"

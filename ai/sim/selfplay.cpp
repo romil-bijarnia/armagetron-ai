@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <limits>
 #include <thread>
 
 namespace tron
@@ -39,6 +40,12 @@ inline int Hold( int a )
 {
     // inside a tree edge a turn is followed by driving straight; braking keeps braking
     return a == ACT_BRAKE ? ACT_BRAKE : ACT_STRAIGHT;
+}
+
+inline uint8_t Heading( Cycle const & c )
+{
+    // the frame the minimap and territory maps are drawn in: one of the four cardinal headings
+    return c.dx > .5f ? 1 : ( c.dx < -.5f ? 3 : ( c.dy < -.5f ? 2 : 0 ) );
 }
 
 float TerritoryShare( uint8_t const * territory )
@@ -96,6 +103,8 @@ void SelfPlay::Start( int gi, float size, int n, int const * agents, int const *
         g.havePrev[p] = false;
         g.traj[p].clear();
         g.filled[p] = 0;
+        g.hunterAct[p] = ACT_STRAIGHT;
+        g.hunterAt[p] = -1000;
     }
     g.rng = seed * 0x9E3779B97F4A7C15ULL + 0x632BE59BD9B4E019ULL;
     if ( g.rng == 0 )
@@ -148,7 +157,7 @@ void SelfPlay::BeginDecision( Game & g )
     g.requests.clear();
     for ( int p = 0; p < g.n; ++p )
     {
-        if ( !g.world.cycles[p].alive )
+        if ( !g.world.cycles[p].alive || g.agents[p] == kAgentHunter )
             continue;
         size_t k = g.requests.size();
         g.requests.push_back( tron::Request{ -1, p } );
@@ -186,6 +195,10 @@ void SelfPlay::Record( Game & g, int p, bool searched, float const * policy )
     R.hasPolicy[slot] = searched ? 1 : 0;
     R.value[slot] = 0;
     R.aux[slot * 2] = R.aux[slot * 2 + 1] = 0;
+    if ( R.future )
+        R.future[slot] = -1;
+    if ( R.heading )
+        R.heading[slot] = Heading( g.world.cycles[p] );
     int64_t prev = -1;
     if ( !g.traj[p].empty() && g.traj[p].back().decision == g.decision - 1 )
         prev = g.traj[p].back().index;
@@ -197,7 +210,7 @@ void SelfPlay::Record( Game & g, int p, bool searched, float const * policy )
 
 // a sample's targets, written only if its slot still holds it; another thread may be reusing the slot
 // right now, so the sample is marked ready only if it is still there after the writes
-static void WriteTargets( Ring & R, Game::Entry const & e, float value, float share, float dead )
+static void WriteTargets( Ring & R, Game::Entry const & e, float value, float share, float dead, int64_t future )
 {
     int64_t slot = e.index % R.cap;
     if ( __atomic_load_n( &R.gen[slot], __ATOMIC_ACQUIRE ) != e.index )
@@ -205,6 +218,8 @@ static void WriteTargets( Ring & R, Game::Entry const & e, float value, float sh
     R.value[slot] = value;
     R.aux[slot * 2] = share;
     R.aux[slot * 2 + 1] = dead;
+    if ( R.future )
+        R.future[slot] = future;
     if ( __atomic_load_n( &R.gen[slot], __ATOMIC_ACQUIRE ) == e.index )
         __atomic_store_n( &R.ready[slot], uint8_t( 1 ), __ATOMIC_RELEASE );
 }
@@ -227,7 +242,7 @@ void SelfPlay::Fill( Game & g, int p, Ring & R )
         size_t j = std::min( i + size_t( H ), tr.size() - 1 );
         while ( j > i && tr[j].decision > tr[i].decision + H )
             --j;
-        WriteTargets( R, tr[i], now.value * std::pow( cfg.gamma, float( now.decision - tr[i].decision ) ), tr[j].share, 0.f );
+        WriteTargets( R, tr[i], now.value * std::pow( cfg.gamma, float( now.decision - tr[i].decision ) ), tr[j].share, 0.f, tr[j].index );
     }
 }
 
@@ -289,12 +304,19 @@ void SelfPlay::FinishPlayer( Game & g, int p )
     {
         Game::Entry const & e = tr[i];
         float share;
+        int64_t future;
         if ( i + H < tr.size() )
+        {
             share = tr[i + H].share;
+            future = tr[i + H].index;
+        }
         else
+        {
             share = died ? 0.f : tr.back().share;
+            future = tr.back().index;
+        }
         WriteTargets( R, e, u * std::pow( cfg.gamma, float( T - e.decision ) ), share,
-                      ( died && T - e.decision <= H ) ? 1.f : 0.f );
+                      ( died && T - e.decision <= H ) ? 1.f : 0.f, future );
     }
     g.filled[p] = tr.size();
 }
@@ -539,9 +561,17 @@ void SelfPlay::Expand( Game & g, int parent, uint32_t code, int & child )
     for ( int p = 0; p < g.n; ++p )
         if ( !nd.done[p] )
         {
-            Ask( g, child, p, nd.w, prevWorld );
             nd.mask[p] = nd.w.ActionMask( p );
+            if ( g.agents[p] == kAgentHunter )
+            {
+                // the space fighter's reply inside the tree is not modelled: every move counts the same
+                nd.value[p] = 0;
+                continue;
+            }
+            Ask( g, child, p, nd.w, prevWorld );
         }
+    if ( g.requests.empty() )
+        nd.evaluated = true;
 }
 
 void SelfPlay::Backup( Game & g, int leaf )
@@ -629,6 +659,11 @@ void SelfPlay::RunSimulations( Game & g )
         acts[p] = ACT_STRAIGHT;
         if ( !g.world.cycles[p].alive )
             continue;
+        if ( g.agents[p] == kAgentHunter )
+        {
+            acts[p] = HunterAction( g, p );
+            continue;
+        }
         float pol[kActions];
         ImprovedPolicy( g, g.nodes[0], p, pol );
         std::vector< int > & c = g.cands[p];
@@ -638,6 +673,199 @@ void SelfPlay::RunSimulations( Game & g )
                 best = c[k];
         acts[p] = best;
         Record( g, p, true, pol );
+    }
+    FinishDecision( g, acts );
+}
+
+// ------------------------------------------------------------------ the space fighter
+// A built-in opponent that asks no network: a shallow minimax over the real physics, scored by
+// the territory share (the cells it reaches before the nearest enemy). It cuts, seals and takes
+// space because that is what the score rewards; nothing else is scripted.
+static void Ply( World & w, int n, int p, int a, int e, int ea, int macro )
+{
+    int step[kMaxPlayers];
+    for ( int d = 0; d < macro; ++d )
+    {
+        for ( int q = 0; q < n; ++q )
+            step[q] = ACT_STRAIGHT;
+        step[p] = d == 0 ? a : Hold( a );
+        if ( e >= 0 )
+            step[e] = d == 0 ? ea : Hold( ea );
+        w.Step( step );
+        if ( !w.cycles[p].alive || ( e >= 0 && !w.cycles[e].alive ) )
+            return;
+    }
+}
+
+float SelfPlay::HunterEval( World const & w, int p, int e ) const
+{
+    if ( !w.cycles[p].alive )
+        return -1.f;
+    if ( e >= 0 && !w.cycles[e].alive )
+        return 1.f;
+    static thread_local std::vector< uint8_t > maps;
+    static thread_local std::vector< float > sc;
+    int const g2 = World::kGrid * World::kGrid;
+    maps.resize( 4 * g2 );
+    sc.resize( World::kScalars );
+    w.Observe( p, &maps[0], &maps[g2], &maps[2 * g2], &maps[3 * g2], &sc[0] );
+    float score = 2 * TerritoryShare( &maps[3 * g2] ) - 1;
+    // the probe: everyone drives on; a wall met soon costs, an enemy crashing soon pays
+    if ( cfg.hunterProbe > 0 )
+    {
+        World probe = w;
+        int step[kMaxPlayers];
+        for ( int q = 0; q < int( probe.cycles.size() ); ++q )
+            step[q] = ACT_STRAIGHT;
+        for ( int k = 0; k < cfg.hunterProbe; ++k )
+        {
+            probe.Step( step );
+            float soon = 1.f - float( k ) / float( cfg.hunterProbe );
+            if ( !probe.cycles[p].alive )
+                return score - .8f * soon;
+            if ( e >= 0 && !probe.cycles[e].alive )
+                return score + .3f * soon;
+        }
+    }
+    return score;
+}
+
+int SelfPlay::HunterMove( Game const & g, int p ) const
+{
+    World const & w0 = g.world;
+    unsigned mask = w0.ActionMask( p );
+    // the nearest living enemy answers; everyone else drives on
+    int e = -1;
+    REAL bestD = 1e30f;
+    for ( int q = 0; q < g.n; ++q )
+    {
+        if ( q == p || !w0.cycles[q].alive || w0.cycles[q].team == w0.cycles[p].team )
+            continue;
+        REAL dx = w0.cycles[q].x - w0.cycles[p].x, dy = w0.cycles[q].y - w0.cycles[p].y;
+        REAL d = dx * dx + dy * dy;
+        if ( d < bestD )
+        {
+            bestD = d;
+            e = q;
+        }
+    }
+    unsigned emask = e >= 0 ? w0.ActionMask( e ) : 1u;
+    int best = ACT_STRAIGHT;
+    float bestV = -1e30f;
+    for ( int a = 0; a < kActions; ++a )
+    {
+        if ( !( mask >> a & 1 ) )
+            continue;
+        float worst = 1e30f;
+        for ( int ea = 0; ea < kActions && worst > bestV; ++ea )
+        {
+            if ( !( emask >> ea & 1 ) )
+                continue;
+            World w1 = w0;
+            Ply( w1, g.n, p, a, e, ea, cfg.hunterPly );
+            float v = -1e30f;
+            if ( cfg.hunterDepth >= 2 && w1.cycles[p].alive && ( e < 0 || w1.cycles[e].alive ) )
+            {
+                unsigned m2 = w1.ActionMask( p );
+                for ( int b = 0; b < kActions; ++b )
+                {
+                    if ( !( m2 >> b & 1 ) )
+                        continue;
+                    World w2 = w1;
+                    Ply( w2, g.n, p, b, e, ACT_STRAIGHT, cfg.hunterPly );
+                    v = std::max( v, HunterEval( w2, p, e ) );
+                }
+            }
+            if ( v == -1e30f )
+                v = HunterEval( w1, p, e );
+            worst = std::min( worst, v );
+        }
+        if ( worst > bestV )
+        {
+            bestV = worst;
+            best = a;
+        }
+    }
+    return best;
+}
+
+int SelfPlay::HunterAction( Game & g, int p )
+{
+    int hold = std::max( 1, cfg.hunterReplan );
+    if ( g.decision >= g.hunterAt[p] && g.decision < g.hunterAt[p] + hold )
+        return g.decision == g.hunterAt[p] ? g.hunterAct[p] : Hold( g.hunterAct[p] );
+    g.hunterAct[p] = HunterMove( g, p );
+    g.hunterAt[p] = g.decision;
+    return g.hunterAct[p];
+}
+
+// the real decision, once the network has answered (or nobody needed it)
+void SelfPlay::Decide( Game & g )
+{
+    bool anyNet = false;
+    for ( int p = 0; p < g.n; ++p )
+    {
+        if ( !g.world.cycles[p].alive )
+            continue;
+        if ( g.agents[p] != kAgentHunter )
+        {
+            anyNet = true;
+            continue;
+        }
+        // the space fighter has decided; a search at this decision sees its move as all but certain
+        int a = HunterAction( g, p );
+        for ( int b = 0; b < kActions; ++b )
+            g.rootLogits[p][b] = b == a ? 8.f : -8.f;
+        g.rootValue[p] = 0;
+        g.rootBoot[p] = std::numeric_limits< float >::quiet_NaN();
+    }
+    bool search = anyNet && g.decision > 0 && cfg.searchProb > 0 && cfg.sims > 0 && Uniform( g.rng ) < cfg.searchProb;
+    if ( search )
+    {
+        BeginSearch( g );
+        return;
+    }
+    int acts[kMaxPlayers];
+    for ( int p = 0; p < g.n; ++p )
+    {
+        acts[p] = ACT_STRAIGHT;
+        if ( !g.world.cycles[p].alive )
+            continue;
+        if ( g.agents[p] == kAgentHunter )
+        {
+            acts[p] = HunterAction( g, p );
+            continue;
+        }
+        unsigned mask = g.world.ActionMask( p );
+        float pol[kActions];
+        if ( cfg.temperature <= 0 )
+        {
+            int best = ACT_STRAIGHT;
+            float bl = -1e30f;
+            for ( int a = 0; a < kActions; ++a )
+                if ( ( mask >> a & 1 ) && g.rootLogits[p][a] > bl )
+                {
+                    bl = g.rootLogits[p][a];
+                    best = a;
+                }
+            acts[p] = best;
+        }
+        else
+        {
+            MaskedSoftmax( g.rootLogits[p], mask, pol, cfg.temperature );
+            float r = Uniform( g.rng ), acc = 0;
+            acts[p] = ACT_STRAIGHT;
+            for ( int a = 0; a < kActions; ++a )
+            {
+                acc += pol[a];
+                if ( r < acc && ( mask >> a & 1 ) )
+                {
+                    acts[p] = a;
+                    break;
+                }
+            }
+        }
+        Record( g, p, false, 0 );
     }
     FinishDecision( g, acts );
 }
@@ -664,50 +892,7 @@ void SelfPlay::Advance( Game & g )
                 g.rootBoot[p] = g.outBoot[k];
             }
             g.requests.clear();
-            bool search = g.decision > 0 && cfg.searchProb > 0 && cfg.sims > 0 && Uniform( g.rng ) < cfg.searchProb;
-            if ( search )
-                BeginSearch( g );
-            else
-            {
-                int acts[kMaxPlayers];
-                for ( int p = 0; p < g.n; ++p )
-                {
-                    acts[p] = ACT_STRAIGHT;
-                    if ( !g.world.cycles[p].alive )
-                        continue;
-                    unsigned mask = g.world.ActionMask( p );
-                    float pol[kActions];
-                    if ( cfg.temperature <= 0 )
-                    {
-                        int best = ACT_STRAIGHT;
-                        float bl = -1e30f;
-                        for ( int a = 0; a < kActions; ++a )
-                            if ( ( mask >> a & 1 ) && g.rootLogits[p][a] > bl )
-                            {
-                                bl = g.rootLogits[p][a];
-                                best = a;
-                            }
-                        acts[p] = best;
-                    }
-                    else
-                    {
-                        MaskedSoftmax( g.rootLogits[p], mask, pol, cfg.temperature );
-                        float r = Uniform( g.rng ), acc = 0;
-                        acts[p] = ACT_STRAIGHT;
-                        for ( int a = 0; a < kActions; ++a )
-                        {
-                            acc += pol[a];
-                            if ( r < acc && ( mask >> a & 1 ) )
-                            {
-                                acts[p] = a;
-                                break;
-                            }
-                        }
-                    }
-                    Record( g, p, false, 0 );
-                }
-                FinishDecision( g, acts );
-            }
+            Decide( g );
         }
         else if ( g.stage == 3 )
         {
@@ -738,6 +923,11 @@ void SelfPlay::Advance( Game & g )
                 return;
             }
             BeginDecision( g );
+            if ( g.requests.empty() )
+            {
+                Decide( g );  // nobody needs the network: the space fighters move on their own
+                continue;
+            }
             g.waiting = true;
             return;
         }

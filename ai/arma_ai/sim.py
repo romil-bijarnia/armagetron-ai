@@ -79,8 +79,8 @@ def lib() -> ctypes.CDLL:
         i64p = ctypes.POINTER(ctypes.c_int64)
         sig.update({
             "sp_new": ([i32], vp), "sp_free": ([vp], None),
-            "sp_config": ([vp, i32, i32, f32, f32, f32, f32, f32, f32, i32, i32, i32, i32], None),
-            "sp_set_ring": ([vp, i32, u8p, fp, u8p, fp, u8p, fp, fp, i64p, i64p, u8p, i64p, ctypes.c_int64], None),
+            "sp_config": ([vp, i32, i32, f32, f32, f32, f32, f32, f32, i32, i32, i32, i32, i32, i32, i32, i32], None),
+            "sp_set_ring": ([vp, i32, u8p, fp, u8p, fp, u8p, fp, fp, i64p, i64p, u8p, i64p, ctypes.c_int64, i64p, u8p], None),
             "sp_start": ([vp, i32, f32, i32, ip, ip, i32, ctypes.c_ulonglong], None),
             "sp_collect": ([vp, u8p, fp, u8p, ip, ip, i32, u8p], i32),
             "sp_feed": ([vp, fp, fp, i32, fp], None),
@@ -174,7 +174,11 @@ RING_FIELDS = (
     ("prev", np.int64, ()),
     ("gen", np.int64, ()),
     ("ready", np.uint8, ()),
+    ("future", np.int64, ()),  # ring index of the sample whose territory map is the ownership target
+    ("heading", np.uint8, ()),  # heading quadrant the sample's minimap and territory are drawn in
 )
+
+AGENT_HUNTER = -1  # a seat played by the simulator's built-in space fighter (no network)
 
 
 class Ring:
@@ -232,6 +236,24 @@ class Ring:
             return np.zeros(0, np.int64)
         return pool[rng.integers(0, len(pool), size=n)] if len(pool) >= n else pool.copy()
 
+    def ownership(self, idx: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        """The ownership target of each sample: who reaches each minimap cell first, auxHorizon
+        decisions later (0 nobody, 1 me, 2 an enemy), drawn in the sample's own frame; and whether
+        the target is still in the ring. The later map was drawn in the player's heading then, so
+        it is turned back by the quadrants the heading changed by."""
+        fut = self.future[idx]
+        slot = np.where(fut >= 0, fut % self.cap, idx)
+        valid = (fut >= 0) & (self.gen[slot] == fut)
+        terr = self.maps[slot, P.N_MAPS - 1]
+        cls = np.where(terr & 1, 1, np.where((terr >> 1) & 1, 2, 0)).astype(np.int64)
+        turn = (self.heading[idx].astype(int) - self.heading[slot].astype(int)) % 4
+        out = cls.copy()
+        for k in (1, 2, 3):
+            sel = turn == k
+            if sel.any():
+                out[sel] = np.rot90(cls[sel], k, axes=(1, 2))
+        return out, valid
+
     def prev_maps(self, idx: np.ndarray) -> np.ndarray:
         """The previous decision's maps of each sample (its own maps at a spawn or once overwritten)."""
         prev = self.prev[idx]
@@ -258,12 +280,14 @@ class SelfPlay:
     def __init__(self, games: int, *, sims: int = 32, macro: int = 2, gamma: float = 0.999, c_visit: float = 50,
                  c_scale: float = 0.1, search_prob: float = 0.25, temperature: float = 1.0, gumbel: float = 1.0,
                  max_decisions: int = 6000, aux_horizon: int = 40, threads: int = 8, max_players: int = 4,
-                 value_steps: int = 60):
+                 value_steps: int = 60, hunter_depth: int = 2, hunter_replan: int = 2, hunter_ply: int = 4,
+                 hunter_probe: int = 6):
         self.L = lib()
         self.games = games
         self.h = self.L.sp_new(games)
         self.L.sp_config(self.h, sims, macro, gamma, c_visit, c_scale, search_prob, temperature, gumbel,
-                         max_decisions, aux_horizon, threads, value_steps)
+                         max_decisions, aux_horizon, threads, value_steps, hunter_depth, hunter_replan, hunter_ply,
+                         hunter_probe)
         cap = games * max_players
         self.maps = np.zeros((cap, 2 * P.N_MAPS, P.GRID, P.GRID), np.uint8)
         self.scalars = np.zeros((cap, P.N_SCALARS), np.float32)
@@ -285,7 +309,7 @@ class SelfPlay:
         self.L.sp_set_ring(self.h, agent, _ptr(ring.maps, u8), _ptr(ring.scalars, f), _ptr(ring.mask, u8),
                            _ptr(ring.policy, f), _ptr(ring.has_policy, u8), _ptr(ring.value, f), _ptr(ring.aux, f),
                            _ptr(ring.prev, i64), _ptr(ring.gen, i64), _ptr(ring.ready, u8), _ptr(ring.counter, i64),
-                           ring.cap)
+                           ring.cap, _ptr(ring.future, i64), _ptr(ring.heading, u8))
 
     def start(self, g: int, size: float, agents, learn, rotate: int = 0, seed: int = 0) -> None:
         a = np.ascontiguousarray(agents, np.int32)

@@ -202,3 +202,101 @@ def test_decisions_without_a_value_make_targets_reach_to_the_next_one():
     gaps = np.log(from_value / v) / np.log(gamma)  # targets built from a value: v * gamma^gap
     assert len(gaps) > 0 and gaps.min() > steps - 0.5 and np.median(gaps) < steps + 20
     assert not np.any(np.isclose(vals, 0.9 * gamma**steps, atol=1e-4))
+
+
+def test_the_space_fighter_plays_without_a_network_and_does_not_crash_into_walls():
+    from arma_ai.sim import AGENT_HUNTER
+
+    sp = SelfPlay(2, sims=0, search_prob=0.0, threads=1, hunter_depth=2)
+    for g in range(2):
+        sp.start(g, -3.0, [AGENT_HUNTER, AGENT_HUNTER], [False, False], rotate=g, seed=g + 1)
+    for _ in range(50):
+        assert sp.collect() == 0  # nobody asks the network
+        if all(sp.info(g) is not None for g in range(2)):
+            break
+    for g in range(2):
+        info = sp.info(g)
+        assert info is not None
+        # two fighters playing for territory do not drive into the rim early: a round lasts
+        assert info["decisions"] > 150
+        assert sorted(info["outcome"]) in ([-1.0, 1.0], [0.0, 0.0])
+
+
+def test_rounds_against_the_space_fighter_record_the_learner_only():
+    torch.manual_seed(0)
+    from arma_ai.model import PolicyNet
+    from arma_ai.sim import AGENT_HUNTER
+
+    net = PolicyNet().eval()
+    sp = SelfPlay(4, sims=8, search_prob=0.5, threads=2, hunter_depth=1)
+    ring = Ring(20_000)
+    sp.set_ring(0, ring)
+    for g in range(4):
+        sp.start(g, -3.0, [0, AGENT_HUNTER], [True, False], rotate=g % 2, seed=g + 1)
+    finished = 0
+    for _ in range(4000):
+        n = sp.collect()
+        if n:
+            assert np.all(sp.agents[:n] == 0)
+            mask = torch.from_numpy(((sp.masks[:n, None] >> np.arange(4)) & 1).astype(bool))
+            with torch.no_grad():
+                lg, v = net(torch.from_numpy(sp.maps[:n]), torch.from_numpy(sp.scalars[:n]), mask)
+            sp.feed(lg.numpy(), v.numpy())
+        for g in range(4):
+            info = sp.info(g)
+            if info is not None:
+                finished += 1
+                assert info["agents"][1] == AGENT_HUNTER
+                if finished < 6:
+                    sp.start(g, -3.0, [0, AGENT_HUNTER], [True, False], seed=100 + finished)
+        if finished >= 6:
+            break
+    assert finished >= 6
+    ready = ring.window()
+    assert len(ready) > 0
+    assert np.all(ring.future[ready] >= 0)
+    assert np.all(ring.heading[ready] <= 3)
+    own, ok = ring.ownership(ready[:64])
+    assert own.shape == (min(64, len(ready)), P.GRID, P.GRID) and own.max() <= 2
+    assert ok.all()
+
+
+def test_ownership_targets_turn_with_the_heading():
+    sim = Sim()
+    sim.reset(-3.0, 2)
+    st = sim.state()
+    x, y = float(st["x"][0]), float(st["y"][0])
+    sim.place(0, x, y, 0.0, 1.0)
+    up = sim.observe(0)[0][P.N_MAPS - 1].copy()
+    sim.place(0, x, y, 1.0, 0.0)
+    right = sim.observe(0)[0][P.N_MAPS - 1].copy()
+    assert up.any() and not np.array_equal(up, right)
+    # a quarter turn of the heading turns the map a quarter turn
+    assert np.array_equal(np.rot90(up, 1), right)
+    # and the ring turns a later map back into the sample's frame by the quadrants between them
+    ring = Ring(4)
+    ring.maps[0, P.N_MAPS - 1] = up
+    ring.maps[1, P.N_MAPS - 1] = right
+    ring.heading[0], ring.heading[1] = 0, 1
+    ring.gen[0], ring.gen[1] = 0, 1
+    ring.future[0], ring.future[1] = 1, -1
+    own, ok = ring.ownership(np.array([0, 1]))
+    assert ok.tolist() == [True, False]
+    cls_up = np.where(up & 1, 1, np.where((up >> 1) & 1, 2, 0))
+    assert np.array_equal(own[0], cls_up)
+
+
+def test_the_network_predicts_an_ownership_map_the_game_never_loads():
+    from arma_ai.export import layers_of
+    from arma_ai.model import PolicyNet
+
+    net = PolicyNet().eval()
+    maps = torch.zeros((2, 2 * P.N_MAPS, P.GRID, P.GRID), dtype=torch.uint8)
+    scalars = torch.zeros((2, P.N_SCALARS))
+    mask = torch.ones((2, P.N_ACTIONS), dtype=torch.bool)
+    with torch.no_grad():
+        logits, v, aux, own = net.heads(maps, scalars, mask)
+        l2, v2 = net(maps, scalars, mask)
+    assert own.shape == (2, 3, P.GRID, P.GRID)
+    assert torch.allclose(logits, l2) and torch.allclose(v, v2)
+    assert not any(name.startswith("own") for name, _ in layers_of(net))

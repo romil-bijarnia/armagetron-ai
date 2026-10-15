@@ -47,6 +47,7 @@ import torch.nn.functional as F
 
 from . import protocol as P
 from .model import PolicyNet, make_net, net_version
+from .sim import AGENT_HUNTER
 
 PROJECT = Path(__file__).resolve().parent.parent
 
@@ -74,6 +75,9 @@ class Config:
     weight_decay: float = 1e-4
     value_coef: float = 1.0
     aux_coef: float = 0.25
+    own_coef: float = 0.5  # weight of the ownership map loss (who holds each cell two seconds on)
+    hunter_prob: float = 0.20  # rounds against the simulator's space fighter (a minimax over territory)
+    hunter_depth: int = 2  # how many plies it looks ahead
     max_grad_norm: float = 1.0
     bf16: bool = True  # train in bfloat16 (about 20% faster on Apple GPUs)
     replay_ratio: float = 1.5  # training samples per generated one (the rest of the GPU goes to self-play)
@@ -133,7 +137,7 @@ class Actor:
         self.rng = random.Random(cfg.seed + 17)
         self.sp = SelfPlay(cfg.games, sims=cfg.sims, macro=cfg.macro, search_prob=cfg.search_prob,
                            temperature=cfg.temperature, gumbel=cfg.gumbel, threads=cfg.threads,
-                           value_steps=cfg.value_steps)
+                           value_steps=cfg.value_steps, hunter_depth=cfg.hunter_depth)
         self.sp.set_ring(AGENT_MAIN, rings[0])
         self.sp.set_ring(AGENT_EXPLOITER, rings[1])
         self.nets: dict[int, torch.nn.Module] = {}
@@ -282,6 +286,10 @@ class Actor:
             agent = r.choice(sorted(self.pool_files))
             size = r.choice(LEAGUE_SIZES)
             agents, learn, kind = [AGENT_MAIN, agent], [1, 0], ("pool", self.pool_files[agent].name)
+        elif cfg.exploiter_prob + cfg.pool_prob <= x < cfg.exploiter_prob + cfg.pool_prob + cfg.hunter_prob:
+            # the space fighter: it plays for territory and punishes hesitation, from the first round on
+            size = r.choice(LEAGUE_SIZES)
+            agents, learn, kind = [AGENT_MAIN, AGENT_HUNTER], [1, 0], ("hunter", None)
         else:
             size, n, _ = r.choices(ARENAS, [w for _, _, w in ARENAS])[0]
             agents, learn, kind = [AGENT_MAIN] * n, [1] * n, ("self", f"{'duel' if n == 2 else f'ffa{n}'}_{size:g}")
@@ -306,6 +314,8 @@ class Actor:
             s[0] += score
             s[1] += 1
             self.results["win_vs_past"].append(score)
+        elif kind == "hunter":
+            self.results["win_vs_hunter"].append(score)
         elif kind == "exploiter":
             self.exploiter_results.append(score)
             self.results["win_exploiter"].append(score)
@@ -547,18 +557,19 @@ class Learner:
         d = self.device
         T = lambda x: torch.from_numpy(np.ascontiguousarray(x)).to(d)  # noqa: E731
         mask = ((ring.mask[idx, None] >> np.arange(P.N_ACTIONS)) & 1).astype(bool)
+        own_t, own_ok = ring.ownership(idx)
         return (T(maps), T(ring.scalars[idx]), T(mask), T(ring.policy[idx]), T(has_pol), T(ring.value[idx]),
-                T(ring.aux[idx]), len(idx))
+                T(ring.aux[idx]), T(own_t), T(own_ok), len(idx))
 
     def step(self, net, opt, data) -> dict:
         cfg = self.cfg
-        maps, scal, mask, pol, has_pol, z, aux_t, n = data
+        maps, scal, mask, pol, has_pol, z, aux_t, own_t, own_ok, n = data
         if cfg.bf16 and self.device.type in ("mps", "cuda"):
             with torch.autocast(self.device.type, dtype=torch.bfloat16):
-                logits, v, aux = net.heads(maps, scal, mask)
-            logits, v, aux = logits.float(), v.float(), aux.float()
+                logits, v, aux, own = net.heads(maps, scal, mask)
+            logits, v, aux, own = logits.float(), v.float(), aux.float(), own.float()
         else:
-            logits, v, aux = net.heads(maps, scal, mask)
+            logits, v, aux, own = net.heads(maps, scal, mask)
         logits = logits.masked_fill(~mask, -1e8)
         logp = torch.log_softmax(logits, 1)
         # policy: cross-entropy against the search's improved policy (searched decisions only)
@@ -568,7 +579,12 @@ class Learner:
         value_loss = F.mse_loss(v, z)
         aux_loss = (F.binary_cross_entropy_with_logits(aux[:, 0], aux_t[:, 0]) +
                     F.binary_cross_entropy_with_logits(aux[:, 1], aux_t[:, 1]))
-        loss = policy_loss + cfg.value_coef * value_loss + cfg.aux_coef * aux_loss
+        # ownership: cross-entropy per minimap cell, for samples whose target is still in the ring
+        if own_ok.any():
+            own_loss = F.cross_entropy(own[own_ok], own_t[own_ok])
+        else:
+            own_loss = own.sum() * 0
+        loss = policy_loss + cfg.value_coef * value_loss + cfg.aux_coef * aux_loss + cfg.own_coef * own_loss
         opt.zero_grad(set_to_none=True)
         loss.backward()
         gn = torch.nn.utils.clip_grad_norm_(net.parameters(), cfg.max_grad_norm)
@@ -580,7 +596,7 @@ class Learner:
             kl = (tg * (tlog - pl.clamp_min(-30))).sum(1).mean() if len(tg) else torch.zeros((), device=v.device)
             var = torch.var(z)
             expl = 1 - torch.var(z - v) / (var + 1e-8)
-        return {"pg": policy_loss.detach(), "vf": value_loss.detach(), "aux": aux_loss.detach(), "ent": ent,
+        return {"pg": policy_loss.detach(), "vf": value_loss.detach(), "aux": aux_loss.detach(), "own": own_loss.detach(), "ent": ent,
                 "search_kl": kl, "grad_norm": gn.detach(), "value_explained": expl, "n": n}
 
     def drain(self, q) -> None:

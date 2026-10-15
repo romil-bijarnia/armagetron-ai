@@ -132,9 +132,14 @@ void sp_free( void * h )
 }
 
 void sp_config( void * h, int sims, int macro, float gamma, float cVisit, float cScale, float searchProb,
-                float temperature, float gumbel, int maxDecisions, int auxHorizon, int threads, int valueSteps )
+                float temperature, float gumbel, int maxDecisions, int auxHorizon, int threads, int valueSteps,
+                int hunterDepth, int hunterReplan, int hunterPly, int hunterProbe )
 {
     tron::SPConfig & c = static_cast< SelfPlay * >( h )->cfg;
+    c.hunterDepth = hunterDepth;
+    c.hunterReplan = hunterReplan;
+    c.hunterPly = hunterPly < 1 ? 1 : hunterPly;
+    c.hunterProbe = hunterProbe;
     c.sims = sims;
     c.macro = macro < 1 ? 1 : macro;
     c.gamma = gamma;
@@ -150,7 +155,8 @@ void sp_config( void * h, int sims, int macro, float gamma, float cVisit, float 
 }
 
 void sp_set_ring( void * h, int agent, uint8_t * maps, float * scalars, uint8_t * mask, float * policy, uint8_t * hasPolicy,
-                  float * value, float * aux, int64_t * prev, int64_t * gen, uint8_t * ready, int64_t * counter, int64_t cap )
+                  float * value, float * aux, int64_t * prev, int64_t * gen, uint8_t * ready, int64_t * counter, int64_t cap,
+                  int64_t * future, uint8_t * heading )
 {
     if ( agent < 0 || agent > 3 )
         return;
@@ -167,6 +173,8 @@ void sp_set_ring( void * h, int agent, uint8_t * maps, float * scalars, uint8_t 
     r.ready = ready;
     r.counter = counter;
     r.cap = cap;
+    r.future = future;
+    r.heading = heading;
 }
 
 void sp_start( void * h, int g, float size, int n, int const * agents, int const * learn, int rotate, unsigned long long seed )
