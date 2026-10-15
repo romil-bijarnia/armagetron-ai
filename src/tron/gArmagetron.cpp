@@ -47,6 +47,7 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 #include "tRecorder.h"
 #include "tCommandLine.h"
 #include "tToDo.h"
+#include "eSound.h"
 #include "eAdvWall.h"
 #include "eGameObject.h"
 #include "uMenu.h"
@@ -60,6 +61,7 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 #include <fstream>
 #include <bitset>
 #include "tCrypto.h"
+#include "tDefer.h"
 
 #include "nServerInfo.h"
 #include "nSocket.h"
@@ -694,6 +696,11 @@ int main(int argc,char **argv){
     // inject functions into lower levels
     se_RegisterMoviePackFunc(&sg_MoviePack);
     sg_RegisterStartupPlayerMenu(&sg_StartupPlayerMenu);
+
+    // clean up sound data
+    auto const soundCleanup = tDefer(
+        []()
+        { eLegacyWavData::UnloadAll(); });
 
     bool dedicatedServer = false;
 
