@@ -7,62 +7,88 @@
 <style>
   :root {
     --bg: #000;
-    --text: #f2f2f2;
-    --muted: #8a8a8a;
-    --faint: #5e5e5e;
+    --text: #c9c9c9;
+    --bright: #ececec;
+    --muted: #7c7c7c;
+    --faint: #4a4a4a;
     --hair: rgba(255, 255, 255, 0.08);
     --accent: #339cff;
+    --arena: min(calc(100vh - 200px), 50vw);
   }
   [hidden] { display: none !important; }
   html, body { margin: 0; background: var(--bg); color: var(--text);
     font: 16px/1.4 -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", sans-serif; }
-  #hero { position: relative; height: 100vh; overflow: hidden; }
-  canvas#scene { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
-  .top { position: absolute; left: 28px; top: 22px; pointer-events: none; }
+  canvas { display: block; }
   h1 { font-size: 21px; font-weight: 500; margin: 0; letter-spacing: 0.01em; }
-  #status { color: var(--muted); font-size: 14px; margin-top: 4px; text-shadow: 0 0 6px #000; }
-  h1 { text-shadow: 0 0 8px #000; }
+  h2 { font-size: 15px; font-weight: 500; color: var(--muted); margin: 0 0 8px; }
+  #hero { position: relative; min-height: 100vh; box-sizing: border-box; padding: 22px 28px 20px;
+    display: grid; grid-template-rows: auto 1fr auto; gap: 22px; }
+  .head { display: flex; align-items: flex-start; justify-content: space-between; }
+  #status { color: var(--muted); font-size: 14px; margin-top: 4px; }
   #status .flash { color: var(--accent); }
-  .toggles { position: absolute; right: 28px; top: 22px; display: flex; gap: 8px; align-items: center; }
-  .toggles button { background: rgba(0, 0, 0, 0.55); backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px);
-    color: var(--muted); border: 1px solid var(--hair);
+  .toggles { display: flex; gap: 8px; align-items: center; }
+  .toggles button { background: transparent; color: var(--muted); border: 1px solid var(--hair);
     border-radius: 999px; padding: 6px 15px; font: inherit; font-size: 14px; cursor: pointer;
-    font-variant-numeric: tabular-nums; }
+    font-variant-numeric: tabular-nums; white-space: nowrap; }
   .toggles button.on { color: var(--text); border-color: rgba(255, 255, 255, 0.28); }
   .toggles button:disabled { opacity: 0.35; cursor: default; }
   .toggles .sep { width: 1px; height: 18px; background: rgba(255, 255, 255, 0.14); margin: 0 6px; }
-  #moves { position: absolute; right: 28px; bottom: 26px; width: 250px; }
-  .row { display: flex; align-items: center; gap: 12px; height: 31px; color: var(--muted); font-size: 15px; }
-  .row .name { width: 72px; }
-  .row .bar { flex: 1; height: 3px; background: var(--hair); border-radius: 2px; overflow: hidden; }
-  .row .bar i { display: block; height: 100%; width: 0; opacity: 0.4; transition: width 80ms linear; }
-  .row .pct { width: 42px; text-align: right; font-variant-numeric: tabular-nums; }
-  .row.pick { color: var(--text); }
-  .row.pick .bar i { opacity: 1; }
-  .row.off { color: #3c3c3c; }
-  #value { color: var(--muted); font-size: 14px; margin-top: 8px; font-variant-numeric: tabular-nums; }
-  #arenaBox { position: absolute; left: 28px; bottom: 26px; }
-  #arena { width: 210px; height: 210px; display: block; }
-  #result { color: var(--muted); font-size: 13px; margin-top: 8px; height: 18px; }
-  #legend { color: var(--faint); font-size: 12px; margin-top: 2px; }
+  #main { display: grid; grid-template-columns: var(--arena) minmax(300px, 400px) 1fr; gap: 44px; align-items: start; }
+  @media (max-width: 1400px) { #main { grid-template-columns: var(--arena) 1fr; } #sees { grid-column: 1 / -1; } }
+  #arena { width: var(--arena); height: var(--arena); cursor: crosshair; }
+  #caption { color: var(--muted); font-size: 13px; margin-top: 10px; min-height: 20px; display: flex;
+    align-items: center; gap: 14px; flex-wrap: wrap; }
+  #heads { display: flex; gap: 6px; align-items: center; }
+  #heads canvas { width: 40px; height: 40px; image-rendering: pixelated; border: 1px solid var(--hair); }
+  #heads span { color: var(--faint); font-size: 12px; margin: 0 4px 0 6px; }
+  #legend { color: var(--faint); font-size: 12px; margin-top: 6px; }
   #legend i { display: inline-block; width: 7px; height: 7px; border-radius: 50%; margin: 0 5px 1px 0; }
   #legend span { margin-right: 12px; }
-  #labels { position: absolute; inset: 0; pointer-events: none; }
-  .label { position: absolute; transform: translate(-50%, 0); color: var(--faint); font-size: 12px;
-    white-space: nowrap; pointer-events: none; text-shadow: 0 0 6px #000, 0 0 2px #000; }
-  .label.left { transform: translate(0, -50%); }
-  #tip { position: fixed; display: none; pointer-events: none; background: rgba(0, 0, 0, 0.82);
-    border: 1px solid rgba(255, 255, 255, 0.14); border-radius: 8px; padding: 6px 10px; font-size: 13px;
-    line-height: 1.35; white-space: nowrap; font-variant-numeric: tabular-nums; }
-  #tip .d { color: var(--muted); }
-  #keys { position: absolute; left: 50%; bottom: 26px; transform: translateX(-50%); color: var(--faint);
-    font-size: 12px; pointer-events: none; white-space: nowrap; }
+  #side { display: grid; gap: 30px; }
+  .row { display: flex; align-items: center; gap: 12px; height: 32px; color: var(--muted); font-size: 16px; }
+  .row .name { width: 76px; }
+  .row .bar { flex: 1; height: 3px; background: var(--hair); border-radius: 2px; overflow: hidden; }
+  .row .bar i { display: block; height: 100%; width: 0; opacity: 0.4; transition: width 80ms linear; }
+  .row .pct { width: 44px; text-align: right; font-variant-numeric: tabular-nums; }
+  .row.pick { color: var(--bright); }
+  .row.pick .bar i { opacity: 1; }
+  .row.off { color: #3c3c3c; }
+  .pred { display: grid; grid-template-columns: 150px 1fr; gap: 14px; align-items: center; }
+  .pred .big { font-size: 30px; font-weight: 400; color: var(--bright); font-variant-numeric: tabular-nums; line-height: 1.1; }
+  .pred .sub { color: var(--faint); font-size: 13px; margin-top: 4px; font-variant-numeric: tabular-nums; }
+  .pred canvas { width: 100%; height: 46px; }
+  #feel { color: var(--muted); font-size: 14px; line-height: 1.7; font-variant-numeric: tabular-nums; }
+  #sees { display: grid; grid-template-columns: repeat(2, max-content); gap: 22px 26px; align-content: start; }
+  #sees h2 { grid-column: 1 / -1; margin: 0; }
+  .map canvas { image-rendering: pixelated; border: 1px solid var(--hair); width: 150px; height: 150px; }
+  .map.numbers canvas { height: 56px; }
+  .map .cap { color: var(--muted); font-size: 13px; margin-top: 7px; }
+  .map .cap em { color: var(--faint); font-style: normal; }
+  #keys { color: var(--faint); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   #wait { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
-    color: var(--muted); font-size: 15px; pointer-events: none; }
+    color: var(--muted); font-size: 15px; pointer-events: none; background: var(--bg); }
+  #tip { position: fixed; display: none; pointer-events: none; background: rgba(0, 0, 0, 0.88);
+    border: 1px solid rgba(255, 255, 255, 0.14); border-radius: 8px; padding: 8px 10px; font-size: 13px;
+    line-height: 1.35; white-space: nowrap; font-variant-numeric: tabular-nums; z-index: 5; }
+  #tip .d { color: var(--muted); }
+  #tip canvas { image-rendering: pixelated; margin-top: 7px; border: 1px solid var(--hair); }
+  /* inside: every stage of the network as the picture it is */
+  #inside { padding: 50px 28px 40px; }
+  #inside h2 { font-size: 24px; font-weight: 500; color: var(--text); margin: 0 0 6px; }
+  #insideSub { color: var(--muted); font-size: 15px; margin-bottom: 10px; }
+  .tower { margin-top: 38px; }
+  .tower h3 { font-size: 16px; font-weight: 500; color: var(--muted); margin: 0 0 14px; }
+  .tower h3 b { color: var(--text); font-weight: 500; }
+  .stages { display: flex; gap: 22px; flex-wrap: wrap; align-items: flex-start; }
+  .stage { position: relative; }
+  .stage canvas { image-rendering: pixelated; border: 1px solid var(--hair); cursor: crosshair; }
+  .stage .lbl { color: var(--muted); font-size: 12px; margin-top: 7px; white-space: nowrap; }
+  .stage .lbl b { color: var(--text); font-weight: 500; }
+  .stage .learn { height: 2px; background: var(--accent); width: 0; margin-top: 5px; opacity: 0; transition: opacity 0.6s; }
   /* the numbers: one roomy row per number, its history drawn large */
-  #stats { padding: 60px 28px 110px; max-width: 1240px; }
+  #stats { padding: 40px 28px 110px; max-width: 1240px; }
   #statsHead { display: flex; align-items: baseline; gap: 22px; }
-  #stats h2 { font-size: 24px; font-weight: 500; margin: 0; }
+  #stats h2 { font-size: 24px; font-weight: 500; margin: 0; color: var(--text); }
   #statsSub { color: var(--muted); font-size: 15px; }
   #statsUp { color: var(--muted); font-size: 15px; text-decoration: none; margin-left: auto; }
   #statsUp:hover { color: var(--text); }
@@ -70,45 +96,51 @@
   .srow { display: grid; grid-template-columns: 260px 180px 1fr; align-items: center; gap: 24px; height: 94px;
     border-top: 1px solid var(--hair); }
   .srow .k { font-size: 17px; color: var(--muted); }
-  .srow .v { font-size: 30px; font-weight: 400; color: var(--text); font-variant-numeric: tabular-nums; white-space: nowrap; }
-  .srow canvas { width: 100%; height: 62px; display: block; }
+  .srow .v { font-size: 30px; font-weight: 400; color: var(--bright); font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .srow canvas { width: 100%; height: 62px; }
 </style>
-<script type="importmap">
-{ "imports": {
-  "three": "https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.js",
-  "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.170.0/examples/jsm/"
-} }
-</script>
 </head>
 <body>
 <div id="hero">
-<canvas id="scene"></canvas>
-<div class="top">
-  <h1>Brain</h1>
-  <div id="status">connecting</div>
+<div class="head">
+  <div><h1>Brain</h1><div id="status">connecting</div></div>
+  <div class="toggles">
+    <button id="bPause">Pause</button>
+    <button id="bStep" disabled>Step</button>
+    <button id="bSpeed">1×</button>
+    <span class="sep"></span>
+    <button id="tFloor">Floor · predicted</button>
+    <button id="tAttn">Attention</button>
+    <button id="tRays">Rays</button>
+    <span class="sep"></span>
+    <button id="tInside">Inside</button>
+    <button id="tStats" disabled>Numbers</button>
+  </div>
 </div>
-<div class="toggles">
-  <button id="bPause">Pause</button>
-  <button id="bStep" disabled>Step</button>
-  <button id="bSpeed">1×</button>
-  <span class="sep"></span>
-  <button id="tGlow" class="on">Glow</button>
-  <button id="tFlat">Flat</button>
-  <button id="tHD">HD</button>
-  <span class="sep"></span>
-  <button id="tStats" disabled>Stats</button>
+<div id="main">
+  <div id="left">
+    <canvas id="arena"></canvas>
+    <div id="caption"><span id="capText"></span><div id="heads" hidden></div></div>
+    <div id="legend"><span><i style="background:#22d3ee"></i>me</span><span><i style="background:#fb923c"></i>enemy</span><span><i style="background:#9ca3af"></i>walls</span><span id="legendFloor"></span></div>
+  </div>
+  <div id="side">
+    <div><h2>Move</h2><div id="moves"></div></div>
+    <div><h2>Win chance</h2><div class="pred"><div><div class="big" id="winV">–</div><div class="sub" id="winS"></div></div><canvas id="winC"></canvas></div></div>
+    <div id="dangerB" hidden><h2>Danger in two seconds</h2><div class="pred"><div><div class="big" id="dangerV">–</div><div class="sub">how likely it is dead by then</div></div><canvas id="dangerC"></canvas></div></div>
+    <div id="shareB" hidden><h2>Territory in two seconds</h2><div class="pred"><div><div class="big" id="shareV">–</div><div class="sub" id="shareS"></div></div><canvas id="shareC"></canvas></div></div>
+    <div><h2>It feels</h2><div id="feel"></div></div>
+  </div>
+  <div id="sees"></div>
 </div>
-<div id="arenaBox">
-  <canvas id="arena"></canvas>
-  <div id="result"></div>
-  <div id="legend"><span><i style="background:#22d3ee"></i>you</span><span><i style="background:#fb923c"></i>enemy</span><span><i style="background:#9ca3af"></i>walls</span><span id="legendTerritory"><i style="background:#f472b6"></i>territory</span></div>
-</div>
-<div id="moves"></div>
-<div id="labels"></div>
-<div id="keys">space pause · → step · [ ] speed · - = brightness · drag to turn · pinch to zoom · double-click to reset the view · hover a neuron · scroll down for the numbers</div>
+<div id="keys">space pause · → step · [ ] speed · f floor · a attention · r rays · 1 2 attention layer · hover the arena for a cell's attention · hover a layer for a filter · scroll down for the inside and the numbers</div>
 <div id="wait">waiting for the brain</div>
 </div>
 <div id="tip"></div>
+<section id="inside" hidden>
+  <h2>Inside</h2>
+  <div id="insideSub"></div>
+  <div id="towers"></div>
+</section>
 <section id="stats" hidden>
   <div id="statsHead"><h2 id="statsTitle">Training</h2><div id="statsSub"></div><a id="statsUp" href="#">back to the brain ↑</a></div>
   <h3 id="strengthHead">Strength</h3><div id="strengthRows"></div>
@@ -116,371 +148,99 @@
 </section>
 
 <script type="module">
-import * as THREE from 'three';
-import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
-import { LineSegments2 } from 'three/addons/lines/LineSegments2.js';
-import { LineSegmentsGeometry } from 'three/addons/lines/LineSegmentsGeometry.js';
-import { LineMaterial } from 'three/addons/lines/LineMaterial.js';
-import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
-import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
-import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
-import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
-
-// ------------------------------------------------------------------ layout
-const COL = 3.2;                                   // distance between layer columns
-const BAND = {                                     // vertical band of each branch
-  local:     { y:  4.1,  h: 2.4 },                  // the player view, 2 m
-  close:     { y:  1.45, h: 2.4 },                  // the player view, 1 m
-  global:    { y: -1.2,  h: 2.4 },                  // the minimap
-  territory: { y: -3.85, h: 2.4 },                  // who gets where first
-  player:    { y:  2.78, h: 4.4 },                  // the player-view tower: both views around the cycle
-  arena:     { y: -2.52, h: 4.4 },                  // the arena tower: minimap and territory
-  scalars:   { y: -5.9,  h: 1.1 },
-  trunk:     { y:  0.0,  h: 5.0 },
-  head:      { y:  0.0,  h: 3.0 },
-};
-const CENTER = new THREE.Vector3(COL * 4.5, -0.9, 0);
-const VIEW_ANGLED = new THREE.Vector3(-18, 7, 32);
-const VIEW_FLAT = new THREE.Vector3(0, 0, 40);
+// ------------------------------------------------------------------ constants
 const SPEEDS = [0.25, 0.5, 1, 2, 4];
-
+const ME = '#22d3ee', ENEMY = '#fb923c';
 const PLANE_COLORS = {                             // input cells: colour of the most important bit
   'walls': '#9ca3af', 'own trail': '#22d3ee', 'own head': '#a5f3fc', 'enemy trails': '#fb923c',
   'enemy heads': '#f87171', 'enemy paths': '#a16207', 'team trails': '#4ade80', 'team heads': '#86efac',
-  'outside': '#2e2e2e',
-  'mine first': '#22d3ee', 'enemy first': '#fb923c',   // territory: my region in my colour, theirs in theirs
+  'outside': '#2a2a2a', 'mine first': '#22d3ee', 'enemy first': '#fb923c',
 };
 const PRIORITY = ['enemy heads', 'own head', 'team heads', 'own trail', 'enemy trails', 'team trails',
                   'walls', 'enemy paths', 'outside', 'mine first', 'enemy first'];
-// each branch has its own hue, so you can see where a signal came from; the trunk, where the
-// three meet, stays neutral, and each move has its own colour
-const BRANCH_COLORS = { local: '#38bdf8', close: '#2dd4bf', global: '#a78bfa', territory: '#f472b6', scalars: '#fbbf24',
-                        player: '#38bdf8', arena: '#a78bfa',
-                        trunk: '#f1f5f9', head: '#ffffff' };
 const MOVE_COLORS = ['#4ade80', '#60a5fa', '#e879f9', '#f87171'];
+const TINT = { player: [168, 200, 224], local: [168, 200, 224], arena: [196, 184, 226], global: [196, 184, 226],
+               scalars: [226, 206, 168], trunk: [212, 212, 212] };
+const TOWER_TITLE = { player: 'Player view', local: 'Nearby', arena: 'Arena view', global: 'Arena',
+                      scalars: 'Numbers', trunk: 'Trunk' };
+const TOWER_SUB = {
+  player: 'the two views around the cycle, 2 m and 1 m cells, this decision and the last',
+  arena: 'the minimap and who gets there first, this decision and the last',
+  local: 'the 2 m view around the cycle', global: 'the minimap',
+  scalars: 'the 96 exact numbers', trunk: 'where the views and the numbers meet, before the move and the value',
+};
+const MAP_CAP = { local_in: 'nearby · 2 m cells', close_in: 'up close · 1 m cells', global_in: 'the whole arena',
+                  territory_in: 'who gets there first' };
+const RAYS = 16, RAY_RANGE = 250;
 
-function mulberry32(seed) {
-  return () => {
-    seed |= 0; seed = seed + 0x6D2B79F5 | 0;
-    let t = Math.imul(seed ^ seed >>> 15, 1 | seed);
-    t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
-    return ((t ^ t >>> 14) >>> 0) / 4294967296;
-  };
-}
+const $ = id => document.getElementById(id);
+const b64 = (s, Type = Uint8Array) => { const bin = atob(s); const u = new Uint8Array(bin.length); for (let i = 0; i < bin.length; i++) u[i] = bin.charCodeAt(i); return Type === Uint8Array ? u : new Type(u.buffer); };
+const hex = h => [parseInt(h.slice(1, 3), 16), parseInt(h.slice(3, 5), 16), parseInt(h.slice(5, 7), 16)];
+const DPR = Math.min(window.devicePixelRatio || 1, 2);
+const pct = v => v == null ? '–' : `${Math.round(v * 100)}%`;
+const num = (v, d) => v == null ? '–' : (+v).toFixed(d);
+const post = body => fetch('/control', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+                                         body: JSON.stringify(body) }).catch(() => {});
+const saved = (k, d) => { const v = localStorage.getItem('brain.' + k); return v == null ? d : v; };
 
-function unitCount(L) { return L.shape.reduce((a, b) => a * b, 1); }
+// ------------------------------------------------------------------ state
+let topo = null;          // the latest topology: layers, version, reads, learned
+let last = null;          // the latest decision
+let state = { paused: false, speed: 1 };
+let metrics = null;
+let lastFrameAt = 0, learnedAt = 0;
+const view = { floor: saved('floor', 'predicted'), attn: saved('attn', '0') === '1', rays: saved('rays', '1') === '1', layer: 2 };
+const history = { win: [], danger: [], share: [] };
+const HIST = 400;
+let hoverCell = null;     // the arena cell under the cursor (index into the 16x16 attention grid)
 
-// positions (and point sizes) of every unit of a layer, in the order the server sends them
-function layoutLayer(L, rand) {
-  const n = unitCount(L), pos = new Float32Array(n * 3), size = new Float32Array(n);
-  const g = BAND[L.group], x0 = L.col * COL;
-  const put = (i, x, y, z, s) => { pos[3 * i] = x; pos[3 * i + 1] = y; pos[3 * i + 2] = z; size[i] = s; };
-  if (L.kind === 'input' && L.shape.length === 2) {
-    const [H, W] = L.shape, d = g.h / (H - 1);
-    for (let r = 0; r < H; r++) for (let c = 0; c < W; c++)
-      put(r * W + c, x0, g.y + g.h / 2 - r * d, -g.h / 2 + c * d, d * 1.15);
-  } else if (L.kind === 'conv') {
-    // a slab: the layer's own grid faces the flow, its filters stacked in depth, so an active
-    // region of the slab sits in front of the part of the map it is looking at
-    const [C, H, W] = L.shape, d = g.h / H, depth = Math.min(2.0, 1.1 + 0.6 * Math.log2(C / 32));
-    const s = Math.min(d * 0.3, 0.07), jit = d * (H >= 16 ? 0.35 : 0.5);
-    for (let ch = 0; ch < C; ch++) {
-      const xc = x0 + (ch / (C - 1) - 0.5) * depth;
-      for (let y = 0; y < H; y++) for (let xx = 0; xx < W; xx++)
-        put((ch * H + y) * W + xx, xc + (rand() - 0.5) * depth / C,
-            g.y + g.h / 2 - (y + 0.5) * d + (rand() - 0.5) * jit,
-            -g.h / 2 + (xx + 0.5) * d + (rand() - 0.5) * jit, s);
-    }
-  } else if (L.kind === 'output') {
-    for (let i = 0; i < n; i++)
-      put(i, x0, L.id === 'value' ? -2.3 : 1.25 - i * 0.75, 0, 0.26);
-  } else {                                         // dense layers and the number inputs: a thick cloud
-    const side = Math.ceil(Math.sqrt(n)), input = L.kind === 'input';
-    const h = input || L.group === 'scalars' ? g.h : Math.min(g.h, 0.62 * g.h + n / 900);
-    const d = h / Math.max(side - 1, 1), depth = input ? 0.05 : 0.5 + 0.4 * Math.log2(n / 128);
-    for (let i = 0; i < n; i++) {
-      const r = Math.floor(i / side), c = i % side;
-      put(i, x0 + (rand() - 0.5) * depth, g.y + h / 2 - r * d + (rand() - 0.5) * d * 0.6,
-          -h / 2 + c * d + (rand() - 0.5) * d * 0.6, Math.max(d * 0.45, 0.03));
-    }
-  }
-  return { pos, size };
-}
-
-// ------------------------------------------------------------------ scene
-const canvas = document.getElementById('scene');
-const hero = document.getElementById('hero');
-const renderer = new THREE.WebGLRenderer({ canvas, antialias: false, powerPreference: 'high-performance' });
-// HD: the picture is drawn above the screen's own resolution and shrunk by the browser (supersampling),
-// so lines and dots come out crisp. Off, or on a huge screen, it draws at the screen's resolution.
-const DEVICE = Math.min(window.devicePixelRatio || 1, 3);
-const hdParam = new URLSearchParams(location.search).get('hd');   // ?hd=0 or ?hd=1 overrides the saved choice
-const hd = hdParam != null ? hdParam !== '0' : localStorage.getItem('brain.hd') !== '0';
-function supersample() {
-  if (!hd) return 1;
-  const px = window.innerWidth * window.innerHeight * DEVICE * DEVICE;
-  for (const s of [2, 1.5]) if (px * s * s <= 34e6) return s;
-  return 1;
-}
-const SS = supersample(), DPR = DEVICE * SS;   // DPR: the drawing buffer's pixels per CSS pixel
-renderer.setPixelRatio(DPR);
-const scene = new THREE.Scene();
-scene.background = new THREE.Color(0x000000);
-const camera = new THREE.PerspectiveCamera(40, 1, 0.1, 300);
-camera.position.copy(CENTER).add(VIEW_ANGLED);
-const controls = new OrbitControls(camera, canvas);
-controls.target.copy(CENTER);
-controls.enableDamping = true;
-controls.dampingFactor = 0.08;
-controls.minDistance = 6;
-controls.maxDistance = 80;
-controls.enableZoom = false;          // the wheel scrolls the page; pinching zooms (below)
-function zoomBy(f) {
-  const d = camera.position.clone().sub(controls.target);
-  const len = THREE.MathUtils.clamp(d.length() * f, controls.minDistance, controls.maxDistance);
-  camera.position.copy(controls.target).add(d.setLength(len));
-}
-let gesturing = false, gestureScale = 1;
-canvas.addEventListener('wheel', e => {
-  if (!e.ctrlKey || gesturing) return;   // a trackpad pinch arrives as a wheel event with ctrl held
-  e.preventDefault();
-  zoomBy(Math.exp(e.deltaY * 0.01));
-}, { passive: false });
-canvas.addEventListener('gesturestart', e => { e.preventDefault(); gesturing = true; gestureScale = 1; });
-canvas.addEventListener('gesturechange', e => { e.preventDefault(); zoomBy(gestureScale / e.scale); gestureScale = e.scale; });
-canvas.addEventListener('gestureend', e => { e.preventDefault(); gesturing = false; });
-canvas.addEventListener('dblclick', () => { flat = false; tFlat.classList.remove('on'); flyTo(VIEW_ANGLED); });  // back to the usual view
-
-// highlights roll off instead of clipping to white; - and = adjust the exposure
-renderer.toneMapping = THREE.AgXToneMapping;
-renderer.toneMappingExposure = 1.0;
-// the post-processing target needs its own multisampling, or every line turns jagged
-const target4x = new THREE.WebGLRenderTarget(1, 1, { type: THREE.HalfFloatType, samples: SS > 1 ? 0 : 4 });
-const composer = new EffectComposer(renderer, target4x);
-composer.setPixelRatio(DPR);
-composer.addPass(new RenderPass(scene, camera));
-const bloom = new UnrealBloomPass(new THREE.Vector2(1, 1), 0.3, 0.35, 0.6);
-composer.addPass(bloom);
-composer.addPass(new OutputPass());
-
-const pointMaterial = new THREE.ShaderMaterial({
-  uniforms: { uScale: { value: 1000 }, uMin: { value: 2.0 }, uMax: { value: 12.0 } },
-  vertexShader: `
-    attribute float act; attribute float size; attribute vec3 tint;
-    uniform float uScale, uMin, uMax; varying float vA; varying vec3 vT;
-    void main() {
-      vA = act; vT = tint;
-      vec4 mv = modelViewMatrix * vec4(position, 1.0);
-      gl_PointSize = clamp(size * (0.8 + 1.3 * act) * uScale / -mv.z, uMin, uMax);
-      gl_Position = projectionMatrix * mv;
-    }`,
-  fragmentShader: `
-    varying float vA; varying vec3 vT;
-    void main() {
-      float d = length(gl_PointCoord - 0.5) * 2.0;        // 0 at the centre, 1 at the rim
-      if (d > 1.0) discard;
-      float e = fwidth(d) * 1.2;                            // one pixel of antialiasing
-      float core = 1.0 - smoothstep(0.5 - e, 0.5 + e, d);  // a crisp dot
-      float halo = (1.0 - d) * (1.0 - d) * 0.5;            // and a thin soft skirt around it
-      float shape = max(core, halo);
-      // nearly nothing when silent: a slab stacks dozens of filters on one pixel, and the
-      // picture must come from the neurons that fire, not from the sheer number of them
-      float lit = pow(vA, 1.6);
-      vec3 col = mix(vT, vec3(1.0), 0.3 * lit);            // the hottest neurons lean white, but keep their colour
-      gl_FragColor = vec4(col * (0.03 + 0.72 * lit), shape * (0.05 + 0.8 * lit));
-    }`,
-  transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
-});
-// lines with a real width (a plain GL line is one buffer pixel, which fades to nothing when supersampled)
-const lineMaterial = new LineMaterial({
-  vertexColors: true, transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
-  linewidth: 0.5 * DEVICE * SS,   // half a screen pixel, as before: tens of thousands of lines add up
-});
-
-let T = null;          // everything derived from the current topology
-let points = null, lines = null;
-let shown = null, target = null;   // displayed and latest activations of every unit (0..1)
-let flash = 0;         // 1 right after new weights arrive, fading out
-let last = null;       // the latest frame, for the tooltip
-const lastInput = {};  // raw input bytes of the latest frame, by layer id
-
-function b64(s, Type) {
-  const bin = atob(s), u8 = new Uint8Array(bin.length);
-  for (let i = 0; i < bin.length; i++) u8[i] = bin.charCodeAt(i);
-  return Type === Uint32Array ? new Uint32Array(u8.buffer) : u8;
-}
-
-function buildPoints(layers) {
-  const rand = mulberry32(7);
-  const start = [], parts = [];
-  let total = 0;
-  for (const L of layers) {
-    start.push(total);
-    const p = layoutLayer(L, rand);
-    parts.push(p);
-    total += unitCount(L);
-  }
-  const pos = new Float32Array(total * 3), size = new Float32Array(total), tint = new Float32Array(total * 3);
-  parts.forEach((p, i) => { pos.set(p.pos, start[i] * 3); size.set(p.size, start[i]); });
-  const col = new THREE.Color();
-  layers.forEach((L, i) => {
-    for (let u = 0; u < unitCount(L); u++) {
-      col.set(L.id === 'policy' ? MOVE_COLORS[u] : BRANCH_COLORS[L.group] || '#ffffff');
-      tint.set([col.r, col.g, col.b], 3 * (start[i] + u));
-    }
-  });
-  const hue = tint.slice();  // the resting colours; input cells are recoloured by their content
-  const geo = new THREE.BufferGeometry();
-  geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
-  geo.setAttribute('size', new THREE.BufferAttribute(size, 1));
-  geo.setAttribute('tint', new THREE.BufferAttribute(tint, 3).setUsage(THREE.DynamicDrawUsage));
-  geo.setAttribute('act', new THREE.BufferAttribute(new Float32Array(total), 1).setUsage(THREE.DynamicDrawUsage));
-  geo.computeBoundingSphere();
-  if (points) { scene.remove(points); points.geometry.dispose(); }
-  points = new THREE.Points(geo, pointMaterial);
-  points.frustumCulled = false;
-  points.renderOrder = 1;  // on top of the lines
-  scene.add(points);
-  shown = new Float32Array(total);
-  target = new Float32Array(total);
-  return { start, pos, total, hue };
-}
-
-function buildLines(topo) {
-  const idx = Object.fromEntries(topo.layers.map((L, i) => [L.id, i]));
-  let n = 0;
-  const groups = topo.edges.map(e => {
-    const si = b64(e.si, Uint32Array), di = b64(e.di, Uint32Array), w = b64(e.w), dw = e.dw ? b64(e.dw) : null;
-    n += si.length;
-    // many near-parallel lines between two layers pile up into a solid bar; thin the big groups
-    return { s0: T.start[idx[e.src]], d0: T.start[idx[e.dst]], si, di, w, dw, gain: Math.min(1, 1500 / si.length),
-             toOutput: topo.layers[idx[e.dst]].kind === 'output' };
-  });
-  const pos = new Float32Array(n * 6), src = new Uint32Array(n), colOf = new Uint32Array(n),
-        wt = new Float32Array(n), dwt = new Float32Array(n);
-  let k = 0;
-  for (const g of groups) for (let j = 0; j < g.si.length; j++, k++) {
-    const a = g.s0 + g.si[j], b = g.d0 + g.di[j];
-    pos.set(T.pos.subarray(3 * a, 3 * a + 3), 6 * k);
-    pos.set(T.pos.subarray(3 * b, 3 * b + 3), 6 * k + 3);
-    src[k] = a; colOf[k] = g.toOutput ? b : a;  // a line takes its source's colour; the last ones, their move's
-    wt[k] = g.w[j] / 255 * g.gain; dwt[k] = g.dw ? g.dw[j] / 255 : 0;
-  }
-  const geo = new LineSegmentsGeometry();
-  geo.setPositions(pos);
-  geo.setColors(new Float32Array(n * 6));
-  const colors = geo.attributes.instanceColorStart.data;  // [r g b r g b] per segment, both ends share it
-  colors.setUsage(THREE.DynamicDrawUsage);
-  if (lines) { scene.remove(lines); lines.geometry.dispose(); }
-  lines = new LineSegments2(geo, lineMaterial);
-  lines.frustumCulled = false;
-  lines.renderOrder = 0;
-  scene.add(lines);
-  T.lineSrc = src; T.lineCol = colOf; T.lineW = wt; T.lineDW = dwt; T.nLines = n; T.lineColors = colors;
-}
-
-function updateLines() {
-  if (!lines) return;
-  const col = T.lineColors.array, n = T.nLines, tint = points.geometry.attributes.tint.array;
-  for (let k = 0; k < n; k++) {
-    const w = T.lineW[k], a = shown[T.lineSrc[k]], c = 3 * T.lineCol[k];
-    const lum = Math.min(1, w * 0.004 + w * a * a * 0.24);
-    // new weights: a soft white pulse, strongest on the connections that moved most
-    const dw = T.lineDW[k], fl = dw * dw * flash * 0.2;
-    const r = lum * tint[c] + fl, g = lum * tint[c + 1] + fl, b = lum * tint[c + 2] + fl;
-    col[6 * k] = col[6 * k + 3] = r; col[6 * k + 1] = col[6 * k + 4] = g; col[6 * k + 2] = col[6 * k + 5] = b;
-  }
-  T.lineColors.needsUpdate = true;
-}
-
-// ------------------------------------------------------------------ labels
-const labelBox = document.getElementById('labels');
-function unitPos(u) { return new THREE.Vector3(T.pos[3 * u], T.pos[3 * u + 1], T.pos[3 * u + 2]); }
-function buildLabels(layers) {
-  labelBox.innerHTML = '';
-  T.labels = [];
-  const add = (text, at, pri, anchor) => {
-    const el = document.createElement('div');
-    el.className = 'label' + (anchor === 'left' ? ' left' : '');
-    el.textContent = text;
-    labelBox.appendChild(el);
-    T.labels.push({ el, at, pri, anchor, w: el.offsetWidth || text.length * 6.6 });
-  };
-  layers.forEach((L, i) => {
-    if (L.kind === 'output') {                     // named at the neuron itself
-      const names = L.names || [L.label];
-      names.forEach((nm, u) => add(nm, unitPos(T.start[i] + u).add(new THREE.Vector3(0.4, 0, 0)), 1, 'left'));
-      return;
-    }
-    let minY = Infinity;
-    for (let u = 0; u < unitCount(L); u++) minY = Math.min(minY, T.pos[3 * (T.start[i] + u) + 1]);
-    add(L.label, new THREE.Vector3(L.col * COL, minY - 0.45, 0), L.kind === 'input' ? 0 : 2, 'center');
-  });
-}
-const tmp = new THREE.Vector3();
-function placeLabels() {
-  if (!T || !T.labels) return;
-  const w = hero.clientWidth, h = hero.clientHeight, hr = hero.getBoundingClientRect();
-  // the panels come first, so no label is ever drawn across them
-  const placed = [...document.querySelectorAll('.top, .toggles, #arenaBox, #moves')]
-    .map(el => el.getBoundingClientRect())
-    .map(b => ({ x0: b.left - hr.left, x1: b.right - hr.left, y0: b.top - hr.top, y1: b.bottom - hr.top }));
-  const items = T.labels.map(l => {
-    tmp.copy(l.at).project(camera);
-    return { l, x: (tmp.x * 0.5 + 0.5) * w, y: (-tmp.y * 0.5 + 0.5) * h, z: tmp.z };
-  });
-  items.sort((a, b) => a.l.pri - b.l.pri || a.x - b.x);
-  for (const it of items) {
-    const { l } = it;
-    if (it.z > 1 || it.x < -20 || it.x > w + 20 || it.y < 0 || it.y > h) { l.el.style.display = 'none'; continue; }
-    const r = l.anchor === 'left'
-      ? { x0: it.x, x1: it.x + l.w, y0: it.y - 8, y1: it.y + 8 }
-      : { x0: it.x - l.w / 2, x1: it.x + l.w / 2, y0: it.y, y1: it.y + 16 };
-    // a label that would sit on top of another stays hidden; inputs and outputs have priority
-    if (placed.some(p => r.x0 < p.x1 + 14 && r.x1 > p.x0 - 14 && r.y0 < p.y1 + 6 && r.y1 > p.y0 - 6)) {
-      l.el.style.display = 'none';
-      continue;
-    }
-    placed.push(r);
-    l.el.style.display = '';
-    l.el.style.left = `${it.x}px`;
-    l.el.style.top = `${it.y}px`;
-  }
-}
-
-// ------------------------------------------------------------------ side panels
-const movesBox = document.getElementById('moves');
-function buildMoves(names) {
-  movesBox.innerHTML = names.map((n, i) =>
-    `<div class="row"><span class="name">${n}</span><span class="bar"><i style="background:${MOVE_COLORS[i]}"></i></span><span class="pct"></span></div>`
-  ).join('') + '<div id="value"></div>';
-}
-function showMoves(f) {
-  const rows = movesBox.querySelectorAll('.row');
-  rows.forEach((row, i) => {
-    const p = f.probs[i];
-    row.classList.toggle('pick', i === f.action);
-    row.classList.toggle('off', !f.mask[i]);
-    row.querySelector('i').style.width = `${(p * 100).toFixed(1)}%`;
-    row.querySelector('.pct').textContent = f.mask[i] ? `${Math.round(p * 100)}%` : '';
-  });
-  const v = f.value;
-  document.getElementById('value').textContent = `Value ${v >= 0 ? '+' : ''}${v.toFixed(2)}`;
-}
-
-const arena = document.getElementById('arena'), actx = arena.getContext('2d');
+// ------------------------------------------------------------------ the arena
+const arena = $('arena'), actx = arena.getContext('2d');
 let trails = {}, lastRound = null;
-function drawArena(f) {
-  const dpr = Math.min(window.devicePixelRatio, 2), S = 210;
-  if (arena.width !== S * dpr) { arena.width = arena.height = S * dpr; }
-  if (f.round !== lastRound) { trails = {}; lastRound = f.round; }
-  const [lx, ly, hx, hy] = f.bounds, pad = 8, span = Math.max(hx - lx, hy - ly) || 1;
+const ownImg = document.createElement('canvas'), terrImg = document.createElement('canvas'), attImg = document.createElement('canvas');
+const headCanvases = [];
+
+// geometry of the arena drawing and of the map frame (the maps turn with the heading)
+function geometry(f) {
+  const S = arena.clientWidth;
+  const [lx, ly, hx, hy] = f.bounds, pad = 10, span = Math.max(hx - lx, hy - ly) || 1;
   const k = (S - 2 * pad) / span, ox = pad + ((S - 2 * pad) - (hx - lx) * k) / 2, oy = pad + ((S - 2 * pad) - (hy - ly) * k) / 2;
-  const X = x => (ox + (x - lx) * k) * dpr, Y = y => (S - (oy + (y - ly) * k)) * dpr;
-  actx.clearRect(0, 0, arena.width, arena.height);
-  actx.strokeStyle = 'rgba(255,255,255,0.14)';
-  actx.lineWidth = dpr;
-  actx.strokeRect(X(lx), Y(hy), (hx - lx) * k * dpr, (hy - ly) * k * dpr);
+  const X = x => ox + (x - lx) * k, Y = y => S - (oy + (y - ly) * k);
+  const cx = (lx + hx) / 2, cy = (ly + hy) / 2, E = span / 2;
+  let [hdx, hdy] = f.heading || [0, 1];
+  const n = Math.hypot(hdx, hdy) || 1; hdx /= n; hdy /= n;
+  const r = [hdy, -hdx];                               // the right-hand side
+  // world point of map pixel (u, v) on a SIDE x SIDE map: C + (E - v cg) h + (u cg - E) r
+  const world = (u, v, side) => { const cg = 2 * E / side; const fw = E - v * cg, sd = u * cg - E;
+    return [cx + fw * hdx + sd * r[0], cy + fw * hdy + sd * r[1]]; };
+  const mapOf = (wx, wy, side) => { const cg = 2 * E / side, dx = wx - cx, dy = wy - cy;
+    const fw = dx * hdx + dy * hdy, sd = dx * r[0] + dy * r[1];
+    return [(sd + E) / cg, (E - fw) / cg]; };        // (u, v)
+  return { S, lx, ly, hx, hy, k, X, Y, cx, cy, E, h: [hdx, hdy], r, world, mapOf };
+}
+
+// draw a SIDE x SIDE image so that it covers the arena in the map's own frame
+function paintInFrame(g, img, side, smooth) {
+  const o = g.world(0, 0, side), du = g.world(1, 0, side), dv = g.world(0, 1, side);
+  const a = [(du[0] - o[0]) * g.k, -(du[1] - o[1]) * g.k], c = [(dv[0] - o[0]) * g.k, -(dv[1] - o[1]) * g.k];
+  actx.save();
+  actx.setTransform(DPR * a[0], DPR * a[1], DPR * c[0], DPR * c[1], DPR * g.X(o[0]), DPR * g.Y(o[1]));
+  actx.imageSmoothingEnabled = smooth;
+  actx.drawImage(img, 0, 0, side, side, 0, 0, side, side);
+  actx.restore();
+}
+
+function fillImage(cv, side, fill) {               // fill(i, rgba) over every pixel of a SIDE x SIDE image
+  cv.width = cv.height = side;
+  const c = cv.getContext('2d'), im = c.createImageData(side, side), d = im.data;
+  const px = [0, 0, 0, 0];
+  for (let i = 0; i < side * side; i++) { px[0] = px[1] = px[2] = px[3] = 0; fill(i, px); d.set(px, 4 * i); }
+  c.putImageData(im, 0, 0);
+  return cv;
+}
+
+function updateTrails(f) {
+  if (f.round !== lastRound) { trails = {}; lastRound = f.round; }
   const walls = f.walls > 0 ? f.walls : Infinity;
   for (const [pid, x, y, alive, color] of f.cycles) {
     const t = trails[pid] || (trails[pid] = { color, pts: [], len: 0, alive: true, diedAt: null });
@@ -507,105 +267,434 @@ function drawArena(f) {
     if (t.alive && !alive) t.diedAt = f.time;
     t.alive = alive;
   }
+}
+
+const floorAvailable = () => ({ predicted: !!(last && last.own), now: !!(last && last.maps && last.maps.territory_in), none: true });
+
+function drawArena(f) {
+  const S = arena.clientWidth;
+  if (arena.width !== Math.round(S * DPR)) { arena.width = arena.height = Math.round(S * DPR); }
+  actx.setTransform(DPR, 0, 0, DPR, 0, 0);
+  actx.clearRect(0, 0, S, S);
+  const g = geometry(f);
+  updateTrails(f);
+  const me = f.cycles.find(c => c[0] === f.me), meAlive = me && me[3];
+
+  // the floor: what the network believes about every cell, or what the engine knows
+  const caps = [];
+  if (view.attn && f.attn && meAlive) {
+    const side = f.attn.side, rows = b64(f.attn.rows), L = Math.min(view.layer, f.attn.rows ? f.attn.rows.length : 2) - 1;
+    const n = side * side, heads = f.attn.heads;
+    const base = (L * heads) * n;
+    fillImage(attImg, side, (i, px) => {
+      let a = 0; for (let h = 0; h < heads; h++) a += rows[base + h * n + i];
+      a /= heads * 255;
+      px[0] = 236; px[1] = 236; px[2] = 236; px[3] = Math.round(Math.pow(a, 1.4) * 150);
+    });
+    paintInFrame(g, attImg, side, true);
+    const cr = Math.floor(f.attn.cell / side), cc = f.attn.cell % side;
+    caps.push(`attention of cell ${cr}, ${cc}${hoverCell == null ? ' (where my head is)' : ''} · layer ${L + 1} · ${heads} heads averaged`);
+    // every head of both layers, small
+    $('heads').hidden = false;
+    let k = 0;
+    for (let l = 0; l < rows.length / (heads * n); l++) for (let h = 0; h < heads; h++) {
+      const cv = headCanvases[k++]; if (!cv) continue;
+      const b0 = (l * heads + h) * n;
+      fillImage(cv, side, (i, px) => { const a = rows[b0 + i] / 255; px[0] = 236; px[1] = 236; px[2] = 236; px[3] = Math.round(Math.pow(a, 1.4) * 255); });
+      cv.title = `layer ${l + 1} · head ${h + 1}`;
+    }
+  } else {
+    $('heads').hidden = true;
+    const avail = floorAvailable();
+    const floor = avail[view.floor] ? view.floor : avail.predicted ? 'predicted' : avail.now ? 'now' : 'none';
+    if (floor === 'predicted') {
+      const side = Math.round(Math.sqrt(b64(f.own).length / 2)), own = b64(f.own), n = side * side;
+      const cMe = hex(ME), cEn = hex(ENEMY);
+      fillImage(ownImg, side, (i, px) => {
+        // the lead of the likeliest holder over the runner-up (nobody included): a sure cell is solid,
+        // a coin flip is nothing, so an untrained brain paints almost nothing
+        const pm = own[i] / 255, pe = own[n + i] / 255, pn = Math.max(0, 1 - pm - pe), mine = pm >= pe;
+        const lead = (mine ? pm : pe) - Math.max(pn, mine ? pe : pm);
+        if (lead <= 0) return;
+        const c = mine ? cMe : cEn;
+        px[0] = c[0]; px[1] = c[1]; px[2] = c[2]; px[3] = Math.round(Math.min(1, lead * 1.2) * 92);
+      });
+      paintInFrame(g, ownImg, side, true);
+      caps.push('floor: who holds each cell two seconds from now, as the network believes (solid where it is sure)');
+    } else if (floor === 'now') {
+      const terr = b64(f.maps.territory_in), side = Math.round(Math.sqrt(terr.length));
+      const cMe = hex(ME), cEn = hex(ENEMY);
+      fillImage(terrImg, side, (i, px) => {
+        const b = terr[i]; if (!(b & 3)) return;
+        const c = (b & 1) ? cMe : cEn, near = Math.max(0, 1 - (b >> 2) / 24);
+        px[0] = c[0]; px[1] = c[1]; px[2] = c[2]; px[3] = Math.round(26 + 44 * near);
+      });
+      paintInFrame(g, terrImg, side, false);
+      caps.push('floor: who gets to each cell first, as the engine computes it now');
+    } else caps.push('floor: nothing painted');
+  }
+
+  // the rim
+  actx.strokeStyle = 'rgba(255,255,255,0.16)';
+  actx.lineWidth = 1;
+  actx.strokeRect(g.X(g.lx), g.Y(g.hy), (g.hx - g.lx) * g.k, (g.hy - g.ly) * g.k);
+
+  // the rays: what the sixteen sensors feel, clockwise from straight ahead
+  if (view.rays && meAlive && f.numbers) {
+    const [mx, my] = [me[1], me[2]];
+    for (let k = 0; k < RAYS; k++) {
+      const a = k * 2 * Math.PI / RAYS, d = [g.h[0] * Math.cos(a) + g.r[0] * Math.sin(a), g.h[1] * Math.cos(a) + g.r[1] * Math.sin(a)];
+      const dist = Math.min(1, f.numbers[16 + 2 * k]) * RAY_RANGE, ex = mx + d[0] * dist, ey = my + d[1] * dist;
+      actx.strokeStyle = `rgba(255,255,255,${k % 4 === 0 ? 0.22 : 0.1})`;
+      actx.lineWidth = 1;
+      actx.beginPath(); actx.moveTo(g.X(mx), g.Y(my)); actx.lineTo(g.X(ex), g.Y(ey)); actx.stroke();
+      if (dist < RAY_RANGE - 1e-6) {
+        actx.fillStyle = 'rgba(255,255,255,0.35)';
+        actx.beginPath(); actx.arc(g.X(ex), g.Y(ey), 1.6, 0, Math.PI * 2); actx.fill();
+      }
+    }
+  }
+
+  // the walls and the heads
   for (const [pid, t] of Object.entries(trails)) {
     if (t.pts.length < 1) continue;
     if (!t.alive && t.diedAt != null && f.time - t.diedAt > 8) continue;  // a dead cycle's wall is gone after 8 s
-    const me = Number(pid) === f.me;
+    const mine = Number(pid) === f.me;
     actx.strokeStyle = t.color;
-    actx.globalAlpha = t.alive ? 1 : 0.35;
-    actx.lineWidth = (me ? 2 : 1.4) * dpr;
+    actx.globalAlpha = t.alive ? 0.9 : 0.3;
+    actx.lineWidth = mine ? 2.2 : 1.6;
+    actx.lineJoin = 'round';
     actx.beginPath();
-    t.pts.forEach(([x, y], i) => i ? actx.lineTo(X(x), Y(y)) : actx.moveTo(X(x), Y(y)));
+    t.pts.forEach(([x, y], i) => i ? actx.lineTo(g.X(x), g.Y(y)) : actx.moveTo(g.X(x), g.Y(y)));
     actx.stroke();
     if (t.alive) {
       const [x, y] = t.pts[t.pts.length - 1];
       actx.fillStyle = t.color;
-      actx.beginPath(); actx.arc(X(x), Y(y), (me ? 3 : 2.4) * dpr, 0, Math.PI * 2); actx.fill();
+      actx.globalAlpha = 1;
+      actx.beginPath(); actx.arc(g.X(x), g.Y(y), mine ? 4 : 3.2, 0, Math.PI * 2); actx.fill();
+      if (mine) { actx.strokeStyle = t.color; actx.globalAlpha = 0.35; actx.lineWidth = 1; actx.beginPath(); actx.arc(g.X(x), g.Y(y), 9, 0, Math.PI * 2); actx.stroke(); }
     }
   }
   actx.globalAlpha = 1;
-  document.getElementById('result').textContent = f.result ? `last round: ${f.result}` : '';
+
+  // the cell whose attention is shown
+  if (view.attn && f.attn && meAlive) {
+    const side = f.attn.side, cr = Math.floor(f.attn.cell / side), cc = f.attn.cell % side;
+    const corners = [[cc, cr], [cc + 1, cr], [cc + 1, cr + 1], [cc, cr + 1]].map(([u, v]) => g.world(u, v, side));
+    actx.strokeStyle = 'rgba(255,255,255,0.8)';
+    actx.lineWidth = 1;
+    actx.beginPath();
+    corners.forEach(([x, y], i) => i ? actx.lineTo(g.X(x), g.Y(y)) : actx.moveTo(g.X(x), g.Y(y)));
+    actx.closePath(); actx.stroke();
+  }
+  $('capText').textContent = caps.join(' · ') + (f.result ? ` · last round: ${f.result}` : '');
+}
+
+// hovering the arena asks the server for that cell's attention
+let hoverSent = null, hoverTimer = 0;
+arena.addEventListener('pointermove', e => {
+  if (!last || !last.attn) return;
+  const g = geometry(last), rct = arena.getBoundingClientRect();
+  const px = e.clientX - rct.left, py = e.clientY - rct.top;
+  const wx = g.lx + (px - g.X(g.lx)) / g.k, wy = g.ly + (g.Y(g.ly) - py) / g.k;
+  const side = last.attn.side, [u, v] = g.mapOf(wx, wy, side);
+  const inside = u >= 0 && u < side && v >= 0 && v < side;
+  const cell = inside ? Math.floor(v) * side + Math.floor(u) : null;
+  if (cell !== hoverCell) {
+    hoverCell = cell;
+    clearTimeout(hoverTimer);
+    hoverTimer = setTimeout(() => { if (hoverSent !== hoverCell) { hoverSent = hoverCell; post({ cell: hoverCell }); } }, 40);
+  }
+});
+arena.addEventListener('pointerleave', () => { hoverCell = null; if (hoverSent !== null) { hoverSent = null; post({ cell: null }); } });
+
+// ------------------------------------------------------------------ the side: moves and predictions
+const movesBox = $('moves');
+function buildMoves(names) {
+  movesBox.innerHTML = names.map((n, i) =>
+    `<div class="row"><span class="name">${n}</span><span class="bar"><i style="background:${MOVE_COLORS[i]}"></i></span><span class="pct"></span></div>`
+  ).join('');
+}
+function showMoves(f) {
+  movesBox.querySelectorAll('.row').forEach((row, i) => {
+    const p = f.probs[i];
+    row.classList.toggle('pick', i === f.action);
+    row.classList.toggle('off', !f.mask[i]);
+    row.querySelector('i').style.width = `${(p * 100).toFixed(1)}%`;
+    row.querySelector('.pct').textContent = f.mask[i] ? `${Math.round(p * 100)}%` : '';
+  });
+}
+
+function spark(cv, vals, range, color) {
+  const W = cv.clientWidth || 240, H = cv.clientHeight || 46, pad = 4;
+  if (cv.width !== Math.round(W * DPR)) { cv.width = Math.round(W * DPR); cv.height = Math.round(H * DPR); }
+  const c = cv.getContext('2d');
+  c.setTransform(DPR, 0, 0, DPR, 0, 0);
+  c.clearRect(0, 0, W, H);
+  if (vals.length < 2) return;
+  const [lo, hi] = range, n = HIST - 1;
+  const X = i => pad + (i + (HIST - vals.length)) / n * (W - 2 * pad), Y = v => H - pad - (v - lo) / (hi - lo) * (H - 2 * pad);
+  c.strokeStyle = 'rgba(255,255,255,0.08)'; c.lineWidth = 1;
+  c.beginPath(); c.moveTo(0, Y((lo + hi) / 2)); c.lineTo(W, Y((lo + hi) / 2)); c.stroke();
+  c.strokeStyle = color; c.lineWidth = 1.5; c.lineJoin = 'round';
+  c.beginPath();
+  vals.forEach((v, i) => i ? c.lineTo(X(i), Y(v)) : c.moveTo(X(i), Y(v)));
+  c.stroke();
+  c.fillStyle = '#fff';
+  c.beginPath(); c.arc(X(vals.length - 1), Y(vals[vals.length - 1]), 2.4, 0, Math.PI * 2); c.fill();
+}
+const push = (arr, v) => { arr.push(v); if (arr.length > HIST) arr.shift(); };
+
+function showPredictions(f) {
+  const win = (f.value + 1) / 2;
+  push(history.win, Math.max(0, Math.min(1, win)));
+  $('winV').textContent = pct(win);
+  $('winS').textContent = `value ${f.value >= 0 ? '+' : ''}${f.value.toFixed(2)}`;
+  spark($('winC'), history.win, [0, 1], 'rgba(255,255,255,0.6)');
+  const hasAux = !!f.aux;
+  $('dangerB').hidden = !hasAux; $('shareB').hidden = !hasAux;
+  if (hasAux) {
+    push(history.danger, f.aux[1]); push(history.share, f.aux[0]);
+    $('dangerV').textContent = pct(f.aux[1]);
+    spark($('dangerC'), history.danger, [0, 1], 'rgba(248,113,113,0.75)');
+    $('shareV').textContent = pct(f.aux[0]);
+    spark($('shareC'), history.share, [0, 1], 'rgba(34,211,238,0.7)');
+  }
+  // what the engine says the territory is right now, for comparison
+  let nowShare = null;
+  if (f.maps && f.maps.territory_in) {
+    const t = b64(f.maps.territory_in); let mine = 0, theirs = 0;
+    for (let i = 0; i < t.length; i++) { if (t[i] & 1) mine++; else if (t[i] & 2) theirs++; }
+    if (mine + theirs) nowShare = mine / (mine + theirs);
+  }
+  if (hasAux) $('shareS').textContent = nowShare == null ? 'my share of what can still be reached' : `now ${pct(nowShare)} by the engine's count`;
+  $('legendFloor').innerHTML = nowShare == null ? '' : `<i style="background:#555"></i>my territory now ${pct(nowShare)}`;
+  const n = f.numbers || [];
+  const feel = [];
+  if (n.length) {
+    feel.push(`speed ${n[0].toFixed(2)}× base${n[3] ? ', braking' : ''}`);
+    feel.push(`rubber ${pct(n[1])} used · brake reservoir ${pct(n[2])}`);
+    feel.push(`${Math.round(n[13] * 7)} enem${Math.round(n[13] * 7) === 1 ? 'y' : 'ies'} alive · nearest ${n[66] >= 0 && n[71] ? `${Math.round(n[66] * 200)} m` : 'none'}`);
+    feel.push(`${Math.round(n[12] * 120)} s into the round · turns ${n[5] ? 'left ok' : 'left blocked'}, ${n[6] ? 'right ok' : 'right blocked'}`);
+  }
+  $('feel').innerHTML = feel.join('<br>');
+}
+
+// ------------------------------------------------------------------ what it sees: the four maps and the numbers
+const seesBox = $('sees');
+const mapCanvases = {};
+let numbersCanvas = null;
+function buildSees() {
+  seesBox.innerHTML = '<h2>What it sees</h2>';
+  for (const id of ['local_in', 'close_in', 'global_in', 'territory_in']) {
+    const d = document.createElement('div'); d.className = 'map';
+    const cv = document.createElement('canvas'); cv.width = cv.height = 64;
+    const reads = !topo || !topo.reads || topo.reads.includes(id);
+    d.append(cv); const cap = document.createElement('div'); cap.className = 'cap';
+    cap.innerHTML = MAP_CAP[id] + (reads ? '' : ' <em>· not read by this brain</em>'); d.append(cap);
+    seesBox.append(d); mapCanvases[id] = cv;
+  }
+  const d = document.createElement('div'); d.className = 'map numbers';
+  numbersCanvas = document.createElement('canvas'); numbersCanvas.width = 16; numbersCanvas.height = 6;
+  d.append(numbersCanvas); const cap = document.createElement('div'); cap.className = 'cap'; cap.textContent = '96 exact numbers'; d.append(cap);
+  seesBox.append(d);
+  numbersCanvas.addEventListener('pointermove', e => {
+    if (!last || !topo) return;
+    const r = numbersCanvas.getBoundingClientRect(), i = Math.floor((e.clientY - r.top) / r.height * 6) * 16 + Math.floor((e.clientX - r.left) / r.width * 16);
+    const names = (topo.layers.find(L => L.id === 'scalars_in') || {}).names || [];
+    showTip(e, names[i] || '', last.numbers ? (+last.numbers[i]).toFixed(3) : '', null);
+  });
+  numbersCanvas.addEventListener('pointerleave', hideTip);
+  for (const [id, cv] of Object.entries(mapCanvases)) {
+    cv.addEventListener('pointermove', e => {
+      if (!last || !last.maps[id]) return;
+      const r = cv.getBoundingClientRect(), col = Math.floor((e.clientX - r.left) / r.width * 64), row = Math.floor((e.clientY - r.top) / r.height * 64);
+      const b = b64(last.maps[id])[row * 64 + col], planes = planesOf(id);
+      let what;
+      if (id === 'territory_in') what = ((b & 1) ? 'I get here first' : (b & 2) ? 'the enemy gets here first' : 'unreachable') + ((b & 1) ? ` · ${(b >> 2) * 4} cells away` : '');
+      else what = planes.filter((p, i) => b & (1 << i)).join(', ') || 'empty';
+      showTip(e, MAP_CAP[id], `cell ${row}, ${col} · ${what}`, null);
+    });
+    cv.addEventListener('pointerleave', hideTip);
+  }
+}
+const LOCAL_PLANES = ['walls', 'own trail', 'enemy trails', 'team trails', 'enemy heads', 'enemy paths', 'outside', 'team heads'];
+const GLOBAL_PLANES = ['walls', 'own trail', 'enemy trails', 'own head', 'enemy heads', 'outside', 'team trails', 'team heads'];
+const planesOf = id => id === 'global_in' ? GLOBAL_PLANES : id === 'territory_in' ? ['mine first', 'enemy first'] : LOCAL_PLANES;
+
+function drawMap(id, bytes) {
+  const cv = mapCanvases[id]; if (!cv) return;
+  const planes = planesOf(id), colors = planes.map(p => hex(PLANE_COLORS[p] || '#ffffff'));
+  const order = PRIORITY.map(p => planes.indexOf(p)).filter(i => i >= 0);
+  const territory = id === 'territory_in', outside = planes.indexOf('outside');
+  const c = cv.getContext('2d'), im = c.createImageData(64, 64), d = im.data;
+  for (let i = 0; i < 4096; i++) {
+    let b = bytes[i]; if (territory) b &= 3;
+    const o = 4 * i;
+    if (!b) { d[o] = d[o + 1] = d[o + 2] = 14; d[o + 3] = 255; continue; }
+    const bit = order.find(k => b & (1 << k)), col = colors[bit];
+    let lit = 1;
+    if (territory) lit = 0.35 + 0.65 * Math.max(0, 1 - (bytes[i] >> 2) / 24);
+    else if (bit === outside) lit = 0.5; else if (planes[bit] === 'walls') lit = 0.55;
+    d[o] = Math.round(col[0] * lit); d[o + 1] = Math.round(col[1] * lit); d[o + 2] = Math.round(col[2] * lit); d[o + 3] = 255;
+  }
+  c.putImageData(im, 0, 0);
+}
+function drawNumbers(f) {
+  if (!numbersCanvas || !f.scalars) return;
+  const s = b64(f.scalars), c = numbersCanvas.getContext('2d'), im = c.createImageData(16, 6), d = im.data, t = TINT.scalars;
+  for (let i = 0; i < 96; i++) { const v = 0.1 + 0.9 * s[i] / 255; d[4 * i] = t[0] * v; d[4 * i + 1] = t[1] * v; d[4 * i + 2] = t[2] * v; d[4 * i + 3] = 255; }
+  c.putImageData(im, 0, 0);
+}
+
+// ------------------------------------------------------------------ inside: every stage as a picture
+const towersBox = $('towers');
+let stages = [];          // {L, canvas, offset, n, tiles, cols, tw, th, learn}
+function buildInside(layers) {
+  towersBox.innerHTML = '';
+  stages = [];
+  let offset = 0;
+  const groups = [];
+  for (const L of layers) {
+    if (L.kind !== 'conv' && L.kind !== 'dense') continue;
+    const n = L.shape.reduce((a, b) => a * b, 1);
+    let g = groups.find(x => x.group === L.group);
+    if (!g) { g = { group: L.group, stages: [] }; groups.push(g); }
+    const st = { L, offset, n };
+    if (L.kind === 'conv') {
+      const [C, H, W] = L.shape;
+      st.tiles = C; st.th = H; st.tw = W; st.cols = Math.ceil(Math.sqrt(C)); st.scale = H >= 8 ? 1 : 2;
+    } else {
+      st.tiles = n; st.th = 1; st.tw = 1; st.cols = 32; st.scale = 4;
+    }
+    st.rows = Math.ceil(st.tiles / st.cols);
+    st.iw = st.cols * (st.tw + 1) - 1; st.ih = st.rows * (st.th + 1) - 1;
+    g.stages.push(st); stages.push(st);
+    offset += n;
+  }
+  for (const g of groups) {
+    const t = document.createElement('div'); t.className = 'tower';
+    t.innerHTML = `<h3><b>${TOWER_TITLE[g.group] || g.group}</b> · ${TOWER_SUB[g.group] || ''}</h3><div class="stages"></div>`;
+    const box = t.querySelector('.stages');
+    for (const st of g.stages) {
+      const d = document.createElement('div'); d.className = 'stage';
+      const cv = document.createElement('canvas'); cv.width = st.iw; cv.height = st.ih;
+      cv.style.width = `${st.iw * st.scale}px`; cv.style.height = `${st.ih * st.scale}px`;
+      const stage = st.L.name.split(' · ').slice(1).join(' · ') || st.L.name;
+      d.innerHTML = `<div class="lbl"><b>${stage}</b> · ${st.L.label}</div><div class="learn"></div>`;
+      d.prepend(cv);
+      st.canvas = cv; st.learn = d.querySelector('.learn');
+      cv.addEventListener('pointermove', e => tipStage(e, st));
+      cv.addEventListener('pointerleave', hideTip);
+      box.append(d);
+    }
+    towersBox.append(t);
+  }
+  $('inside').hidden = false;
+  const v = topo ? topo.version : '?';
+  $('insideSub').textContent = `v${v} · ${stages.length} stages · every tile is one filter's map, lit by how strongly it fires; the bar under a stage shows how much the last update changed it`;
+}
+
+function drawStages(acts) {
+  for (const st of stages) {
+    const cv = st.canvas, c = cv.getContext('2d'), im = c.createImageData(st.iw, st.ih), d = im.data;
+    const t = TINT[st.L.group] || TINT.trunk;
+    // the gaps between tiles stay black; a tile's pixels follow the filter's map
+    for (let f = 0; f < st.tiles; f++) {
+      const tx = (f % st.cols) * (st.tw + 1), ty = Math.floor(f / st.cols) * (st.th + 1), base = st.offset + f * st.th * st.tw;
+      for (let y = 0; y < st.th; y++) for (let x = 0; x < st.tw; x++) {
+        const v = 0.07 + 0.93 * acts[base + y * st.tw + x] / 255, o = 4 * ((ty + y) * st.iw + tx + x);
+        d[o] = t[0] * v; d[o + 1] = t[1] * v; d[o + 2] = t[2] * v; d[o + 3] = 255;
+      }
+    }
+    c.putImageData(im, 0, 0);
+  }
+}
+function showLearned() {
+  if (!topo || !topo.learned) return;
+  const age = (performance.now() - learnedAt) / 1000;
+  for (const st of stages) {
+    const v = topo.learned[st.L.id] || 0;
+    st.learn.style.width = `${Math.round(v * 100)}%`;
+    st.learn.style.opacity = v > 0 && age < 6 ? String(Math.max(0.2, 1 - age / 6)) : '0';
+  }
+}
+
+// ------------------------------------------------------------------ tooltips
+const tip = $('tip');
+function showTip(e, name, detail, canvas) {
+  tip.innerHTML = `${name}<br><span class="d">${detail}</span>`;
+  if (canvas) tip.append(canvas);
+  tip.style.display = 'block';
+  const w = tip.offsetWidth, h = tip.offsetHeight;
+  tip.style.left = `${Math.min(e.clientX + 16, window.innerWidth - w - 12)}px`;
+  tip.style.top = `${Math.min(e.clientY + 16, window.innerHeight - h - 12)}px`;
+}
+function hideTip() { tip.style.display = 'none'; }
+let lastActs = null;
+function tipStage(e, st) {
+  if (!lastActs) return;
+  const r = st.canvas.getBoundingClientRect();
+  const ix = (e.clientX - r.left) / r.width * st.iw, iy = (e.clientY - r.top) / r.height * st.ih;
+  const col = Math.floor(ix / (st.tw + 1)), row = Math.floor(iy / (st.th + 1)), f = row * st.cols + col;
+  if (f < 0 || f >= st.tiles) { hideTip(); return; }
+  const base = st.offset + f * st.th * st.tw;
+  let sum = 0; for (let i = 0; i < st.th * st.tw; i++) sum += lastActs[base + i];
+  const mean = sum / (st.th * st.tw * 255);
+  let big = null;
+  if (st.L.kind === 'conv') {
+    big = document.createElement('canvas'); big.width = st.tw; big.height = st.th; big.style.width = big.style.height = '112px';
+    const c = big.getContext('2d'), im = c.createImageData(st.tw, st.th), d = im.data, t = TINT[st.L.group] || TINT.trunk;
+    for (let i = 0; i < st.th * st.tw; i++) { const v = 0.07 + 0.93 * lastActs[base + i] / 255; d[4 * i] = t[0] * v; d[4 * i + 1] = t[1] * v; d[4 * i + 2] = t[2] * v; d[4 * i + 3] = 255; }
+    c.putImageData(im, 0, 0);
+  }
+  const what = st.L.kind === 'conv' ? `filter ${f + 1} of ${st.tiles} · mean ${mean.toFixed(2)}` : `neuron ${f + 1} of ${st.tiles} · ${mean.toFixed(2)}`;
+  showTip(e, st.L.name, what, big);
 }
 
 // ------------------------------------------------------------------ data
-const statusEl = document.getElementById('status');
-let lastFrameAt = 0;
-let state = { paused: false, speed: 1 };
-
-function onTopology(topo) {
-  const first = !T || T.total !== topo.layers.reduce((a, L) => a + unitCount(L), 0);
+const statusEl = $('status');
+function onTopology(t) {
+  const first = !topo;
+  topo = t;
+  if (t.learned && Object.keys(t.learned).length) learnedAt = performance.now();
   if (first) {
-    T = buildPoints(topo.layers);
-    T.layers = topo.layers;
-    buildLabels(topo.layers);
-    buildMoves(topo.layers.find(L => L.id === 'policy').names);
-    document.getElementById('legendTerritory').hidden = !topo.layers.some(L => L.id === 'territory_in');  // v1 has no territory map
+    buildMoves(t.layers.find(L => L.id === 'policy').names);
+    buildSees();
+    buildInside(t.layers);
+    if (!floorAvailable().predicted && t.version === 1 && view.floor === 'predicted') view.floor = 'now';
+    syncToggles();
   }
-  buildLines(topo);
-  if (!first && topo.edges.some(e => e.dw)) flash = 1;
-  document.getElementById('wait').style.display = 'none';
+  showLearned();
+  $('wait').style.display = 'none';
 }
-
-const tintAttr = () => points.geometry.attributes.tint;
-function inputCells(layerIndex, bytes) {
-  const L = T.layers[layerIndex], s0 = T.start[layerIndex], tint = tintAttr().array;
-  const bitColor = L.planes.map(p => new THREE.Color(PLANE_COLORS[p] || '#ffffff'));
-  const order = PRIORITY.map(p => L.planes.indexOf(p)).filter(i => i >= 0);
-  const outside = L.planes.indexOf('outside');
-  const territory = L.id === 'territory_in';
-  for (let c = 0; c < bytes.length; c++) {
-    let b = bytes[c];
-    const u = s0 + c;
-    if (territory) b &= 3;  // the upper bits are a distance, not a flag
-    if (!b) { target[u] = 0.25; tint[3 * u] = T.hue[3 * u]; tint[3 * u + 1] = T.hue[3 * u + 1]; tint[3 * u + 2] = T.hue[3 * u + 2]; continue; }  // faint: the plane stays visible
-    const bit = order.find(i => b & (1 << i));
-    const col = bitColor[bit];
-    tint[3 * u] = col.r; tint[3 * u + 1] = col.g; tint[3 * u + 2] = col.b;
-    if (territory) { target[u] = 0.45 + 0.55 * Math.max(0, 1 - (bytes[c] >> 2) / 24); continue; }  // nearer = brighter
-    // the rim is the dullest wall on the map: it stays a quiet grey while trails and heads burn
-    target[u] = bit === outside ? 0.4 : L.planes[bit] === 'walls' ? 0.5 : 1;
-  }
-}
-
 function onFrame(f) {
-  if (!T) return;
+  if (!topo) return;
   last = f;
   lastFrameAt = performance.now();
-  const acts = b64(f.acts);
-  let k = 0;
-  T.layers.forEach((L, i) => {
-    const s0 = T.start[i], n = unitCount(L);
-    if (L.kind === 'conv' || L.kind === 'dense') {
-      for (let u = 0; u < n; u++) target[s0 + u] = acts[k++] / 255;
-    } else if (f.maps && f.maps[L.id] !== undefined) {
-      lastInput[L.id] = b64(f.maps[L.id]);
-      inputCells(i, lastInput[L.id]);
-    } else if (L.id === 'scalars_in') { const s = b64(f.scalars); for (let u = 0; u < n; u++) target[s0 + u] = s[u] / 255; }
-    else if (L.id === 'policy') for (let u = 0; u < n; u++) target[s0 + u] = Math.sqrt(f.probs[u]);
-    else if (L.id === 'value') target[s0] = Math.min(1, Math.abs(f.value));
-  });
-  tintAttr().needsUpdate = true;
-  showMoves(f);
+  lastActs = b64(f.acts);
   drawArena(f);
+  showMoves(f);
+  showPredictions(f);
+  for (const [id, s] of Object.entries(f.maps || {})) drawMap(id, b64(s));
+  drawNumbers(f);
+  if (!$('inside').hidden) drawStages(lastActs);
+  syncToggles();
   showStatus();
 }
-
 function showStatus() {
   if (!last) return;
   const f = last, training = isTraining(f);
   const head = state.paused ? 'paused' : 'live';
+  const where = `round ${f.round} · ${Math.round(f.time)} s`;
   statusEl.innerHTML = training
-    ? `${head} · training · update ${f.update} · <span class="${flash > 0.05 ? 'flash' : ''}">new weights ${Math.round(f.trained_ago)} s ago</span>`
-    : `${head} · update ${f.update}`;
+    ? `${head} · ${where} · training · update ${f.update} · <span class="${f.trained_ago < 3 ? 'flash' : ''}">new weights ${Math.round(f.trained_ago)} s ago</span>`
+    : `${head} · ${where} · update ${f.update}`;
 }
 
-// ------------------------------------------------------------------ the numbers (the page below the picture)
-const statsEl = document.getElementById('stats'), statsTitle = document.getElementById('statsTitle'),
-      statsSub = document.getElementById('statsSub'), statsUp = document.getElementById('statsUp'),
-      strengthRows = document.getElementById('strengthRows'), learnRows = document.getElementById('learnRows'),
-      strengthHead = document.getElementById('strengthHead'), learnHead = document.getElementById('learnHead');
-const pct = v => v == null ? '–' : `${Math.round(v * 100)}%`;
-const num = (v, d) => v == null ? '–' : (+v).toFixed(d);
+// ------------------------------------------------------------------ the numbers (the page below)
+const statsEl = $('stats'), statsTitle = $('statsTitle'), statsSub = $('statsSub'), statsUp = $('statsUp'),
+      strengthRows = $('strengthRows'), learnRows = $('learnRows'), strengthHead = $('strengthHead'), learnHead = $('learnHead');
 // rows hide themselves when the running trainer does not report that number
 const STRENGTH = [  // does it win: the only numbers that matter in the end
   { key: 'win_vs_hunter', label: 'wins against the space fighter', range: [0, 1], value: m => pct(m.win_vs_hunter) },
@@ -631,31 +720,31 @@ const LEARNING = [  // how the lessons are going
   { key: 'lr', label: 'learning rate', value: m => (+m.lr).toExponential(1) },
   { key: 'replay', label: 'replay', value: m => num(m.replay, 2) },
 ];
-let metrics = null;
 
 function chart(cv, vals, range) {
-  const dpr = Math.min(window.devicePixelRatio || 1, 2), W = cv.clientWidth || 600, H = 62, pad = 5;
-  if (cv.width !== Math.round(W * dpr)) { cv.width = Math.round(W * dpr); cv.height = H * dpr; }
+  const W = cv.clientWidth || 600, H = 62, pad = 5;
+  if (cv.width !== Math.round(W * DPR)) { cv.width = Math.round(W * DPR); cv.height = H * DPR; }
   const c = cv.getContext('2d');
-  c.clearRect(0, 0, cv.width, cv.height);
+  c.setTransform(DPR, 0, 0, DPR, 0, 0);
+  c.clearRect(0, 0, W, H);
   const pts = vals.map((v, i) => [i, v]).filter(p => p[1] != null && isFinite(p[1]));
   if (pts.length < 2) return;
   let lo = range ? range[0] : Math.min(...pts.map(p => p[1])), hi = range ? range[1] : Math.max(...pts.map(p => p[1]));
   if (hi - lo < 1e-9) hi = lo + 1;
   const n = Math.max(vals.length - 1, 1);
-  const X = i => (pad + i / n * (W - 2 * pad)) * dpr, Y = v => (H - pad - (v - lo) / (hi - lo) * (H - 2 * pad)) * dpr;
+  const X = i => pad + i / n * (W - 2 * pad), Y = v => H - pad - (v - lo) / (hi - lo) * (H - 2 * pad);
   c.strokeStyle = 'rgba(255,255,255,0.08)';   // the floor of the chart
-  c.lineWidth = dpr;
-  c.beginPath(); c.moveTo(0, Y(lo)); c.lineTo(cv.width, Y(lo)); c.stroke();
+  c.lineWidth = 1;
+  c.beginPath(); c.moveTo(0, Y(lo)); c.lineTo(W, Y(lo)); c.stroke();
   c.strokeStyle = 'rgba(255,255,255,0.55)';
-  c.lineWidth = 1.5 * dpr;
+  c.lineWidth = 1.5;
   c.lineJoin = 'round';
   c.beginPath();
   pts.forEach(([i, v], j) => j ? c.lineTo(X(i), Y(v)) : c.moveTo(X(i), Y(v)));
   c.stroke();
   const [i, v] = pts[pts.length - 1];
   c.fillStyle = '#fff';
-  c.beginPath(); c.arc(X(i), Y(v), 2.6 * dpr, 0, Math.PI * 2); c.fill();
+  c.beginPath(); c.arc(X(i), Y(v), 2.6, 0, Math.PI * 2); c.fill();
 }
 
 // training counts as running while updates keep arriving at the run's own pace
@@ -682,20 +771,20 @@ function onMetrics(m) {
 }
 function showMetrics() {
   if (!metrics) return;
-  const { last, series } = metrics;
+  const { last: m, series } = metrics;
   const training = isTraining();
-  const steps = last.steps >= 1e6 ? `${(last.steps / 1e6).toFixed(1)}M` : `${Math.round(last.steps / 1e3)}k`;
-  const history = series.update ? series.update.length : 0;
+  const steps = m.steps >= 1e6 ? `${(m.steps / 1e6).toFixed(1)}M` : `${Math.round(m.steps / 1e3)}k`;
+  const hist = series.update ? series.update.length : 0;
   statsTitle.textContent = training ? 'Training' : 'Last run';
-  statsSub.textContent = `update ${last.update} · ${steps} ${last.evals_s == null ? 'steps' : 'decisions'} · the last ${history} updates`;
+  statsSub.textContent = `update ${m.update} · ${steps} ${m.evals_s == null ? 'steps' : 'decisions'} · the last ${hist} updates`;
   for (const [box, head, defs] of [[strengthRows, strengthHead, STRENGTH], [learnRows, learnHead, LEARNING]]) {
     let any = false;
     defs.forEach((r, i) => {
       const row = box.children[i];
-      row.hidden = last[r.key] == null;
+      row.hidden = m[r.key] == null;
       if (row.hidden) return;
       any = true;
-      row.querySelector('.v').textContent = r.value(last);
+      row.querySelector('.v').textContent = r.value(m);
       chart(row.querySelector('canvas'), series[r.key] || [], r.range);
     });
     head.hidden = !any;
@@ -721,76 +810,36 @@ function connect() {
 }
 connect();
 
-// ------------------------------------------------------------------ hover: what is this neuron
-const tip = document.getElementById('tip');
-const ray = new THREE.Raycaster();
-const mouse = new THREE.Vector2(2, 2);
-let mouseMoved = false, mx = 0, my = 0, lastPick = 0;
-canvas.addEventListener('pointermove', e => {
-  mx = e.clientX; my = e.clientY;
-  const r = canvas.getBoundingClientRect();
-  mouse.set((e.clientX - r.left) / r.width * 2 - 1, -((e.clientY - r.top) / r.height) * 2 + 1);
-  mouseMoved = true;
-});
-canvas.addEventListener('pointerleave', () => { tip.style.display = 'none'; });
-
-function describe(u) {
-  let li = T.layers.length - 1;
-  while (li > 0 && T.start[li] > u) li--;
-  const L = T.layers[li], k = u - T.start[li], a = target[u];
-  if (L.kind === 'input' && L.shape.length === 2) {
-    const r = Math.floor(k / L.shape[1]), c = k % L.shape[1], b = lastInput[L.id] ? lastInput[L.id][k] : 0;
-    if (L.id === 'territory_in') {
-      const who = (b & 1) ? 'I get here first' : (b & 2) ? 'the enemy gets here first' : 'unreachable';
-      return [L.name, `cell ${r}, ${c} · ${who}${(b & 1) ? ` · ${(b >> 2) * 4} cells away` : ''}`];
-    }
-    const what = L.planes.filter((p, i) => b & (1 << i)).join(', ') || 'empty';
-    return [L.name, `cell ${r}, ${c} · ${what}`];
-  }
-  if (L.id === 'scalars_in') {
-    const v = last && last.numbers ? last.numbers[k] : null;
-    return [L.name, `${L.names[k]}${v == null ? '' : ' · ' + (+v.toFixed(2))}`];
-  }
-  if (L.kind === 'conv') {
-    const [, H, W] = L.shape, ch = Math.floor(k / (H * W)), rem = k % (H * W);
-    return [L.name, `filter ${ch + 1} · cell ${Math.floor(rem / W)}, ${rem % W} · ${a.toFixed(2)}`];
-  }
-  if (L.id === 'policy') return [L.names[k], last ? `${Math.round(last.probs[k] * 100)}%` : ''];
-  if (L.id === 'value') return ['value', last ? (last.value >= 0 ? '+' : '') + last.value.toFixed(2) : ''];
-  return [L.name, `neuron ${k + 1} · ${a.toFixed(2)}`];
-}
-
-function pick(now) {
-  if (!mouseMoved || !T || now - lastPick < 66) return;
-  mouseMoved = false; lastPick = now;
-  ray.params.Points.threshold = 0.004 * camera.position.distanceTo(controls.target);
-  ray.setFromCamera(mouse, camera);
-  const hits = ray.intersectObject(points);
-  if (!hits.length) { tip.style.display = 'none'; return; }
-  // of everything under the cursor, name what the eye sees: the brightest, nearest first on a tie
-  let best = hits[0];
-  for (const h of hits) if (target[h.index] > target[best.index] + 0.05) best = h;
-  const [name, detail] = describe(best.index);
-  tip.innerHTML = `${name}<br><span class="d">${detail}</span>`;
-  tip.style.display = 'block';
-  const w = tip.offsetWidth, h = tip.offsetHeight;
-  tip.style.left = `${Math.min(mx + 16, window.innerWidth - w - 12)}px`;
-  tip.style.top = `${Math.min(my + 16, window.innerHeight - h - 12)}px`;
-}
-
 // ------------------------------------------------------------------ controls
-const bPause = document.getElementById('bPause'), bStep = document.getElementById('bStep'),
-      bSpeed = document.getElementById('bSpeed');
-const tGlow = document.getElementById('tGlow'), tFlat = document.getElementById('tFlat'),
-      tHD = document.getElementById('tHD'), tStats = document.getElementById('tStats');
+const bPause = $('bPause'), bStep = $('bStep'), bSpeed = $('bSpeed'),
+      tFloor = $('tFloor'), tAttn = $('tAttn'), tRays = $('tRays'), tInside = $('tInside'), tStats = $('tStats');
+const FLOORS = ['predicted', 'now', 'none'];
+const FLOOR_WORD = { predicted: 'predicted', now: 'now', none: 'none' };
+function syncToggles() {
+  const avail = floorAvailable();
+  const floor = avail[view.floor] ? view.floor : avail.predicted ? 'predicted' : avail.now ? 'now' : 'none';
+  tFloor.textContent = `Floor · ${FLOOR_WORD[floor]}`;
+  tFloor.classList.toggle('on', floor !== 'none' && !view.attn);
+  tFloor.title = 'predicted: who holds each cell two seconds on, as the network believes · now: who gets there first, as the engine computes it';
+  tAttn.classList.toggle('on', view.attn);
+  tAttn.disabled = !(last && last.attn);
+  tAttn.title = last && last.attn ? `where the hovered cell (or my head's cell) looks, layer ${view.layer}; keys 1 and 2 pick the layer` : 'this brain has no attention layers';
+  tRays.classList.toggle('on', view.rays);
+}
+tFloor.onclick = () => {
+  const avail = floorAvailable();
+  let i = FLOORS.indexOf(view.floor);
+  for (let k = 0; k < FLOORS.length; k++) { i = (i + 1) % FLOORS.length; if (avail[FLOORS[i]]) break; }
+  view.floor = FLOORS[i]; localStorage.setItem('brain.floor', view.floor);
+  if (view.attn) { view.attn = false; localStorage.setItem('brain.attn', '0'); }
+  redraw();
+};
+tAttn.onclick = () => { view.attn = !view.attn; localStorage.setItem('brain.attn', view.attn ? '1' : '0'); redraw(); };
+tRays.onclick = () => { view.rays = !view.rays; localStorage.setItem('brain.rays', view.rays ? '1' : '0'); redraw(); };
+tInside.onclick = () => { if (!$('inside').hidden) { if (lastActs) drawStages(lastActs); $('inside').scrollIntoView({ behavior: 'smooth' }); } };
 tStats.onclick = () => { if (!statsEl.hidden) statsEl.scrollIntoView({ behavior: 'smooth' }); };
 statsUp.onclick = e => { e.preventDefault(); window.scrollTo({ top: 0, behavior: 'smooth' }); };
-tHD.classList.toggle('on', hd && SS > 1);
-tHD.title = hd ? (SS > 1 ? `drawn at ${SS}× the screen's resolution` : "HD is on, but this screen is too large to supersample") : 'drawn at the screen\'s resolution';
-tHD.onclick = () => { localStorage.setItem('brain.hd', hd ? '0' : '1'); location.reload(); };
-let flat = false, fly = null;
-const post = body => fetch('/control', { method: 'POST', headers: { 'Content-Type': 'application/json' },
-                                         body: JSON.stringify(body) }).catch(() => {});
+function redraw() { syncToggles(); if (last) drawArena(last); }
 function speedStep(dir) {
   let i = 0;
   for (let j = 1; j < SPEEDS.length; j++)
@@ -806,69 +855,22 @@ window.addEventListener('keydown', e => {
   else if (e.code === 'ArrowRight') { e.preventDefault(); post({ step: 1 }); }
   else if (e.key === '[') post({ speed: speedStep(-1) });
   else if (e.key === ']') post({ speed: speedStep(1) });
-  else if (e.key === '-' || e.key === '=' || e.key === '+') {
-    renderer.toneMappingExposure = Math.min(2.5, Math.max(0.3, renderer.toneMappingExposure * (e.key === '-' ? 0.85 : 1 / 0.85)));
-    statusEl.textContent = `brightness ${Math.round(renderer.toneMappingExposure * 100)}%`;
-    clearTimeout(window.__brTimer); window.__brTimer = setTimeout(showStatus, 1200);
-  }
+  else if (e.key === 'f') tFloor.onclick();
+  else if (e.key === 'a' && !tAttn.disabled) tAttn.onclick();
+  else if (e.key === 'r') tRays.onclick();
+  else if (e.key === '1' || e.key === '2') { view.layer = +e.key; redraw(); }
 });
 document.querySelectorAll('.toggles button').forEach(b => b.addEventListener('click', e => e.currentTarget.blur()));
+for (let i = 0; i < 8; i++) { const cv = document.createElement('canvas'); cv.width = cv.height = 16; headCanvases.push(cv); }
+(() => { const box = $('heads'); for (let l = 0; l < 2; l++) { const s = document.createElement('span'); s.textContent = `layer ${l + 1}`; box.append(s); for (let h = 0; h < 4; h++) box.append(headCanvases[l * 4 + h]); } })();
 
-function flyTo(offset) {
-  fly = { from: camera.position.clone(), to: CENTER.clone().add(offset), t: 0 };
-}
-tGlow.onclick = () => { bloom.enabled = !bloom.enabled; tGlow.classList.toggle('on', bloom.enabled); };
-tFlat.onclick = () => {
-  flat = !flat;
-  tFlat.classList.toggle('on', flat);
-  flyTo(flat ? VIEW_FLAT : VIEW_ANGLED);
-};
-
-function resize() {
-  const w = hero.clientWidth, h = hero.clientHeight;
-  renderer.setSize(w, h, false);
-  composer.setSize(w, h);
-  bloom.setSize(w * DEVICE, h * DEVICE);   // the glow is a blur: the screen's own resolution is plenty for it
-  lineMaterial.resolution.set(w * DPR, h * DPR);
-  camera.aspect = w / h;
-  camera.updateProjectionMatrix();
-  showMetrics();                           // the charts follow the window's width
-  pointMaterial.uniforms.uScale.value = renderer.domElement.height / (2 * Math.tan(THREE.MathUtils.degToRad(camera.fov / 2)));
-  pointMaterial.uniforms.uMin.value = 1.3 * DPR;
-  pointMaterial.uniforms.uMax.value = 6.5 * DPR;
-}
-window.addEventListener('resize', resize);
-resize();
-
-let prev = performance.now(), lastRender = 0, lastHeadAt = 0;
-function frame(now) {
-  requestAnimationFrame(frame);
-  // 60 fps on its own; 30 while training runs, which shares the GPU with the trainer
-  if (now - lastRender < (isTraining(last) ? 32 : 15.5)) return;
-  lastRender = now;
-  const dt = Math.min(0.1, (now - prev) / 1000); prev = now;
-  if (fly) {
-    fly.t = Math.min(1, fly.t + dt / 0.9);
-    const e = fly.t < 0.5 ? 2 * fly.t * fly.t : 1 - Math.pow(-2 * fly.t + 2, 2) / 2;
-    camera.position.lerpVectors(fly.from, fly.to, e);
-    if (fly.t >= 1) fly = null;
-  }
-  controls.update();
-  if (T) {
-    const a = 1 - Math.exp(-dt * 18);
-    for (let i = 0; i < shown.length; i++) shown[i] += (target[i] - shown[i]) * a;
-    points.geometry.attributes.act.array.set(shown);
-    points.geometry.attributes.act.needsUpdate = true;
-    updateLines();
-    flash = Math.max(0, flash - dt / 1.8);
-    if (!state.paused && lastFrameAt && now - lastFrameAt > 3000) statusEl.textContent = 'waiting · no new decisions';
-    if (metrics && now - lastHeadAt > 5000) { lastHeadAt = now; showMetrics(); }
-    pick(now);
-  }
-  placeLabels();
-  composer.render();
-}
-requestAnimationFrame(frame);
+// the picture follows the window, and the page says when the match has gone quiet
+window.addEventListener('resize', () => { showMetrics(); if (last) { drawArena(last); showPredictions(last); } });
+setInterval(() => {
+  if (last && !state.paused && lastFrameAt && performance.now() - lastFrameAt > 3000) statusEl.textContent = 'waiting · no new decisions';
+  if (metrics) showMetrics();
+  showLearned();
+}, 2500);
 </script>
 </body>
 </html>

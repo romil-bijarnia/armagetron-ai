@@ -1,17 +1,17 @@
-"""Watch the network think: every neuron of the policy network, drawn live in the browser.
+"""Watch the network think: what it sees, what it believes and what it does, live in the browser.
 
     ./trainctl brain                    # the AI against the game's best bot
     ./trainctl brain --ais 2 --bots 0   # two copies of the AI; the brain shown is AI 1's
     ./trainctl brain --speed 0.5        # half speed
 
-A real match runs in a headless engine, as in ./trainctl show. Every time AI 1 decides, the
-activation of every neuron is sent to a page (http://127.0.0.1:8765) that draws the network in 3D:
-one slab of points per layer, lit by how strongly each neuron fires, and the strongest connections
-between layers, glowing where signal flows through them. Space pauses the match, the right arrow
-steps it one decision at a time, [ and ] change the speed, and hovering a neuron says what it is.
-While training runs, the page follows the newest weights (runs/v3/actor.pt) and flashes the
-connections each update changed; until v2 has weights it shows the trained v1 brain (runs/main).
-Ctrl-C quits.
+A real match runs in a headless engine, as in ./trainctl show. Every time AI 1 decides, the page
+(http://127.0.0.1:8765) gets the decision: the arena with the network's beliefs painted on it (who
+will hold each cell two seconds from now, where its attention goes, what its rays feel), the odds
+of each move, its win chance and danger reading, the four maps it sees, and every layer's output
+drawn as the pictures they are. Space pauses the match, the right arrow steps it one decision at
+a time, [ and ] change the speed. While training runs, the page follows the newest weights
+(runs/v3/actor.pt) and shows which layers each update changed most; until v3 has weights it shows
+the trained v1 brain (runs/main). Ctrl-C quits.
 """
 
 from __future__ import annotations
@@ -19,10 +19,12 @@ from __future__ import annotations
 import argparse
 import base64
 import json
+import math
 import queue
 import threading
 import time
 import webbrowser
+from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -32,15 +34,13 @@ import torch.nn as nn
 
 from . import protocol as P
 from .engine import ArenaConfig, EnginePool, _parse_step
-from .model import TOWER_MAPS, TOWER_NAMES, PolicyNet, make_net, net_version
+from .model import TOWER_NAMES, PolicyNet, make_net, net_version
 from .show import Match
 from .train import MASK_TABLE
 
 PROJECT = Path(__file__).resolve().parent.parent
 PAGE = Path(__file__).with_name("web") / "brain.html"
-MAX_FPS = 20  # activation frames sent per second of wall time
-CONV_LINES = 900  # neurons per conv layer that get lines drawn to their strongest inputs
-DENSE_LINES = 600  # likewise for fully connected layers
+MAX_FPS = 20  # decisions sent to the page per second of wall time
 LOCAL_PLANES = ["walls", "own trail", "enemy trails", "team trails", "enemy heads", "enemy paths", "outside",
                 "team heads"]
 GLOBAL_PLANES = ["walls", "own trail", "enemy trails", "own head", "enemy heads", "outside", "team trails",
@@ -88,14 +88,36 @@ def stacked(maps: np.ndarray, prev: np.ndarray | None) -> np.ndarray:
     return np.concatenate([maps, maps if prev is None else prev])
 
 
+@dataclass
+class Thought:
+    """One decision, with everything the page shows."""
+    layers: list[tuple[str, np.ndarray]]  # (name, activations) after each stage, in forward order
+    probs: np.ndarray  # the odds of each move
+    value: float
+    own: np.ndarray | None = None  # (3, 16, 16): nobody / me / an enemy holds the cell two seconds on (v2+)
+    aux: np.ndarray | None = None  # (2,): my territory share in two seconds, dead within two seconds (v2+)
+    attention: list[np.ndarray] = field(default_factory=list)  # per arena attention layer: (heads, cells, cells) (v3)
+
+
+def attend(layer: nn.Module, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    """AttnLayer.forward, also handing back the attention weights (B, heads, N, N)."""
+    B, N, C = x.shape
+    h = layer.heads
+    q, k, v = layer.qkv(layer.ln1(x)).view(B, N, 3, h, C // h).permute(2, 0, 3, 1, 4)
+    att = torch.softmax(q @ k.transpose(-1, -2) / math.sqrt(C // h), -1)
+    x = x + layer.proj((att @ v).transpose(1, 2).reshape(B, N, C))
+    return x + layer.fc2(torch.nn.functional.gelu(layer.fc1(layer.ln2(x)))), att
+
+
 @torch.no_grad()
-def trace(net: PolicyNet, maps: np.ndarray, scalars: np.ndarray, mask: np.ndarray):
-    """Run one decision through NET and keep every layer's output.
+def think(net: PolicyNet, maps: np.ndarray, scalars: np.ndarray, mask: np.ndarray) -> Thought:
+    """Run one decision through NET and keep every stage's output and every head's prediction.
 
     MAPS: (2*N_MAPS, GRID, GRID) uint8 (current then previous frame), SCALARS: (N_SCALARS,) float32,
-    MASK: (N_ACTIONS,) bool. Returns (layers, probs, value): layers is a list of (name, activations)
-    after each ReLU, in forward order."""
+    MASK: (N_ACTIONS,) bool."""
     out: list[tuple[str, torch.Tensor]] = []
+    attention: list[np.ndarray] = []
+    own = None
     x_in = torch.from_numpy(np.array(maps, np.uint8))[None]
 
     def mlp(prefix: str, seq: nn.Sequential, h: torch.Tensor) -> torch.Tensor:
@@ -132,13 +154,16 @@ def trace(net: PolicyNet, maps: np.ndarray, scalars: np.ndarray, mask: np.ndarra
             n += 1
             out.append((f"{group}_c{n}", x[0]))
         if len(getattr(tower, "attn", ())):
-            # v3: the cells talk to each other; each attention layer is its own slab
+            # v3: the cells talk to each other; each attention layer is a stage of its own
             B, C, H, W = x.shape
             cells = x.flatten(2).transpose(1, 2) + tower.pos
             for a_i, layer in enumerate(tower.attn):
-                cells = layer(cells)
+                cells, att = attend(layer, cells)
+                attention.append(att[0].numpy())
                 x = cells.transpose(1, 2).reshape(B, C, H, W)
                 out.append((f"{group}_a{a_i + 1}", x[0]))
+        if t == 1 and hasattr(net, "own"):
+            own = torch.softmax(net.own(x)[0], 0).numpy()  # the arena tower's 16x16 features feed the ownership head
         x = torch.relu(tower.down0(x))
         out.append((f"{group}_c{n + 1}", x[0]))
         x = torch.relu(tower.down1(x))
@@ -150,223 +175,126 @@ def trace(net: PolicyNet, maps: np.ndarray, scalars: np.ndarray, mask: np.ndarra
     h = mlp("trunk", net.trunk, torch.cat(parts + [hs], 1))
     logits = net.pi(h)[0].masked_fill(~torch.from_numpy(np.asarray(mask, bool)), -1e8)
     probs = torch.softmax(logits, 0)
-    return [(k, v.numpy()) for k, v in out], probs.numpy(), float(net.v(h)[0, 0])
+    aux = torch.sigmoid(net.aux(h)[0]).numpy() if hasattr(net, "aux") else None
+    return Thought([(k, v.numpy()) for k, v in out], probs.numpy(), float(net.v(h)[0, 0]), own, aux, attention)
+
+
+def trace(net: PolicyNet, maps: np.ndarray, scalars: np.ndarray, mask: np.ndarray):
+    """(layers, probs, value) of one decision: every stage's output in forward order, the move odds, the value."""
+    t = think(net, maps, scalars, mask)
+    return t.layers, t.probs, t.value
 
 
 def layer_table(net: PolicyNet) -> list[dict]:
-    """Every layer the page draws, in frame order, with where it sits in the picture."""
+    """Every stage the page draws, in frame order."""
     blank = np.zeros((2 * P.N_MAPS, P.GRID, P.GRID), np.uint8)
     outs = trace(net, blank, np.zeros(P.N_SCALARS, np.float32), np.ones(P.N_ACTIONS, bool))[0]
     names, shapes = [k for k, _ in outs], dict(outs)
     layers = []
     for m in input_maps(net):
         mid, label, planes, group = MAP_IDS[m], MAP_LABELS[m], MAP_PLANE_NAMES[m], MAP_GROUPS[m]
-        layers.append({"id": mid, "group": group, "kind": "input", "shape": [P.GRID, P.GRID], "col": 0,
+        layers.append({"id": mid, "group": group, "kind": "input", "shape": [P.GRID, P.GRID],
                        "label": label, "name": label, "planes": planes})
-    layers.append({"id": "scalars_in", "group": "scalars", "kind": "input", "shape": [P.N_SCALARS], "col": 0,
+    layers.append({"id": "scalars_in", "group": "scalars", "kind": "input", "shape": [P.N_SCALARS],
                    "label": f"{P.N_SCALARS} exact numbers", "name": "exact numbers", "names": scalar_names()})
-    seen16: dict[str, int] = {}
     convs: dict[str, int] = {}
     for name in names:
         shape = list(shapes[name].shape)
         group = name.split("_")[0] if not name.startswith("trunk") else "trunk"
         word = GROUP_WORD[group]
         if len(shape) == 3:
-            if shape[1] == P.GRID // 4:  # full patch resolution, one column each
-                seen16[group] = seen16.get(group, 0) + 1
-                col = seen16[group]
-            else:
-                col = 5 if shape[1] == P.GRID // 8 else 6
             kind = "conv"
             if "_a" in name:  # v3 attention output: the same cells, after looking at each other
                 label = f"{shape[0]} channels · {shape[1]}×{shape[2]}"
                 human = f"{word} · attention {name.split('_a')[1]}"
             else:
                 convs[group] = convs.get(group, 0) + 1
+                k = convs[group]
                 label = f"{shape[0]} filters · {shape[1]}×{shape[2]}"
-                human = f"{word} · conv {convs[group]}"
+                if net.version == 1 or shape[1] < P.GRID // 4:
+                    stage = f"conv {k}" if net.version == 1 else f"down to {shape[1]}×{shape[2]}"
+                else:
+                    stage = "stem" if k == 1 else f"block {k - 1}"
+                human = f"{word} · {stage}"
         else:
-            col = {"scalars_h1": 3, "scalars_h2": 7, "trunk1": 8, "trunk2": 9}.get(name, 7)
             label = f"{shape[0]} neurons"
             human = {"scalars_h1": "numbers · layer 1", "scalars_h2": "numbers · layer 2",
                      "trunk1": "trunk · layer 1", "trunk2": "trunk · layer 2"}.get(name, f"{word} · summary")
             kind = "dense"
-        layers.append({"id": name, "group": group, "kind": kind, "shape": shape, "col": col,
-                       "label": label, "name": human})
-    layers.append({"id": "policy", "group": "head", "kind": "output", "shape": [P.N_ACTIONS], "col": 10,
+        layers.append({"id": name, "group": group, "kind": kind, "shape": shape, "label": label, "name": human})
+    layers.append({"id": "policy", "group": "head", "kind": "output", "shape": [P.N_ACTIONS],
                    "label": "move", "name": "move", "names": MOVES})
-    layers.append({"id": "value", "group": "head", "kind": "output", "shape": [1], "col": 10,
-                   "label": "value", "name": "value"})
+    layers.append({"id": "value", "group": "head", "kind": "output", "shape": [1], "label": "value", "name": "value"})
     return layers
 
 
-def _top(scores: np.ndarray, k: int) -> np.ndarray:
-    k = min(k, scores.size)
-    return np.argpartition(-scores, k - 1)[:k]
+def layer_of(param: str, net: PolicyNet) -> str | None:
+    """The page's stage a parameter belongs to (None for what the page does not draw)."""
+    p = param.split(".")
+    if net.version == 1:
+        if p[0] not in ("local", "globl"):
+            group = None
+        else:
+            group = "local" if p[0] == "local" else "global"
+            if p[1] == "fc":
+                return f"{group}_fc"
+            tower = getattr(net, p[0])
+            convs = [i for i, m in enumerate(tower.net) if isinstance(m, nn.Conv2d)]
+            return f"{group}_c{convs.index(int(p[2])) + 1}" if p[1] == "net" and int(p[2]) in convs else None
+    elif p[0] == "towers":
+        group, n, part = TOWER_GROUPS[int(p[1])], len(net.towers[int(p[1])].res), p[2]
+        if part == "stem":
+            return f"{group}_c1"
+        if part == "res":
+            return f"{group}_c{int(p[3]) + 2}"
+        if part == "pos":
+            return f"{group}_a1"
+        if part == "attn":
+            return f"{group}_a{int(p[3]) + 1}"
+        if part in ("down0", "down1"):
+            return f"{group}_c{n + 2 + (part == 'down1')}"
+        if part == "fc":
+            return f"{group}_fc"
+        return None
+    head = ".".join(p[:2]) if p[0] in ("scalars", "trunk") else p[0]
+    return {"scalars.0": "scalars_h1", "scalars.2": "scalars_h2", "trunk.0": "trunk1", "trunk.2": "trunk2",
+            "pi": "policy", "v": "value", "aux": "aux", "own": "own"}.get(head)
 
 
-def edges(net: PolicyNet, layers: list[dict], rng: np.random.Generator) -> list[dict]:
-    """The strongest connections into each layer, as index pairs into the layers' units.
-
-    Each group carries the weight tensor and flat parameter index of every line, so the same lines
-    can be re-weighed when new weights arrive."""
-    by_id = {L["id"]: L for L in layers}
-    groups = []
-
-    def add(src, dst, si, di, param, pidx):
-        groups.append({"src": src, "dst": dst, "si": np.asarray(si, np.int64), "di": np.asarray(di, np.int64),
-                       "param": param, "pidx": np.asarray(pidx, np.int64)})
-
-    def stem(maps, dst, mod, param):
-        """Lines from the tower's input maps into its first layer: each map is drawn as one point
-        per cell (all its planes together, current frame only), and every sampled stem unit gets
-        a line from the cell of each map it weighs most."""
-        W = mod.weight.detach().numpy()
-        co_n, ci_n, k, _ = W.shape
-        s = mod.stride[0]
-        A = np.abs(W)
-        _, ho, wo = by_id[dst]["shape"]
-        units = rng.choice(co_n * ho * wo, size=min(CONV_LINES, co_n * ho * wo), replace=False)
-        first = 0
-        for m in maps:
-            planes = P.MAP_PLANES[m]
-            Am = A[:, first:first + planes]  # this map's current-frame planes
-            si, di, pidx = [], [], []
-            for u in units:
-                co, rem = divmod(int(u), ho * wo)
-                y, x = divmod(rem, wo)
-                flat = Am[co].reshape(-1)  # (planes, k, k): stride == kernel, so every tap is inside
-                tap = int(flat.argmax())
-                ci, rem2 = divmod(tap, k * k)
-                ky, kx = divmod(rem2, k)
-                si.append((y * s + ky) * P.GRID + x * s + kx)
-                di.append(int(u))
-                pidx.append(((co * ci_n + first + ci) * k + ky) * k + kx)
-            add(MAP_IDS[m], dst, si, di, param, pidx)
-            first += planes
-
-    def conv(src, dst, mod, param):
-        W = mod.weight.detach().numpy()
-        co_n, ci_n, k, _ = W.shape
-        s, p = mod.stride[0], mod.padding[0]
-        A = np.abs(W)
-        _, hi, wi = by_id[src]["shape"]
-        _, ho, wo = by_id[dst]["shape"]
-        units = rng.choice(co_n * ho * wo, size=min(CONV_LINES, co_n * ho * wo), replace=False)
-        si, di, pidx = [], [], []
-        for u in units:
-            co, rem = divmod(int(u), ho * wo)
-            y, x = divmod(rem, wo)
-            ys, xs = y * s - p + np.arange(k), x * s - p + np.arange(k)
-            valid = ((ys >= 0) & (ys < hi))[:, None] & ((xs >= 0) & (xs < wi))[None, :]
-            cand = np.where(valid[None], A[co], -1.0)  # (ci, k, k)
-            flat = cand.reshape(-1)
-            for t in _top(flat, 2):
-                if flat[t] < 0:
-                    continue
-                ci, rem2 = divmod(int(t), k * k)
-                ky, kx = divmod(rem2, k)
-                si.append(ci * hi * wi + int(ys[ky]) * wi + int(xs[kx]))
-                di.append(int(u))
-                pidx.append(((co * ci_n + ci) * k + ky) * k + kx)
-        add(src, dst, si, di, param, pidx)
-
-    def mix(src, dst, W, param):
-        """Lines for a per-cell channel mixing W [out][in]: every sampled unit of DST gets lines
-        from the two input channels it weighs most, at its own cell."""
-        A = np.abs(W.detach().numpy())
-        co_n, ci_n = A.shape
-        _, ho, wo = by_id[dst]["shape"]
-        units = rng.choice(co_n * ho * wo, size=min(CONV_LINES, co_n * ho * wo), replace=False)
-        si, di, pidx = [], [], []
-        for u in units:
-            co, cell = divmod(int(u), ho * wo)
-            for ci in _top(A[co], 2):
-                si.append(int(ci) * ho * wo + cell)
-                di.append(int(u))
-                pidx.append(co * ci_n + int(ci))
-        add(src, dst, si, di, param, pidx)
-
-    def dense(srcs, dst, W, param, per_unit, units=DENSE_LINES):
-        """SRCS: list of (layer id, size) the input vector is made of, in order. Lines go from the
-        PER_UNIT strongest inputs of up to UNITS neurons of DST."""
-        A = np.abs(W.detach().numpy())
-        bounds = np.cumsum([0] + [n for _, n in srcs])
-        lines = {sid: ([], [], []) for sid, _ in srcs}
-        rows = np.arange(A.shape[0]) if A.shape[0] <= units else np.sort(rng.choice(A.shape[0], units, replace=False))
-        for j in rows:
-            for t in _top(A[j], per_unit):
-                part = int(np.searchsorted(bounds, t, side="right") - 1)
-                sid = srcs[part][0]
-                lines[sid][0].append(int(t - bounds[part]))
-                lines[sid][1].append(int(j))
-                lines[sid][2].append(int(j) * A.shape[1] + int(t))
-        for sid, (si, di, pidx) in lines.items():
-            if si:
-                add(sid, dst, si, di, param, pidx)
-
-    fused_srcs = []
-    for group, attr, _, m in V1_TOWERS if net.version == 1 else ():
-        tower = getattr(net, attr)
-        convs = [(i, mod) for i, mod in tower.net.named_children() if isinstance(mod, nn.Conv2d)]
-        names = [f"{group}_c{i + 1}" for i in range(len(convs))]
-        stem((m,), names[0], convs[0][1], f"{attr}.net.{convs[0][0]}.weight")
-        for i in range(1, len(convs)):
-            conv(names[i - 1], names[i], convs[i][1], f"{attr}.net.{convs[i][0]}.weight")
-        last = by_id[names[-1]]["shape"]
-        dense([(names[-1], int(np.prod(last)))], f"{group}_fc", tower.fc.weight, f"{attr}.fc.weight", 2)
-        fused_srcs.append((f"{group}_fc", tower.fc.out_features))
-    for m, group in enumerate(TOWER_GROUPS if net.version >= 2 else ()):
-        tower = net.towers[m]
-        # the page shows one slab per stage: stem, each residual block (after its 2nd conv),
-        # each attention layer (v3), two downs
-        n = 1
-        stem(TOWER_MAPS[m], f"{group}_c1", tower.stem, f"towers.{m}.stem.weight")
-        prev_name = f"{group}_c1"
-        for b_i, b in enumerate(tower.res):
-            # a residual block is drawn as one slab; its lines come from the block's second conv
-            n += 1
-            conv(prev_name, f"{group}_c{n}", b.c1, f"towers.{m}.res.{b_i}.c1.weight")
-            prev_name = f"{group}_c{n}"
-        for a_i, a in enumerate(getattr(tower, "attn", ())):
-            # attention mixes every cell with every other, which no fixed line can show; the lines
-            # drawn are its output projection, how what a cell gathered is written into its channels
-            mix(prev_name, f"{group}_a{a_i + 1}", a.proj.weight, f"towers.{m}.attn.{a_i}.proj.weight")
-            prev_name = f"{group}_a{a_i + 1}"
-        conv(prev_name, f"{group}_c{n + 1}", tower.down0, f"towers.{m}.down0.weight")
-        conv(f"{group}_c{n + 1}", f"{group}_c{n + 2}", tower.down1, f"towers.{m}.down1.weight")
-        last = by_id[f"{group}_c{n + 2}"]["shape"]
-        dense([(f"{group}_c{n + 2}", int(np.prod(last)))], f"{group}_fc", tower.fc.weight, f"towers.{m}.fc.weight", 2)
-        fused_srcs.append((f"{group}_fc", tower.fc.out_features))
-    dense([("scalars_in", P.N_SCALARS)], "scalars_h1", net.scalars[0].weight, "scalars.0.weight", 2)
-    dense([("scalars_h1", 256)], "scalars_h2", net.scalars[2].weight, "scalars.2.weight", 2)
-    dense(fused_srcs + [("scalars_h2", 256)], "trunk1", net.trunk[0].weight, "trunk.0.weight", 3)
-    dense([("trunk1", net.trunk[2].weight.shape[1])], "trunk2", net.trunk[2].weight, "trunk.2.weight", 2)
-    dense([("trunk2", net.pi.weight.shape[1])], "policy", net.pi.weight, "pi.weight", 48)
-    dense([("trunk2", net.v.weight.shape[1])], "value", net.v.weight, "v.weight", 48)
-    return groups
+def learned(net: PolicyNet, new: dict, old: dict) -> dict[str, float]:
+    """How much each stage's weights moved since OLD, relative to their size, scaled so the stage that
+    changed most is 1."""
+    acc: dict[str, float] = {}
+    for name, w in new.items():
+        if name not in old or not w.is_floating_point() or w.ndim < 2:
+            continue  # biases and norms are not what a stage is made of
+        lid = layer_of(name, net)
+        if lid is None:
+            continue
+        w, o = w.float(), old[name].float()
+        d = (w - o).abs().mean().item() / (w.abs().mean().item() + 1e-8)
+        acc[lid] = max(acc.get(lid, 0.0), d)
+    top = max(acc.values(), default=0.0)
+    return {k: round(v / top, 3) for k, v in acc.items() if v > 0} if top > 0 else {}
 
 
 def _u8(x: np.ndarray) -> str:
-    return base64.b64encode(np.clip(x * 255 + 0.5, 0, 255).astype(np.uint8).tobytes()).decode()
+    return base64.b64encode(np.clip(np.asarray(x, np.float32) * 255 + 0.5, 0, 255).astype(np.uint8).tobytes()).decode()
 
 
-def weigh(groups: list[dict], state: dict, old: dict | None) -> list[dict]:
-    """Line strengths (and how much each changed since OLD) for the page, normalised per group."""
-    out = []
-    for g in groups:
-        W = state[g["param"]].detach().cpu().numpy().reshape(-1)
-        w = np.abs(W[g["pidx"]])
-        w = np.sqrt(w / max(float(w.max()), 1e-12))  # sqrt so weaker lines stay visible
-        item = {"src": g["src"], "dst": g["dst"],
-                "si": base64.b64encode(g["si"].astype(np.uint32).tobytes()).decode(),
-                "di": base64.b64encode(g["di"].astype(np.uint32).tobytes()).decode(),
-                "w": _u8(w)}
-        if old is not None:
-            d = np.abs(W[g["pidx"]] - old[g["param"]].detach().cpu().numpy().reshape(-1)[g["pidx"]])
-            item["dw"] = _u8(d / max(float(d.max()), 1e-12))
-        out.append(item)
-    return out
+def attention_payload(att: list[np.ndarray], cell: int | None, global_map: np.ndarray) -> dict:
+    """What the page paints: where one cell looks in every attention layer, head by head (the hovered
+    cell, else the cell my head is in), and how much each cell is looked at over all."""
+    side = math.isqrt(att[0].shape[-1])
+    if cell is None or not 0 <= cell < side * side:
+        patch = P.GRID // side
+        heads = np.argwhere(global_map & (1 << GLOBAL_PLANES.index("own head")))
+        cell = (int(heads[0][0]) // patch * side + int(heads[0][1]) // patch) if len(heads) else side * side // 2 + side // 2
+    rows = np.stack([a[:, cell] for a in att])  # (layers, heads, cells)
+    rows = rows / np.maximum(rows.max(-1, keepdims=True), 1e-9)
+    got = np.stack([a.mean((0, 1)) for a in att])  # (layers, cells): attention received
+    got = got / np.maximum(got.max(-1, keepdims=True), 1e-9)
+    return {"cell": int(cell), "side": side, "heads": int(att[0].shape[0]), "rows": _u8(rows), "got": _u8(got)}
 
 
 class Scales:
@@ -397,6 +325,7 @@ class Hub:
         self.paused = False
         self.steps = 0  # decisions still to let through while paused
         self.speed = speed
+        self.cell = None  # the arena cell whose attention the page wants (None: the cell my head is in)
         self.state_msg = self._state()
 
     # ------------------------------------------------------------------ controls
@@ -414,6 +343,8 @@ class Hub:
                 self.steps += int(body["step"])
             if "speed" in body:
                 self.speed = min(16.0, max(0.05, float(body["speed"])))
+            if "cell" in body:
+                self.cell = int(body["cell"]) if body["cell"] is not None else None
             self.state_msg = self._state()
         self._send(self.state_msg)
 
@@ -643,15 +574,13 @@ def main() -> None:
     run_dir = path.parent.parent if path.parent.name == "pool" else path.parent
     metrics = Metrics(run_dir / "metrics.jsonl")
     net = weights.net
-    shown = input_maps(net)
-    rng = np.random.default_rng(0)
     layers = layer_table(net)
-    groups = edges(net, layers, rng)
     hub = Hub(args.speed)
 
     def publish_topology(old: dict | None) -> None:
         hub.publish("topology", json.dumps({
-            "layers": layers, "edges": weigh(groups, weights.state, old or None),
+            "layers": layers, "version": net.version, "reads": [MAP_IDS[m] for m in input_maps(net)],
+            "learned": learned(net, weights.state, old) if old else {},
             "update": weights.update, "checkpoint": str(path.relative_to(PROJECT) if path.is_relative_to(PROJECT)
                                                         else path)}))
 
@@ -708,32 +637,42 @@ def main() -> None:
                             mask = MASK_TABLE[s.mask] > 0.5
                             if s.flags & (P.FLAG_SPAWNED | P.FLAG_DIED):
                                 prev_maps.pop(k, None)
-                            outs, probs, value = trace(net, stacked(s.maps, prev_maps.get(k)), s.scalars, mask)
+                            th = think(net, stacked(s.maps, prev_maps.get(k)), s.scalars, mask)
+                            probs = th.probs
                             prev_maps[k] = np.array(s.maps)
                             a = int(probs.argmax()) if args.greedy else int(np.random.choice(len(probs), p=probs / probs.sum()))
                             acts[k] = a
                             # every decision counts while paused (stepping must not skip one)
                             if k == 0 and (hub.paused or time.monotonic() - last_frame >= 1.0 / MAX_FPS):
                                 last_frame = time.monotonic()
-                                acts_q = np.concatenate([np.clip(scales(n, v), 0, 1) for n, v in outs])
+                                acts_q = np.concatenate([np.clip(scales(n, v), 0, 1) for n, v in th.layers])
                                 me = next((c for c in m.cycles.values() if c.slot == 0), None)
-                                hub.publish("frame", json.dumps({
+                                frame = {
                                     "update": weights.update, "trained_ago": (time.time() - weights.changed_at)
                                     if weights.changed_at else None,
                                     "acts": _u8(acts_q),
+                                    # all four maps, even the ones a v1 brain never reads: the page says so
                                     "maps": {MAP_IDS[i]: base64.b64encode(np.ascontiguousarray(s.maps[i]).tobytes()).decode()
-                                             for i in shown},
+                                             for i in range(P.N_MAPS)},
                                     "scalars": _u8(np.tanh(np.abs(s.scalars))),
                                     "numbers": [round(float(x), 3) for x in s.scalars],
                                     "probs": [round(float(x), 4) for x in probs], "mask": mask.tolist(),
-                                    "action": a, "value": round(value, 3),
+                                    "action": a, "value": round(th.value, 3),
                                     "round": m.round_id, "time": round(m.time, 2), "bounds": m.bounds,
                                     "walls": args.walls,
                                     "me": me.pid if me else None,
+                                    "heading": [round(me.dx, 3), round(me.dy, 3)] if me else None,
                                     "cycles": [[c.pid, round(c.x, 1), round(c.y, 1), int(c.alive), c.color, c.slot]
                                                for c in m.cycles.values()],
                                     "result": m.last_result,
-                                }, separators=(",", ":")))
+                                }
+                                if th.own is not None:
+                                    frame["own"] = _u8(th.own[1:])  # me, then an enemy; nobody is the rest
+                                if th.aux is not None:
+                                    frame["aux"] = [round(float(x), 3) for x in th.aux]
+                                if th.attention:
+                                    frame["attn"] = attention_payload(th.attention, hub.cell, s.maps[2])
+                                hub.publish("frame", json.dumps(frame, separators=(",", ":")))
                                 hub.frame_shown()
                 # paused: hold the match here (the engine waits for its actions); a step lets it run
                 # until the next decision has been shown
