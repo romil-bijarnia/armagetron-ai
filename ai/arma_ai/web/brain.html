@@ -14,15 +14,16 @@
     --accent: #339cff;
   }
   [hidden] { display: none !important; }
-  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text); overflow: hidden;
+  html, body { margin: 0; background: var(--bg); color: var(--text);
     font: 16px/1.4 -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", sans-serif; }
-  canvas#scene { position: fixed; inset: 0; width: 100vw; height: 100vh; display: block; }
-  .top { position: fixed; left: 28px; top: 22px; pointer-events: none; }
+  #hero { position: relative; height: 100vh; overflow: hidden; }
+  canvas#scene { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
+  .top { position: absolute; left: 28px; top: 22px; pointer-events: none; }
   h1 { font-size: 21px; font-weight: 500; margin: 0; letter-spacing: 0.01em; }
   #status { color: var(--muted); font-size: 14px; margin-top: 4px; text-shadow: 0 0 6px #000; }
   h1 { text-shadow: 0 0 8px #000; }
   #status .flash { color: var(--accent); }
-  .toggles { position: fixed; right: 28px; top: 22px; display: flex; gap: 8px; align-items: center; }
+  .toggles { position: absolute; right: 28px; top: 22px; display: flex; gap: 8px; align-items: center; }
   .toggles button { background: rgba(0, 0, 0, 0.55); backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px);
     color: var(--muted); border: 1px solid var(--hair);
     border-radius: 999px; padding: 6px 15px; font: inherit; font-size: 14px; cursor: pointer;
@@ -30,13 +31,7 @@
   .toggles button.on { color: var(--text); border-color: rgba(255, 255, 255, 0.28); }
   .toggles button:disabled { opacity: 0.35; cursor: default; }
   .toggles .sep { width: 1px; height: 18px; background: rgba(255, 255, 255, 0.14); margin: 0 6px; }
-  #train { position: fixed; right: 28px; top: 78px; width: 236px; text-shadow: 0 0 6px #000; }
-  #trainHead { color: var(--muted); font-size: 14px; height: 31px; display: flex; align-items: center; }
-  .trow { display: flex; align-items: center; gap: 10px; height: 31px; font-size: 14px; color: var(--muted); }
-  .trow .k { flex: 1; white-space: nowrap; }
-  .trow .v { color: var(--text); font-variant-numeric: tabular-nums; text-align: right; white-space: nowrap; }
-  .trow canvas { width: 56px; height: 16px; flex: none; }
-  #moves { position: fixed; right: 28px; bottom: 26px; width: 250px; }
+  #moves { position: absolute; right: 28px; bottom: 26px; width: 250px; }
   .row { display: flex; align-items: center; gap: 12px; height: 31px; color: var(--muted); font-size: 15px; }
   .row .name { width: 72px; }
   .row .bar { flex: 1; height: 3px; background: var(--hair); border-radius: 2px; overflow: hidden; }
@@ -46,23 +41,37 @@
   .row.pick .bar i { opacity: 1; }
   .row.off { color: #3c3c3c; }
   #value { color: var(--muted); font-size: 14px; margin-top: 8px; font-variant-numeric: tabular-nums; }
-  #arenaBox { position: fixed; left: 28px; bottom: 26px; }
+  #arenaBox { position: absolute; left: 28px; bottom: 26px; }
   #arena { width: 210px; height: 210px; display: block; }
   #result { color: var(--muted); font-size: 13px; margin-top: 8px; height: 18px; }
   #legend { color: var(--faint); font-size: 12px; margin-top: 2px; }
   #legend i { display: inline-block; width: 7px; height: 7px; border-radius: 50%; margin: 0 5px 1px 0; }
   #legend span { margin-right: 12px; }
-  .label { position: fixed; transform: translate(-50%, 0); color: var(--faint); font-size: 12px;
+  #labels { position: absolute; inset: 0; pointer-events: none; }
+  .label { position: absolute; transform: translate(-50%, 0); color: var(--faint); font-size: 12px;
     white-space: nowrap; pointer-events: none; text-shadow: 0 0 6px #000, 0 0 2px #000; }
   .label.left { transform: translate(0, -50%); }
   #tip { position: fixed; display: none; pointer-events: none; background: rgba(0, 0, 0, 0.82);
     border: 1px solid rgba(255, 255, 255, 0.14); border-radius: 8px; padding: 6px 10px; font-size: 13px;
     line-height: 1.35; white-space: nowrap; font-variant-numeric: tabular-nums; }
   #tip .d { color: var(--muted); }
-  #keys { position: fixed; left: 50%; bottom: 26px; transform: translateX(-50%); color: var(--faint);
+  #keys { position: absolute; left: 50%; bottom: 26px; transform: translateX(-50%); color: var(--faint);
     font-size: 12px; pointer-events: none; white-space: nowrap; }
-  #wait { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center;
+  #wait { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
     color: var(--muted); font-size: 15px; pointer-events: none; }
+  /* the numbers: one roomy row per number, its history drawn large */
+  #stats { padding: 60px 28px 110px; max-width: 1240px; }
+  #statsHead { display: flex; align-items: baseline; gap: 22px; }
+  #stats h2 { font-size: 24px; font-weight: 500; margin: 0; }
+  #statsSub { color: var(--muted); font-size: 15px; }
+  #statsUp { color: var(--muted); font-size: 15px; text-decoration: none; margin-left: auto; }
+  #statsUp:hover { color: var(--text); }
+  #stats h3 { font-size: 15px; font-weight: 500; color: var(--muted); margin: 54px 0 8px; }
+  .srow { display: grid; grid-template-columns: 260px 180px 1fr; align-items: center; gap: 24px; height: 94px;
+    border-top: 1px solid var(--hair); }
+  .srow .k { font-size: 17px; color: var(--muted); }
+  .srow .v { font-size: 30px; font-weight: 400; color: var(--text); font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .srow canvas { width: 100%; height: 62px; display: block; }
 </style>
 <script type="importmap">
 { "imports": {
@@ -72,6 +81,7 @@
 </script>
 </head>
 <body>
+<div id="hero">
 <canvas id="scene"></canvas>
 <div class="top">
   <h1>Brain</h1>
@@ -82,13 +92,12 @@
   <button id="bStep" disabled>Step</button>
   <button id="bSpeed">1×</button>
   <span class="sep"></span>
-  <button id="tRotate" class="on">Rotate</button>
-  <button id="tLines" class="on">Lines</button>
   <button id="tGlow" class="on">Glow</button>
   <button id="tFlat">Flat</button>
-  <button id="tStats" class="on">Stats</button>
+  <button id="tHD">HD</button>
+  <span class="sep"></span>
+  <button id="tStats" disabled>Stats</button>
 </div>
-<div id="train" hidden><div id="trainHead"></div><div id="trainRows"></div></div>
 <div id="arenaBox">
   <canvas id="arena"></canvas>
   <div id="result"></div>
@@ -96,13 +105,22 @@
 </div>
 <div id="moves"></div>
 <div id="labels"></div>
-<div id="tip"></div>
-<div id="keys">space pause · → step · [ ] speed · - = brightness · drag to turn · hover a neuron</div>
+<div id="keys">space pause · → step · [ ] speed · - = brightness · drag to turn · pinch to zoom · double-click to reset the view · hover a neuron · scroll down for the numbers</div>
 <div id="wait">waiting for the brain</div>
+</div>
+<div id="tip"></div>
+<section id="stats" hidden>
+  <div id="statsHead"><h2 id="statsTitle">Training</h2><div id="statsSub"></div><a id="statsUp" href="#">back to the brain ↑</a></div>
+  <h3 id="strengthHead">Strength</h3><div id="strengthRows"></div>
+  <h3 id="learnHead">Learning</h3><div id="learnRows"></div>
+</section>
 
 <script type="module">
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { LineSegments2 } from 'three/addons/lines/LineSegments2.js';
+import { LineSegmentsGeometry } from 'three/addons/lines/LineSegmentsGeometry.js';
+import { LineMaterial } from 'three/addons/lines/LineMaterial.js';
 import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
 import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
 import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
@@ -191,8 +209,20 @@ function layoutLayer(L, rand) {
 
 // ------------------------------------------------------------------ scene
 const canvas = document.getElementById('scene');
-const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, powerPreference: 'high-performance' });
-const DPR = Math.min(window.devicePixelRatio, 2);
+const hero = document.getElementById('hero');
+const renderer = new THREE.WebGLRenderer({ canvas, antialias: false, powerPreference: 'high-performance' });
+// HD: the picture is drawn above the screen's own resolution and shrunk by the browser (supersampling),
+// so lines and dots come out crisp. Off, or on a huge screen, it draws at the screen's resolution.
+const DEVICE = Math.min(window.devicePixelRatio || 1, 3);
+const hdParam = new URLSearchParams(location.search).get('hd');   // ?hd=0 or ?hd=1 overrides the saved choice
+const hd = hdParam != null ? hdParam !== '0' : localStorage.getItem('brain.hd') !== '0';
+function supersample() {
+  if (!hd) return 1;
+  const px = window.innerWidth * window.innerHeight * DEVICE * DEVICE;
+  for (const s of [2, 1.5]) if (px * s * s <= 34e6) return s;
+  return 1;
+}
+const SS = supersample(), DPR = DEVICE * SS;   // DPR: the drawing buffer's pixels per CSS pixel
 renderer.setPixelRatio(DPR);
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x000000);
@@ -202,16 +232,30 @@ const controls = new OrbitControls(camera, canvas);
 controls.target.copy(CENTER);
 controls.enableDamping = true;
 controls.dampingFactor = 0.08;
-controls.autoRotate = true;
-controls.autoRotateSpeed = 0.35;
 controls.minDistance = 6;
 controls.maxDistance = 80;
+controls.enableZoom = false;          // the wheel scrolls the page; pinching zooms (below)
+function zoomBy(f) {
+  const d = camera.position.clone().sub(controls.target);
+  const len = THREE.MathUtils.clamp(d.length() * f, controls.minDistance, controls.maxDistance);
+  camera.position.copy(controls.target).add(d.setLength(len));
+}
+let gesturing = false, gestureScale = 1;
+canvas.addEventListener('wheel', e => {
+  if (!e.ctrlKey || gesturing) return;   // a trackpad pinch arrives as a wheel event with ctrl held
+  e.preventDefault();
+  zoomBy(Math.exp(e.deltaY * 0.01));
+}, { passive: false });
+canvas.addEventListener('gesturestart', e => { e.preventDefault(); gesturing = true; gestureScale = 1; });
+canvas.addEventListener('gesturechange', e => { e.preventDefault(); zoomBy(gestureScale / e.scale); gestureScale = e.scale; });
+canvas.addEventListener('gestureend', e => { e.preventDefault(); gesturing = false; });
+canvas.addEventListener('dblclick', () => { flat = false; tFlat.classList.remove('on'); flyTo(VIEW_ANGLED); });  // back to the usual view
 
 // highlights roll off instead of clipping to white; - and = adjust the exposure
 renderer.toneMapping = THREE.AgXToneMapping;
 renderer.toneMappingExposure = 1.0;
 // the post-processing target needs its own multisampling, or every line turns jagged
-const target4x = new THREE.WebGLRenderTarget(1, 1, { type: THREE.HalfFloatType, samples: 4 });
+const target4x = new THREE.WebGLRenderTarget(1, 1, { type: THREE.HalfFloatType, samples: SS > 1 ? 0 : 4 });
 const composer = new EffectComposer(renderer, target4x);
 composer.setPixelRatio(DPR);
 composer.addPass(new RenderPass(scene, camera));
@@ -247,8 +291,10 @@ const pointMaterial = new THREE.ShaderMaterial({
     }`,
   transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
 });
-const lineMaterial = new THREE.LineBasicMaterial({
+// lines with a real width (a plain GL line is one buffer pixel, which fades to nothing when supersampled)
+const lineMaterial = new LineMaterial({
   vertexColors: true, transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
+  linewidth: 0.5 * DEVICE * SS,   // half a screen pixel, as before: tens of thousands of lines add up
 });
 
 let T = null;          // everything derived from the current topology
@@ -320,22 +366,22 @@ function buildLines(topo) {
     src[k] = a; colOf[k] = g.toOutput ? b : a;  // a line takes its source's colour; the last ones, their move's
     wt[k] = g.w[j] / 255 * g.gain; dwt[k] = g.dw ? g.dw[j] / 255 : 0;
   }
-  const geo = new THREE.BufferGeometry();
-  geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
-  geo.setAttribute('color', new THREE.BufferAttribute(new Float32Array(n * 6), 3).setUsage(THREE.DynamicDrawUsage));
-  const visible = lines ? lines.visible : true;
+  const geo = new LineSegmentsGeometry();
+  geo.setPositions(pos);
+  geo.setColors(new Float32Array(n * 6));
+  const colors = geo.attributes.instanceColorStart.data;  // [r g b r g b] per segment, both ends share it
+  colors.setUsage(THREE.DynamicDrawUsage);
   if (lines) { scene.remove(lines); lines.geometry.dispose(); }
-  lines = new THREE.LineSegments(geo, lineMaterial);
+  lines = new LineSegments2(geo, lineMaterial);
   lines.frustumCulled = false;
   lines.renderOrder = 0;
-  lines.visible = visible;
   scene.add(lines);
-  T.lineSrc = src; T.lineCol = colOf; T.lineW = wt; T.lineDW = dwt; T.nLines = n;
+  T.lineSrc = src; T.lineCol = colOf; T.lineW = wt; T.lineDW = dwt; T.nLines = n; T.lineColors = colors;
 }
 
 function updateLines() {
-  if (!lines || !lines.visible) return;
-  const col = lines.geometry.attributes.color.array, n = T.nLines, tint = points.geometry.attributes.tint.array;
+  if (!lines) return;
+  const col = T.lineColors.array, n = T.nLines, tint = points.geometry.attributes.tint.array;
   for (let k = 0; k < n; k++) {
     const w = T.lineW[k], a = shown[T.lineSrc[k]], c = 3 * T.lineCol[k];
     const lum = Math.min(1, w * 0.004 + w * a * a * 0.24);
@@ -344,7 +390,7 @@ function updateLines() {
     const r = lum * tint[c] + fl, g = lum * tint[c + 1] + fl, b = lum * tint[c + 2] + fl;
     col[6 * k] = col[6 * k + 3] = r; col[6 * k + 1] = col[6 * k + 4] = g; col[6 * k + 2] = col[6 * k + 5] = b;
   }
-  lines.geometry.attributes.color.needsUpdate = true;
+  T.lineColors.needsUpdate = true;
 }
 
 // ------------------------------------------------------------------ labels
@@ -374,10 +420,11 @@ function buildLabels(layers) {
 const tmp = new THREE.Vector3();
 function placeLabels() {
   if (!T || !T.labels) return;
-  const w = window.innerWidth, h = window.innerHeight;
+  const w = hero.clientWidth, h = hero.clientHeight, hr = hero.getBoundingClientRect();
   // the panels come first, so no label is ever drawn across them
-  const placed = [...document.querySelectorAll('.top, .toggles, #train:not([hidden]), #arenaBox, #moves')]
-    .map(el => el.getBoundingClientRect()).map(b => ({ x0: b.left, x1: b.right, y0: b.top, y1: b.bottom }));
+  const placed = [...document.querySelectorAll('.top, .toggles, #arenaBox, #moves')]
+    .map(el => el.getBoundingClientRect())
+    .map(b => ({ x0: b.left - hr.left, x1: b.right - hr.left, y0: b.top - hr.top, y1: b.bottom - hr.top }));
   const items = T.labels.map(l => {
     tmp.copy(l.at).project(camera);
     return { l, x: (tmp.x * 0.5 + 0.5) * w, y: (-tmp.y * 0.5 + 0.5) * h, z: tmp.z };
@@ -390,7 +437,7 @@ function placeLabels() {
       ? { x0: it.x, x1: it.x + l.w, y0: it.y - 8, y1: it.y + 8 }
       : { x0: it.x - l.w / 2, x1: it.x + l.w / 2, y0: it.y, y1: it.y + 16 };
     // a label that would sit on top of another stays hidden; inputs and outputs have priority
-    if (placed.some(p => r.x0 < p.x1 + 8 && r.x1 > p.x0 - 8 && r.y0 < p.y1 + 3 && r.y1 > p.y0 - 3)) {
+    if (placed.some(p => r.x0 < p.x1 + 14 && r.x1 > p.x0 - 14 && r.y0 < p.y1 + 6 && r.y1 > p.y0 - 6)) {
       l.el.style.display = 'none';
       continue;
     }
@@ -439,7 +486,17 @@ function drawArena(f) {
     const t = trails[pid] || (trails[pid] = { color, pts: [], len: 0, alive: true, diedAt: null });
     const lastPt = t.pts[t.pts.length - 1];
     if (alive && (!lastPt || Math.hypot(lastPt[0] - x, lastPt[1] - y) > 0.4)) {
-      if (lastPt) t.len += Math.hypot(lastPt[0] - x, lastPt[1] - y);
+      // positions arrive once per decision, and cycles only move along the grid: when a sample is off
+      // both axes a turn happened in between, so the corner goes in first (where the old leg met the new)
+      if (lastPt && Math.abs(lastPt[0] - x) > 0.05 && Math.abs(lastPt[1] - y) > 0.05) {
+        const before = t.pts[t.pts.length - 2];
+        const wasHorizontal = before ? Math.abs(lastPt[0] - before[0]) >= Math.abs(lastPt[1] - before[1])
+                                     : Math.abs(x - lastPt[0]) >= Math.abs(y - lastPt[1]);
+        const corner = wasHorizontal ? [x, lastPt[1]] : [lastPt[0], y];
+        t.len += Math.hypot(lastPt[0] - corner[0], lastPt[1] - corner[1]);
+        t.pts.push(corner);
+        t.len += Math.hypot(corner[0] - x, corner[1] - y);
+      } else if (lastPt) t.len += Math.hypot(lastPt[0] - x, lastPt[1] - y);
       t.pts.push([x, y]);
       // the engine forgets the far end of a wall past WALLS_LENGTH; so does the map
       while (t.pts.length > 1 && t.len - Math.hypot(t.pts[1][0] - t.pts[0][0], t.pts[1][1] - t.pts[0][1]) >= walls) {
@@ -542,17 +599,25 @@ function showStatus() {
     : `${head} · update ${f.update}`;
 }
 
-// ------------------------------------------------------------------ training stats
-const trainBox = document.getElementById('train'), trainHead = document.getElementById('trainHead'),
-      trainRows = document.getElementById('trainRows');
+// ------------------------------------------------------------------ the numbers (the page below the picture)
+const statsEl = document.getElementById('stats'), statsTitle = document.getElementById('statsTitle'),
+      statsSub = document.getElementById('statsSub'), statsUp = document.getElementById('statsUp'),
+      strengthRows = document.getElementById('strengthRows'), learnRows = document.getElementById('learnRows'),
+      strengthHead = document.getElementById('strengthHead'), learnHead = document.getElementById('learnHead');
 const pct = v => v == null ? '–' : `${Math.round(v * 100)}%`;
 const num = (v, d) => v == null ? '–' : (+v).toFixed(d);
-const TRAIN_ROWS = [  // rows hide themselves when the running trainer does not report that number
-  { key: 'win_vs_ai_small', label: 'wins vs bot', range: [0, 1],
+// rows hide themselves when the running trainer does not report that number
+const STRENGTH = [  // does it win: the only numbers that matter in the end
+  { key: 'win_vs_hunter', label: 'wins against the space fighter', range: [0, 1], value: m => pct(m.win_vs_hunter) },
+  { key: 'win_exploiter', label: 'wins against the exploiter', range: [0, 1], value: m => pct(m.win_exploiter) },
+  { key: 'win_vs_past', label: 'wins against past selves', range: [0, 1], value: m => pct(m.win_vs_past) },
+  { key: 'win_vs_ai_small', label: "wins against the game's bot", range: [0, 1],
     value: m => m.win_vs_ai_std == null ? pct(m.win_vs_ai_small) : `${pct(m.win_vs_ai_small)} · ${pct(m.win_vs_ai_std)}` },
-  { key: 'win_vs_past', label: 'wins vs past selves', range: [0, 1], value: m => pct(m.win_vs_past) },
-  { key: 'win_exploiter', label: 'exploiter wins', range: [0, 1], value: m => pct(m.win_exploiter) },
-  { key: 'ep_len', label: 'round', value: m => m.ep_len == null ? '–' : `${(m.ep_len / 20).toFixed(1)} s` },
+];
+const LEARNING = [  // how the lessons are going
+  { key: 'ep_len', label: 'round length', value: m => `${(m.ep_len / 20).toFixed(1)} s` },
+  { key: 'sps', label: 'decisions per second', value: m => Math.round(m.sps).toLocaleString() },
+  { key: 'evals_s', label: 'network evaluations per second', value: m => Math.round(m.evals_s).toLocaleString() },
   { key: 'search_kl', label: 'search gain', value: m => num(m.search_kl, 3) },
   { key: 'ent', label: 'entropy', value: m => num(m.ent, 3) },
   { key: 'kl', label: 'KL', value: m => num(m.kl, 4) },
@@ -560,17 +625,17 @@ const TRAIN_ROWS = [  // rows hide themselves when the running trainer does not 
   { key: 'pg', label: 'policy loss', value: m => num(m.pg, 4) },
   { key: 'vf', label: 'value loss', value: m => num(m.vf, 4) },
   { key: 'aux', label: 'aux loss', value: m => num(m.aux, 4) },
+  { key: 'own', label: 'ownership loss', value: m => num(m.own, 4) },
   { key: 'value_explained', label: 'value explains', range: [0, 1], value: m => pct(m.value_explained) },
   { key: 'grad_norm', label: 'grad norm', value: m => num(m.grad_norm, 3) },
-  { key: 'lr', label: 'learning rate', value: m => m.lr == null ? '–' : (+m.lr).toExponential(1) },
-  { key: 'sps', label: 'speed',
-    value: m => m.sps == null ? '–' : `${Math.round(m.sps).toLocaleString()} ${m.evals_s == null ? 'steps' : 'decisions'}/s` },
+  { key: 'lr', label: 'learning rate', value: m => (+m.lr).toExponential(1) },
+  { key: 'replay', label: 'replay', value: m => num(m.replay, 2) },
 ];
-let metrics = null, statsOn = true;
+let metrics = null;
 
-function spark(cv, vals, range) {
-  const dpr = Math.min(window.devicePixelRatio, 2), W = 56, H = 16;
-  if (cv.width !== W * dpr) { cv.width = W * dpr; cv.height = H * dpr; }
+function chart(cv, vals, range) {
+  const dpr = Math.min(window.devicePixelRatio || 1, 2), W = cv.clientWidth || 600, H = 62, pad = 5;
+  if (cv.width !== Math.round(W * dpr)) { cv.width = Math.round(W * dpr); cv.height = H * dpr; }
   const c = cv.getContext('2d');
   c.clearRect(0, 0, cv.width, cv.height);
   const pts = vals.map((v, i) => [i, v]).filter(p => p[1] != null && isFinite(p[1]));
@@ -578,16 +643,19 @@ function spark(cv, vals, range) {
   let lo = range ? range[0] : Math.min(...pts.map(p => p[1])), hi = range ? range[1] : Math.max(...pts.map(p => p[1]));
   if (hi - lo < 1e-9) hi = lo + 1;
   const n = Math.max(vals.length - 1, 1);
-  const X = i => (dpr + i / n * (W - 2) * dpr), Y = v => (H - 1 - (v - lo) / (hi - lo) * (H - 2)) * dpr;
-  c.strokeStyle = 'rgba(255,255,255,0.4)';
+  const X = i => (pad + i / n * (W - 2 * pad)) * dpr, Y = v => (H - pad - (v - lo) / (hi - lo) * (H - 2 * pad)) * dpr;
+  c.strokeStyle = 'rgba(255,255,255,0.08)';   // the floor of the chart
   c.lineWidth = dpr;
+  c.beginPath(); c.moveTo(0, Y(lo)); c.lineTo(cv.width, Y(lo)); c.stroke();
+  c.strokeStyle = 'rgba(255,255,255,0.55)';
+  c.lineWidth = 1.5 * dpr;
   c.lineJoin = 'round';
   c.beginPath();
   pts.forEach(([i, v], j) => j ? c.lineTo(X(i), Y(v)) : c.moveTo(X(i), Y(v)));
   c.stroke();
   const [i, v] = pts[pts.length - 1];
   c.fillStyle = '#fff';
-  c.beginPath(); c.arc(X(i), Y(v), 1.6 * dpr, 0, Math.PI * 2); c.fill();
+  c.beginPath(); c.arc(X(i), Y(v), 2.6 * dpr, 0, Math.PI * 2); c.fill();
 }
 
 // training counts as running while updates keep arriving at the run's own pace
@@ -598,34 +666,40 @@ function isTraining(f) {
   }
   return !!f && f.trained_ago != null && f.trained_ago < 120;
 }
+function makeRows(box, defs) {
+  if (box.children.length) return;
+  box.innerHTML = defs.map(r =>
+    `<div class="srow" data-key="${r.key}"><span class="k">${r.label}</span><span class="v"></span><canvas></canvas></div>`).join('');
+}
 function onMetrics(m) {
   metrics = m;
-  if (!trainRows.children.length) {
-    trainRows.innerHTML = TRAIN_ROWS.map(r =>
-      `<div class="trow" data-key="${r.key}"><span class="k">${r.label}</span><span class="v"></span><canvas></canvas></div>`).join('');
-  }
+  makeRows(strengthRows, STRENGTH);
+  makeRows(learnRows, LEARNING);
+  statsEl.hidden = false;
+  tStats.disabled = false;
   showMetrics();
+  if (location.hash === '#stats' && !showMetrics.scrolled) { showMetrics.scrolled = true; statsEl.scrollIntoView(); }
 }
 function showMetrics() {
   if (!metrics) return;
   const { last, series } = metrics;
   const training = isTraining();
   const steps = last.steps >= 1e6 ? `${(last.steps / 1e6).toFixed(1)}M` : `${Math.round(last.steps / 1e3)}k`;
-  trainHead.textContent = `${training ? 'Training' : 'Last run'} · update ${last.update} · ${steps} ${last.evals_s == null ? 'steps' : 'decisions'}`;
-  TRAIN_ROWS.forEach((r, i) => {
-    const row = trainRows.children[i];
-    row.hidden = last[r.key] == null;
-    if (row.hidden) return;
-    row.querySelector('.v').textContent = r.value(last);
-    spark(row.querySelector('canvas'), series[r.key] || [], r.range);
-  });
-  setStatsVisible();
-}
-function setStatsVisible() {
-  const show = statsOn && !!metrics;
-  if (trainBox.hidden === !show) return;
-  trainBox.hidden = !show;
-  applyViewOffset();
+  const history = series.update ? series.update.length : 0;
+  statsTitle.textContent = training ? 'Training' : 'Last run';
+  statsSub.textContent = `update ${last.update} · ${steps} ${last.evals_s == null ? 'steps' : 'decisions'} · the last ${history} updates`;
+  for (const [box, head, defs] of [[strengthRows, strengthHead, STRENGTH], [learnRows, learnHead, LEARNING]]) {
+    let any = false;
+    defs.forEach((r, i) => {
+      const row = box.children[i];
+      row.hidden = last[r.key] == null;
+      if (row.hidden) return;
+      any = true;
+      row.querySelector('.v').textContent = r.value(last);
+      chart(row.querySelector('canvas'), series[r.key] || [], r.range);
+    });
+    head.hidden = !any;
+  }
 }
 
 function onState(s) {
@@ -654,7 +728,8 @@ const mouse = new THREE.Vector2(2, 2);
 let mouseMoved = false, mx = 0, my = 0, lastPick = 0;
 canvas.addEventListener('pointermove', e => {
   mx = e.clientX; my = e.clientY;
-  mouse.set(e.clientX / window.innerWidth * 2 - 1, -(e.clientY / window.innerHeight) * 2 + 1);
+  const r = canvas.getBoundingClientRect();
+  mouse.set((e.clientX - r.left) / r.width * 2 - 1, -((e.clientY - r.top) / r.height) * 2 + 1);
   mouseMoved = true;
 });
 canvas.addEventListener('pointerleave', () => { tip.style.display = 'none'; });
@@ -706,10 +781,13 @@ function pick(now) {
 // ------------------------------------------------------------------ controls
 const bPause = document.getElementById('bPause'), bStep = document.getElementById('bStep'),
       bSpeed = document.getElementById('bSpeed');
-const tRotate = document.getElementById('tRotate'), tLines = document.getElementById('tLines'),
-      tGlow = document.getElementById('tGlow'), tFlat = document.getElementById('tFlat'),
-      tStats = document.getElementById('tStats');
-tStats.onclick = () => { statsOn = !statsOn; tStats.classList.toggle('on', statsOn); setStatsVisible(); };
+const tGlow = document.getElementById('tGlow'), tFlat = document.getElementById('tFlat'),
+      tHD = document.getElementById('tHD'), tStats = document.getElementById('tStats');
+tStats.onclick = () => { if (!statsEl.hidden) statsEl.scrollIntoView({ behavior: 'smooth' }); };
+statsUp.onclick = e => { e.preventDefault(); window.scrollTo({ top: 0, behavior: 'smooth' }); };
+tHD.classList.toggle('on', hd && SS > 1);
+tHD.title = hd ? (SS > 1 ? `drawn at ${SS}× the screen's resolution` : "HD is on, but this screen is too large to supersample") : 'drawn at the screen\'s resolution';
+tHD.onclick = () => { localStorage.setItem('brain.hd', hd ? '0' : '1'); location.reload(); };
 let flat = false, fly = null;
 const post = body => fetch('/control', { method: 'POST', headers: { 'Content-Type': 'application/json' },
                                          body: JSON.stringify(body) }).catch(() => {});
@@ -739,29 +817,22 @@ document.querySelectorAll('.toggles button').forEach(b => b.addEventListener('cl
 function flyTo(offset) {
   fly = { from: camera.position.clone(), to: CENTER.clone().add(offset), t: 0 };
 }
-tRotate.onclick = () => { controls.autoRotate = !controls.autoRotate; tRotate.classList.toggle('on', controls.autoRotate); };
-tLines.onclick = () => { if (lines) lines.visible = !lines.visible; tLines.classList.toggle('on', !lines || lines.visible); };
 tGlow.onclick = () => { bloom.enabled = !bloom.enabled; tGlow.classList.toggle('on', bloom.enabled); };
 tFlat.onclick = () => {
   flat = !flat;
   tFlat.classList.toggle('on', flat);
-  controls.autoRotate = !flat && tRotate.classList.contains('on');
   flyTo(flat ? VIEW_FLAT : VIEW_ANGLED);
 };
 
-function applyViewOffset() {
-  // with the stats panel up, the picture slides left to make room for it
-  const w = window.innerWidth, h = window.innerHeight, S = trainBox.hidden ? 0 : 300;
-  camera.aspect = (w + S) / h;
-  camera.zoom = trainBox.hidden ? 1 : 0.9;   // and steps back a little
-  camera.setViewOffset(w + S, h, S, 0, w, h);
-  camera.updateProjectionMatrix();
-}
 function resize() {
-  const w = window.innerWidth, h = window.innerHeight;
+  const w = hero.clientWidth, h = hero.clientHeight;
   renderer.setSize(w, h, false);
   composer.setSize(w, h);
-  applyViewOffset();
+  bloom.setSize(w * DEVICE, h * DEVICE);   // the glow is a blur: the screen's own resolution is plenty for it
+  lineMaterial.resolution.set(w * DPR, h * DPR);
+  camera.aspect = w / h;
+  camera.updateProjectionMatrix();
+  showMetrics();                           // the charts follow the window's width
   pointMaterial.uniforms.uScale.value = renderer.domElement.height / (2 * Math.tan(THREE.MathUtils.degToRad(camera.fov / 2)));
   pointMaterial.uniforms.uMin.value = 1.3 * DPR;
   pointMaterial.uniforms.uMax.value = 6.5 * DPR;

@@ -461,7 +461,7 @@ class Hub:
                 pass
 
             def do_GET(self):
-                if self.path in ("/", "/index.html"):
+                if self.path.split("?")[0] in ("/", "/index.html"):   # ?hd=0 and the like are the page's business
                     body = PAGE.read_bytes()
                     self.send_response(200)
                     self.send_header("Content-Type", "text/html; charset=utf-8")
@@ -529,10 +529,10 @@ def serve(hub: Hub, port: int) -> tuple[ThreadingHTTPServer, int]:
 class Metrics:
     """The trainer's metrics.jsonl (one row per update), re-read whenever it grows."""
 
-    KEEP = 150  # updates of history the page gets for its sparklines
+    KEEP = 600  # updates of history the page gets for its charts
     KEYS = ("update", "steps", "sps", "lr", "pg", "vf", "ent", "kl", "clipfrac", "grad_norm",
             "value_explained", "ep_len", "policy_lag", "collect_s", "learn_s", "time",
-            "aux", "search_kl", "evals_s", "replay", "games")
+            "aux", "search_kl", "evals_s", "replay", "games", "own")
 
     def __init__(self, path: Path):
         self.path = path
