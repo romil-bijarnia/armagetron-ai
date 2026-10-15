@@ -741,9 +741,13 @@ void se_SoundMenu(){
 
 namespace
 {
-static boost::recursive_mutex se_soundMutex;
+static boost::recursive_mutex & se_SoundMutex()
+{
+    static boost::recursive_mutex se_soundMutex;
+    return se_soundMutex;
+}
 }
 
-eSoundLocker::eSoundLocker() : lock_(se_soundMutex)
+eSoundLocker::eSoundLocker() : lock_(se_SoundMutex())
 {
 }
