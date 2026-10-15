@@ -315,6 +315,8 @@ void eLegacyWavData::Load()
 void eLegacyWavData::Unload(){
 #ifndef DEDICATED
     loadError = false;
+    if(samples == 0 && data.size() == 0)
+        return;
 
     eSoundLocker locker;
 
