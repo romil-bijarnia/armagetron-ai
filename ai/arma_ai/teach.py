@@ -78,6 +78,7 @@ class Config:
     own_coef: float = 0.5  # weight of the ownership map loss (who holds each cell two seconds on)
     hunter_prob: float = 0.20  # rounds against the simulator's space fighter (a minimax over territory)
     hunter_depth: int = 2  # how many plies it looks ahead
+    net: int = 3  # network generation for a new run (a resumed run keeps the one in its checkpoint)
     max_grad_norm: float = 1.0
     bf16: bool = True  # train in bfloat16 (about 20% faster on Apple GPUs)
     replay_ratio: float = 1.5  # training samples per generated one (the rest of the GPU goes to self-play)
@@ -400,8 +401,11 @@ class Learner:
         torch.manual_seed(cfg.seed)
         self.rng = np.random.default_rng(cfg.seed)
         self.device = torch.device(cfg.device)
-        self.main = PolicyNet().to(self.device)
-        self.exploiter = PolicyNet().to(self.device)
+        saved = next((f for f in (self.run_dir / "latest.pt", self.run_dir / "previous.pt") if f.exists()), None)
+        ck = torch.load(saved, map_location=self.device, weights_only=True) if saved else None
+        version = net_version(ck["model"]) if ck else cfg.net
+        self.main = make_net(version).to(self.device)
+        self.exploiter = make_net(version).to(self.device)
         self.opt = self._optimizer(self.main)
         self.xopt = self._optimizer(self.exploiter)
         self.update = 0
@@ -416,11 +420,9 @@ class Learner:
         self.games = 0
         self.bootstrapping = bool(cfg.bootstrap) and (PROJECT / cfg.bootstrap).exists()
 
-        saved = next((f for f in (self.run_dir / "latest.pt", self.run_dir / "previous.pt") if f.exists()), None)
         if saved and not cfg.resume:
             raise SystemExit(f"{cfg.run} already holds a trained AI; pick another --run for a fresh start")
         if saved:
-            ck = torch.load(saved, map_location=self.device, weights_only=True)
             if ck.get("trainer") != "teach":
                 raise SystemExit(f"{saved} was written by another trainer; use a new --run folder")
             self.main.load_state_dict(ck["model"])
@@ -441,10 +443,11 @@ class Learner:
             # once over, the warm start stays over (even if --bootstrap-trained is raised later)
             self.bootstrapping = (self.bootstrapping and ck.get("bootstrapping", True)
                                   and self.trained[0] < cfg.bootstrap_trained)
-            print(f"resumed {self.run_dir.name} at update {self.update} ({self.decisions:,} decisions)", flush=True)
+            print(f"resumed {self.run_dir.name} (v{version} network) at update {self.update} ({self.decisions:,} decisions)", flush=True)
         else:
             self.exploiter.load_state_dict(self.main.state_dict())
-            print(f"new run in {self.run_dir.name}" + (f", guided by {cfg.bootstrap} until the network has learned "
+            print(f"new run in {self.run_dir.name} (v{version} network, {sum(p.numel() for p in self.main.parameters()) / 1e6:.1f} M parameters)"
+                  + (f", guided by {cfg.bootstrap} until the network has learned "
                                                          f"from {cfg.bootstrap_trained:,} samples" if self.bootstrapping else ""),
                   flush=True)
         # a sample needs value_steps more decisions of its round before it can be learned from; the

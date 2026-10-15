@@ -11,17 +11,17 @@ import torch
 
 from arma_ai import protocol as P
 from arma_ai.export import export
-from arma_ai.model import PolicyNet, PolicyNetV1
+from arma_ai.model import PolicyNet, PolicyNetV1, PolicyNetV3
 
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parent.parent
 
 
 @pytest.mark.skipif(shutil.which("clang++") is None and shutil.which("g++") is None, reason="no C++ compiler")
-@pytest.mark.parametrize("version", [1, 2])
+@pytest.mark.parametrize("version", [1, 2, 3])
 def test_cpp_matches_pytorch(tmp_path, version):
     torch.manual_seed(1)
-    net = (PolicyNet() if version == 2 else PolicyNetV1()).eval()
+    net = {1: PolicyNetV1, 2: PolicyNet, 3: PolicyNetV3}[version]().eval()
     n_maps, stack = P.N_MAPS, net.stack_prev  # the game always hands over all four maps
     ck = tmp_path / "ck.pt"
     torch.save({"model": net.state_dict(), "update": 7}, ck)

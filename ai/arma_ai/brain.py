@@ -122,16 +122,23 @@ def trace(net: PolicyNet, maps: np.ndarray, scalars: np.ndarray, mask: np.ndarra
     parts = []
     if net.version == 1:
         parts = [plain(group, getattr(net, attr), getattr(net, unpack), m) for group, attr, unpack, m in V1_TOWERS]
-    for t, group in enumerate(TOWER_GROUPS if net.version == 2 else ()):
+    for t, group in enumerate(TOWER_GROUPS if net.version >= 2 else ()):
         tower = net.towers[t]
         x = torch.relu(tower.stem(net.tower_input(x_in, t)))
         out.append((f"{group}_c1", x[0]))
         n = 1
         for b in tower.res:
-            y = torch.relu(b.c0(x))
-            x = torch.relu(x + b.c1(y))
+            x = b(x)  # a plain residual block, or v3's pooling block
             n += 1
             out.append((f"{group}_c{n}", x[0]))
+        if len(getattr(tower, "attn", ())):
+            # v3: the cells talk to each other; each attention layer is its own slab
+            B, C, H, W = x.shape
+            cells = x.flatten(2).transpose(1, 2) + tower.pos
+            for a_i, layer in enumerate(tower.attn):
+                cells = layer(cells)
+                x = cells.transpose(1, 2).reshape(B, C, H, W)
+                out.append((f"{group}_a{a_i + 1}", x[0]))
         x = torch.relu(tower.down0(x))
         out.append((f"{group}_c{n + 1}", x[0]))
         x = torch.relu(tower.down1(x))
@@ -170,10 +177,14 @@ def layer_table(net: PolicyNet) -> list[dict]:
                 col = seen16[group]
             else:
                 col = 5 if shape[1] == P.GRID // 8 else 6
-            convs[group] = convs.get(group, 0) + 1
-            label = f"{shape[0]} filters · {shape[1]}×{shape[2]}"
-            human = f"{word} · conv {convs[group]}"
             kind = "conv"
+            if "_a" in name:  # v3 attention output: the same cells, after looking at each other
+                label = f"{shape[0]} channels · {shape[1]}×{shape[2]}"
+                human = f"{word} · attention {name.split('_a')[1]}"
+            else:
+                convs[group] = convs.get(group, 0) + 1
+                label = f"{shape[0]} filters · {shape[1]}×{shape[2]}"
+                human = f"{word} · conv {convs[group]}"
         else:
             col = {"scalars_h1": 3, "scalars_h2": 7, "trunk1": 8, "trunk2": 9}.get(name, 7)
             label = f"{shape[0]} neurons"
@@ -260,6 +271,22 @@ def edges(net: PolicyNet, layers: list[dict], rng: np.random.Generator) -> list[
                 pidx.append(((co * ci_n + ci) * k + ky) * k + kx)
         add(src, dst, si, di, param, pidx)
 
+    def mix(src, dst, W, param):
+        """Lines for a per-cell channel mixing W [out][in]: every sampled unit of DST gets lines
+        from the two input channels it weighs most, at its own cell."""
+        A = np.abs(W.detach().numpy())
+        co_n, ci_n = A.shape
+        _, ho, wo = by_id[dst]["shape"]
+        units = rng.choice(co_n * ho * wo, size=min(CONV_LINES, co_n * ho * wo), replace=False)
+        si, di, pidx = [], [], []
+        for u in units:
+            co, cell = divmod(int(u), ho * wo)
+            for ci in _top(A[co], 2):
+                si.append(int(ci) * ho * wo + cell)
+                di.append(int(u))
+                pidx.append(co * ci_n + int(ci))
+        add(src, dst, si, di, param, pidx)
+
     def dense(srcs, dst, W, param, per_unit, units=DENSE_LINES):
         """SRCS: list of (layer id, size) the input vector is made of, in order. Lines go from the
         PER_UNIT strongest inputs of up to UNITS neurons of DST."""
@@ -289,26 +316,27 @@ def edges(net: PolicyNet, layers: list[dict], rng: np.random.Generator) -> list[
         last = by_id[names[-1]]["shape"]
         dense([(names[-1], int(np.prod(last)))], f"{group}_fc", tower.fc.weight, f"{attr}.fc.weight", 2)
         fused_srcs.append((f"{group}_fc", tower.fc.out_features))
-    for m, group in enumerate(TOWER_GROUPS if net.version == 2 else ()):
+    for m, group in enumerate(TOWER_GROUPS if net.version >= 2 else ()):
         tower = net.towers[m]
-        seq = [(f"towers.{m}.stem.weight", tower.stem, True)]
-        for b_i, b in enumerate(tower.res):
-            seq += [(f"towers.{m}.res.{b_i}.c0.weight", b.c0, False), (f"towers.{m}.res.{b_i}.c1.weight", b.c1, False)]
-        seq += [(f"towers.{m}.down0.weight", tower.down0, False), (f"towers.{m}.down1.weight", tower.down1, False)]
-        # the page shows one slab per ReLU output: stem, each residual block (after its 2nd conv), two downs
-        names = [f"{group}_c1"] + [f"{group}_c{2 + i}" for i in range(len(tower.res))] + \
-                [f"{group}_c{2 + len(tower.res)}", f"{group}_c{3 + len(tower.res)}"]
-        # stem: from the tower's input maps
-        stem(TOWER_MAPS[m], names[0], tower.stem, seq[0][0])
-        prev_name = names[0]
+        # the page shows one slab per stage: stem, each residual block (after its 2nd conv),
+        # each attention layer (v3), two downs
+        n = 1
+        stem(TOWER_MAPS[m], f"{group}_c1", tower.stem, f"towers.{m}.stem.weight")
+        prev_name = f"{group}_c1"
         for b_i, b in enumerate(tower.res):
             # a residual block is drawn as one slab; its lines come from the block's second conv
-            conv(prev_name, names[1 + b_i], b.c1, f"towers.{m}.res.{b_i}.c1.weight")
-            prev_name = names[1 + b_i]
-        conv(prev_name, names[-2], tower.down0, f"towers.{m}.down0.weight")
-        conv(names[-2], names[-1], tower.down1, f"towers.{m}.down1.weight")
-        last = by_id[names[-1]]["shape"]
-        dense([(names[-1], int(np.prod(last)))], f"{group}_fc", tower.fc.weight, f"towers.{m}.fc.weight", 2)
+            n += 1
+            conv(prev_name, f"{group}_c{n}", b.c1, f"towers.{m}.res.{b_i}.c1.weight")
+            prev_name = f"{group}_c{n}"
+        for a_i, a in enumerate(getattr(tower, "attn", ())):
+            # attention mixes every cell with every other, which no fixed line can show; the lines
+            # drawn are its output projection, how what a cell gathered is written into its channels
+            mix(prev_name, f"{group}_a{a_i + 1}", a.proj.weight, f"towers.{m}.attn.{a_i}.proj.weight")
+            prev_name = f"{group}_a{a_i + 1}"
+        conv(prev_name, f"{group}_c{n + 1}", tower.down0, f"towers.{m}.down0.weight")
+        conv(f"{group}_c{n + 1}", f"{group}_c{n + 2}", tower.down1, f"towers.{m}.down1.weight")
+        last = by_id[f"{group}_c{n + 2}"]["shape"]
+        dense([(f"{group}_c{n + 2}", int(np.prod(last)))], f"{group}_fc", tower.fc.weight, f"towers.{m}.fc.weight", 2)
         fused_srcs.append((f"{group}_fc", tower.fc.out_features))
     dense([("scalars_in", P.N_SCALARS)], "scalars_h1", net.scalars[0].weight, "scalars.0.weight", 2)
     dense([("scalars_h1", 256)], "scalars_h2", net.scalars[2].weight, "scalars.2.weight", 2)
