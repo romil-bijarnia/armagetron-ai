@@ -102,6 +102,31 @@ def test_status_needs_a_live_matching_process(live_teacher, monkeypatch, change,
     assert status.running == (label in ("STARTING", "SAVING"))
 
 
+def test_process_listing_is_cached_and_a_failed_listing_keeps_the_last_snapshot(monkeypatch):
+    listings = [{321: "python arma-teach --run runs/blacklight"}, None, {}]
+    calls = []
+
+    def list_processes():
+        calls.append(1)
+        return listings.pop(0)
+
+    monkeypatch.setattr(dash, "_list_processes", list_processes)
+    monkeypatch.setattr(dash, "_process_cache", {"time": 0.0, "processes": None})
+    first = dash._processes()
+    assert first == {321: "python arma-teach --run runs/blacklight"} and len(calls) == 1
+    assert dash._processes() == first and len(calls) == 1  # within the cache window: no second ps
+    dash._process_cache["time"] = 0.0
+    assert dash._processes() == first and len(calls) == 2  # ps failed: the trainer is not declared gone
+    dash._process_cache["time"] = 0.0
+    assert dash._processes() == {} and len(calls) == 3  # a real empty listing is believed
+
+
+def test_a_failed_listing_with_no_snapshot_reports_nothing_running(monkeypatch):
+    monkeypatch.setattr(dash, "_list_processes", lambda: None)
+    monkeypatch.setattr(dash, "_process_cache", {"time": 0.0, "processes": None})
+    assert dash._processes() == {}
+
+
 def test_other_runs_and_reused_supervisor_pid_cannot_look_like_training(tmp_path, monkeypatch):
     run = tmp_path / "idle"
     run.mkdir()

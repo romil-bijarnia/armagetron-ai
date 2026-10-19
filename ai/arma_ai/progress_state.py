@@ -58,7 +58,7 @@ def process_started(pid: int | None) -> float | None:
         return None
     try:
         result = subprocess.run(["ps", "-p", str(pid), "-o", "lstart="], capture_output=True,
-                                text=True, timeout=2, env={**os.environ, "LC_ALL": "C"})
+                                text=True, timeout=5, env={**os.environ, "LC_ALL": "C"}, start_new_session=True)
         return time.mktime(time.strptime(result.stdout.strip(), "%a %b %d %H:%M:%S %Y"))
     except (OSError, ValueError, subprocess.TimeoutExpired):
         return None

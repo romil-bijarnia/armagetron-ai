@@ -508,11 +508,19 @@ def run(run_dir: Path, console: Console, *, once: bool = False) -> None:
     if once or not console.is_terminal:
         console.print(frame())
         return
+    def following() -> bool:
+        return status.running or status.label in ("STARTING", "STALE")
+
+    if not following():
+        console.print(frame())
+        return
     try:
         with Live(frame(), console=console, screen=False, auto_refresh=False, vertical_overflow="crop") as live:
-            while status.running or status.label in ("STARTING", "STALE"):
+            misses = 0  # the view closes once the trainer has been gone for several refreshes, not one
+            while misses < 4:
                 time.sleep(.5)
                 refresh()
                 live.update(frame(), refresh=True)
+                misses = 0 if following() else misses + 1
     except KeyboardInterrupt:
         pass

@@ -218,19 +218,40 @@ def read_progress(path: Path) -> dict:
         return {}
 
 
-def _processes() -> dict[int, str]:
-    """One process snapshot per frame; zombie/reused PID files are not training evidence."""
+PROCESS_CACHE_SECONDS = 3
+_process_cache: dict = {"time": 0.0, "processes": None}
+
+
+def _list_processes() -> dict[int, str] | None:
+    """One process snapshot, or None when the listing itself failed. Zombie/reused PID files are
+    not training evidence. ps runs in its own session so the terminal's title does not flash its
+    name every time the view refreshes."""
     try:
         result = subprocess.run(["ps", "-axww", "-o", "pid=,stat=,command="], capture_output=True,
-                                text=True, timeout=2, check=False)
+                                text=True, timeout=5, check=False, start_new_session=True)
     except (OSError, subprocess.TimeoutExpired):
-        return {}
+        return None
     found = {}
     for line in result.stdout.splitlines():
         parts = line.strip().split(None, 2)
         if len(parts) == 3 and parts[0].isdigit() and not parts[1].startswith("Z"):
             found[int(parts[0])] = parts[2]
     return found
+
+
+def _processes() -> dict[int, str]:
+    """The process list, refreshed at most every few seconds. A listing that fails (full-mode
+    training saturates every core, and ps can be slow once) keeps the previous snapshot rather
+    than reporting a live trainer as stopped."""
+    now = time.monotonic()
+    cached = _process_cache["processes"]
+    if cached is not None and now - _process_cache["time"] < PROCESS_CACHE_SECONDS:
+        return cached
+    listed = _list_processes()
+    if listed is not None:
+        _process_cache.update(time=now, processes=listed)
+        return listed
+    return cached if cached is not None else {}
 
 
 def _process_role(command: str, run_dir: Path, *, heartbeat_pid: bool = False) -> str | None:
