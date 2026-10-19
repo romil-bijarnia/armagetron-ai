@@ -20,8 +20,9 @@ How it works:
 * V4 guides its own search from the start, exploring all six steering/brake actions.
 
 Two processes share the GPU: the actor (self-play) and the learner (this one), connected by
-shared-memory replay rings. latest.pt is the single persistent checkpoint. Actor, exploiter and
-target weight files are temporary exchanges for the running workers; metrics.jsonl records reports.
+shared-memory replay rings. latest.pt is the one checkpoint that is resumed; snapshots/ keeps a
+copy of it once per --snapshot-every updates to fall back on. Actor, exploiter and target weight
+files are temporary exchanges for the running workers; metrics.jsonl records reports.
 """
 
 from __future__ import annotations
@@ -34,6 +35,7 @@ import multiprocessing as mp
 import os
 import queue
 import random
+import shutil
 import signal
 import time
 from collections import defaultdict, deque
@@ -92,6 +94,7 @@ class Config:
     warmup: int = 20_000  # decisions in the ring before learning starts
     publish_seconds: float = 20  # the actor (and the brain page) get new weights this often
     save_seconds: float = 300  # full checkpoint (both networks and optimisers)
+    snapshot_every: int = 1000  # also keep a copy of the checkpoint in snapshots/ once per this many updates (0: never)
     log_every: int = 25
     max_updates: int = 0  # total main-network update cap (0 runs until stopped), including resumed updates
     exploiter_prob: float = 0.20  # rounds played by the exploiter
@@ -420,6 +423,8 @@ class Learner:
             raise ValueError("sequence_burn_in must be nonnegative; sequence_unroll and batch must be at least two")
         if cfg.max_updates < 0:
             raise ValueError("max_updates must be zero (unlimited) or a positive total update cap")
+        if cfg.snapshot_every < 0:
+            raise ValueError("snapshot_every must be zero (never) or a positive update interval")
         if not math.isfinite(cfg.combat_prob) or not 0 <= cfg.combat_prob <= 1:
             raise ValueError("combat_prob must be between zero and one")
         # Ring.window reserves the oldest 4096 slots while its writer is active. A smaller
@@ -514,6 +519,7 @@ class Learner:
             self.exploiter.load_state_dict(self.main.state_dict())
             print(f"new run in {self.run_dir.name} (V4, {sum(p.numel() for p in self.main.parameters()) / 1e6:.1f} M parameters)",
                   flush=True)
+        self.snapshot_mark = self.update // cfg.snapshot_every if cfg.snapshot_every > 0 else 0
         # a sample needs value_steps more decisions of its round before it can be learned from; the
         # ring must hold it that long even when every round has four learning players
         wrap = cfg.ring // (cfg.games * 4)
@@ -604,6 +610,16 @@ class Learner:
         torch.save(ck, tmp)
         tmp.replace(latest)
         self.saved_update, self.saved_at = self.update, latest.stat().st_mtime
+        # A copy to fall back on if a stretch of training turns out badly: the first save past
+        # each multiple of snapshot_every updates. latest.pt stays the one resumed checkpoint.
+        every = self.cfg.snapshot_every
+        if every > 0 and self.update // every > self.snapshot_mark:
+            self.snapshot_mark = self.update // every
+            folder = self.run_dir / "snapshots"
+            folder.mkdir(exist_ok=True)
+            snapshot = folder / f"update-{self.update:08d}.pt"
+            shutil.copyfile(latest, snapshot.with_name(snapshot.name + ".tmp"))
+            snapshot.with_name(snapshot.name + ".tmp").replace(snapshot)
 
     def cleanup_runtime_models(self) -> None:
         """Worker exchanges are temporary; latest.pt is the saved training state."""

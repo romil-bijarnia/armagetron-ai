@@ -1,5 +1,52 @@
 # Blacklight architecture review
 
+## Decision before the long training run, 19 October 2026
+
+The network is sound and nothing in it blocks learning. The one defect that did
+block learning was in the teacher, not the network: the search's completed Q
+values were never rescaled, so the training target stayed within a KL of about
+0.004 of the policy for the whole run and self-play taught it almost nothing.
+That is fixed in `sim/selfplay.cpp` (see [V4.md](V4.md#training)); from the same
+checkpoint and seed, 100 updates measured a gain of 0.038 before and 0.138 after.
+
+The network was reviewed branch by branch with these conclusions. They are the
+basis for training the current architecture as it is rather than changing it
+first.
+
+- **Cost.** A decision costs about 1.5 GFLOP per player; 68% of that is the arena
+  tower, 16% each local tower. Self-play speed, not capacity, is the project's
+  limit (8.2 M parameters have seen 1.27 M decisions). Shrinking the arena tower
+  would mean new weights or distillation, so it waits for a measured comparison.
+- **Previous frame.** The second frame of each map is the last decision's
+  observation, drawn in the heading of that time. Right after a turn it is rotated
+  90° against the current frame and the frame difference carries no motion for
+  that one decision. The time-since-turn scalar marks exactly those decisions, so
+  the network can learn to discount the stale frame; a re-rendering fix would
+  change the observation contract in the simulator, the engine, playback and the
+  recordings at once, and is not worth that risk before the run.
+- **Territory distance bits.** The BFS distance enters as six bit-planes. The stem
+  convolution is linear in its inputs, so one filter with weights 1, 2, 4, 8, 16,
+  32 recovers the distance exactly; no change is needed.
+- **Opponent attention.** The three enemy tokens are pooled with learned softmax
+  weights. A flat query gives a plain average of all enemies, so attending to one
+  enemy is a choice the network can make, not a limit of the architecture; the
+  maps show every enemy regardless.
+- **Arena conditioning.** The arena summary may scale the local features by at
+  most ±10%. The learned conditioning weights are small (row norms ≤ 0.41), so the
+  cap is unlikely to bind; it also reaches the trunk directly. Left alone.
+- **Memory.** The 256-unit GRU's output projection is exactly zero in the current
+  checkpoint, so it changes nothing yet; its cost is live (the search evaluates
+  every tick of a macro edge, and a batch is 16 stretches of 32 consecutive
+  decisions rather than 512 scattered ones). Its only evidence is one seed and six
+  games. It is kept because removing it is a migration across the network, native
+  inference, search and playback, and training will now teach it; whether it
+  helps is a question for a later paired comparison.
+
+All legal moves are root candidates in every search, so braking, which imitation
+drove to a probability near zero, is revisited wherever the look-ahead finds it
+best; its bonus ((50 + max visits) × 0.1, at most 7.4 with 24 simulations) is of
+the same order as the logit deficit, so recovery is expected to be gradual.
+
 ## Integrated memory upgrade, 19 October 2026
 
 The 256-unit memory integration has been completed across the network, native

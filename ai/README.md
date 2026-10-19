@@ -70,8 +70,10 @@ optimizer hyperparameters, including overrides.
 The actor plays concurrent simulator rounds, searches on selected decisions and
 trains policy, value and auxiliary targets from replay. It mixes self-play,
 a live exploiter and the simulator's space fighter. V4 explores all
-six actions. Temporary worker weights are published while RL runs; the single saved
-checkpoint is `latest.pt`. Closing the optional viewer never stops training.
+six actions. Temporary worker weights are published while RL runs; the saved
+checkpoint is `latest.pt`, and `snapshots/` keeps a copy of it once per
+`--snapshot-every` updates (default 1000) to fall back on. Closing the optional
+viewer never stops training.
 
 By default, 25% of duels start in a close encounter: parallel riding, crossing
 paths or offset head-on approaches. Distances, timing, position, reflection and
@@ -94,7 +96,7 @@ opponents, scenarios and training while keeping this brain and checkpoint. See
 [the architecture decision](docs/BLACKLIGHT-ARCHITECTURE-FREEZE.md) for the remaining
 qualification work and the evidence required before any structural change.
 
-Blacklight uses the V4 architecture. `runs/blacklight/latest.pt` is its single saved training state. `background`, `full`, and
+Blacklight uses the V4 architecture. `runs/blacklight/latest.pt` is its one resumed training state; `snapshots/` keeps dated copies of it to fall back on. `background`, `full`, and
 `imitate` all resume its current weights and cumulative update count, then save
 back to that same file. There is no automatic fresh model, timestamped imitation
 candidate, best-model rollback, previous-checkpoint rotation, or historical pool.
