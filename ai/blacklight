@@ -1,0 +1,46 @@
+#!/bin/sh
+# blacklight: Blacklight's training, in plain words, from this directory.
+#
+#   ./blacklight train          start training; the laptop stays usable (96 arenas, low priority)
+#   ./blacklight train full     start training with the whole machine; the Mac is kept awake
+#   ./blacklight stop           save the checkpoint and stop
+#   ./blacklight status         is it running, the latest numbers, when it last saved
+#   ./blacklight watch          reopen the training console (Ctrl-C closes it, not training)
+#   ./blacklight dash           full-screen charts
+#   ./blacklight log            follow the training log
+#   ./blacklight ladder         rate it in the real game against the built-in bots
+#   ./blacklight show           watch it play a match, drawn in the terminal
+#   ./blacklight brain          the live brain page in the browser
+#
+# Extra flags go to the trainer, e.g. ./blacklight train --combat-prob 0.7. Everything runs
+# through ./trainctl, which keeps its own, longer command list.
+
+set -u
+cd "$(dirname "$0")" || exit 1
+
+cmd="${1:-help}"
+[ $# -gt 0 ] && shift
+
+case "$cmd" in
+train)
+    mode=background
+    case "${1:-}" in
+    full | background) mode=$1; shift ;;
+    esac
+    exec ./trainctl "$mode" "$@"
+    ;;
+stop | status | watch | log | ladder | show | brain | imitate)
+    exec ./trainctl "$cmd" "$@"
+    ;;
+dash | dashboard)
+    exec ./trainctl dashboard "$@"
+    ;;
+help | -h | --help)
+    sed -n '2,16p' "$0" | sed 's/^# \{0,1\}//'
+    ;;
+*)
+    echo "unknown command: $cmd" >&2
+    sed -n '4,13p' "$0" | sed 's/^# \{0,1\}//' >&2
+    exit 1
+    ;;
+esac

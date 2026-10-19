@@ -20,12 +20,16 @@ uv venv --python 3.13 ~/.venvs/armagetron-ai && ln -s ~/.venvs/armagetron-ai .ve
 
 ## Training
 
-Training resumes the current V4 checkpoint. Choose one of two resource modes:
+Training resumes the current V4 checkpoint. From this directory:
 
 ```bash
-uv run arma-background
-uv run arma-full
+./blacklight train          # the laptop stays usable
+./blacklight train full     # the whole machine
 ```
+
+`./blacklight` alone lists the rest: `stop`, `status`, `watch`, `dash`, `log`,
+`ladder`, `show`, `brain`. The two modes are `background` and `full`; the
+`uv run arma-background` and `uv run arma-full` commands are the same thing.
 
 | Mode | Parallel arenas | Simulator workers | Learning batch | Work/rest pacing |
 | --- | ---: | ---: | ---: | --- |
@@ -57,13 +61,13 @@ training stops and follows fresh actor samples when the next run resumes.
 To switch an already running trainer, save and stop it, then choose the new mode:
 
 ```bash
-uv run arma-stop
-uv run arma-background
+./blacklight stop
+./blacklight train
 ```
 
-`uv run arma-status` reports the current run; `uv run arma-log` follows its log.
+`./blacklight status` reports the current run; `./blacklight log` follows its log.
 Explicit trainer flags override a mode's defaults, for example
-`uv run arma-background --games 64 --duty-cycle 0.25`. `uv run arma-teach --help`
+`./blacklight train --games 64 --duty-cycle 0.25`. `uv run arma-teach --help`
 lists the controls. The viewer shows the actual resolved configuration and
 optimizer hyperparameters, including overrides.
 
