@@ -225,3 +225,39 @@ def test_missing_measurements_do_not_invent_empty_progress(tmp_path):
     progress = {"time": 120, "phase": "warming_up", "warmup_target": 20000}
     text = output(tmp_path, {}, progress)
     assert "Waiting for replay target counts" in text and "━" not in text and "%" not in text
+
+
+def test_main_versus_exploiter_score_is_listed_beside_the_exploiter_own():
+    record = {"trainer": "teach", "update": 11300, "time": 100, "search_kl": .176, "pg": .276, "vf": .374,
+              "win_vs_hunter": 0., "win_exploiter": 1., "win_vs_exploiter": .5,
+              "match_results": {"win_vs_hunter": {"wins": 0, "draws": 0, "losses": 2, "games": 2},
+                                "win_exploiter": {"wins": 1, "draws": 0, "losses": 0, "games": 1},
+                                "win_vs_exploiter": {"wins": 1, "draws": 0, "losses": 1, "games": 2}}}
+    progress = {"trainer": "teach", "update": 11305, "time": 120, "phase": "learning", "sps": 16,
+                "config": {"snapshot_every": 1000, "log_every": 25}}
+    live = SimpleNamespace(fresh=True, running=True, label="TRAINING", detail="", method="teach")
+    wide = [line.plain for line in report_lines(progress, [record], live, width=110, now=120, started=80)]
+    assert wide[1] == "Space fighter 0% (0W 0D 2L) · Exploiter 100% (1W 0D 0L) · Main vs exploiter 50% (1W 0D 1L)"
+    narrow = [line.plain for line in report_lines(progress, [record], live, width=60, now=120, started=80)]
+    assert narrow[1] == "Hunter 0% (0W 0D 2L) · Exploiter 100% (1W 0D 0L) · VsExpl 50% (1W 0D 1L)"
+    # a report from before the main network played its exploiter renders as it did
+    without = {key: value for key, value in record.items() if key != "win_vs_exploiter"}
+    without["match_results"] = {key: value for key, value in record["match_results"].items()
+                                if key != "win_vs_exploiter"}
+    assert (report_lines(progress, [without], live, width=110, now=120, started=80)[1].plain
+            == "Space fighter 0% (0W 0D 2L) · Exploiter 100% (1W 0D 0L)")
+
+
+@pytest.mark.parametrize("width", [40, 60, 110])
+@pytest.mark.parametrize("height", [16, 32])
+def test_console_table_lists_main_versus_exploiter_in_every_size(tmp_path, width, height):
+    progress = {"trainer": "teach", "update": 101, "time": 120, "phase": "learning", "sps": 90,
+                "config": {"log_every": 25}}
+    record = {"trainer": "teach", "update": 100, "time": 119, "pg": .123, "vf": .456,
+              "win_exploiter": .25, "win_vs_exploiter": .4375,
+              "match_results": {"win_exploiter": {"wins": 0, "draws": 4, "losses": 4, "games": 8},
+                                "win_vs_exploiter": {"wins": 3, "draws": 1, "losses": 4, "games": 8}}}
+    text = output(tmp_path, record, progress, width=width, height=height)
+    assert "Exploiter" in text and "25.0%" in text
+    assert "Main vs exploiter" in text or "VsExpl" in text
+    assert "43.8%" in text and ("3W 1D 4L · n=8" in text or "3/1/4 n8" in text or "3W/1D/4L n8" in text)

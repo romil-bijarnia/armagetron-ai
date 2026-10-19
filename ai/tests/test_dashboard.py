@@ -201,6 +201,21 @@ def test_teacher_results_preserve_meaning_and_negative_value_explained(tmp_path,
 
 
 
+@pytest.mark.parametrize("size", [(80, 24), (100, 30), (160, 48)])
+def test_main_versus_exploiter_score_appears_once_reported(tmp_path, monkeypatch, size):
+    monkeypatch.setattr(dash, "_processes", lambda: {})
+    rec = {"trainer": "teach", "update": 24, "steps": 18640, "time": time.time(), "ep_len": 428,
+           "sps": 800, "ent": math.log(6), "actions": 6, "value_explained": .1,
+           "win_vs_hunter": .2, "win_exploiter": .7}
+    before = render(tmp_path / "v4", [rec], {}, *size)
+    # the wide layout's bar column shortens a label with an ellipsis ("Exploiter vs ta…")
+    assert "Exploiter vs ta" in before and "Main vs exploit" not in before
+    rec["win_vs_exploiter"] = .55
+    rec["match_results"] = {"win_vs_exploiter": {"wins": 5, "draws": 1, "losses": 4, "games": 10}}
+    output = render(tmp_path / "v4", [rec], {}, *size)
+    for text in ("Exploiter vs ta", "70.0%", "Main vs exploit", "55.0%", "5 / 1 / 4", "n=10"):
+        assert text in output
+
 
 def test_missing_or_invalid_heartbeat_is_no_progress(tmp_path):
     path = tmp_path / "progress.json"

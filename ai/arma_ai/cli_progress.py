@@ -118,7 +118,8 @@ def report_lines(progress: dict, records: list[dict], status, *, width: int, now
     lines = [line(sep.join(head + shown), "default")]
     matches = []
     for key, label, short in (("win_vs_hunter", "Space fighter", "Hunter"), ("win_vs_past", "Past selves", "Past"),
-                              ("win_exploiter", "Exploiter", "Exploiter")):
+                              ("win_exploiter", "Exploiter", "Exploiter"),
+                              ("win_vs_exploiter", "Main vs exploiter", "VsExpl")):
         counts = last.get("match_results", {}).get(key)
         score = last.get(key)
         if isinstance(counts, dict) and counts.get("games"):
@@ -335,7 +336,8 @@ def build(run_dir: Path, progress: dict, records: list[dict], status, *, width: 
             body.append(line(f"Update target {update:,}/{target:,}"))
 
     pairs = (("win_vs_hunter", "Space fighter"), ("win_vs_past", "Past selves"),
-             ("win_exploiter", "Exploiter" if narrow else "Exploiter vs frozen target"))
+             ("win_exploiter", "Exploiter" if narrow else "Exploiter vs frozen target"),
+             ("win_vs_exploiter", "Main vs exploiter"))
     reported = [(key, label) for key, label in pairs
                 if key in last or key in last.get("match_results", {})]
     if reported:
@@ -357,7 +359,8 @@ def build(run_dir: Path, progress: dict, records: list[dict], status, *, width: 
             score = f"{value:.1%}" if value is not None else "unreported"
             matchups.add_row(line(label, "default"), line(score, "default"),
                              line(detail))
-            short = {"win_vs_hunter": "Hunter", "win_vs_past": "Past", "win_exploiter": "Exploiter"}[key]
+            short = {"win_vs_hunter": "Hunter", "win_vs_past": "Past", "win_exploiter": "Exploiter",
+                     "win_vs_exploiter": "VsExpl"}[key]
             compact_count = (f"{counts['wins']}W/{counts['draws']}D/{counts['losses']}L n{counts['games']}"
                              if counts else "count unavailable")
             compact_scores.append(line(f"Train {short} {score}  {compact_count}"))

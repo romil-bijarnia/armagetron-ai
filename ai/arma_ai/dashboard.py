@@ -471,6 +471,13 @@ def _activity(progress: dict, current: dict, status: TrainingStatus, width: int,
     return _panel(title, Group(*lines)), len(lines) + 2
 
 
+def _score_pairs(last: dict) -> list[tuple[str, str]]:
+    pairs = [("win_vs_hunter", "Space fighter"), ("win_vs_past", "V4 snapshots"), ("win_exploiter", "Exploiter vs target")]
+    if "win_vs_exploiter" in last or "win_vs_exploiter" in last.get("match_results", {}):
+        pairs.append(("win_vs_exploiter", "Main vs exploiter"))  # reported once such a round has finished
+    return pairs
+
+
 def _scores(last: dict, *, bars: bool = False) -> Table:
     table = Table.grid(padding=(0, 2), expand=True)
     table.add_column(ratio=2, no_wrap=True, overflow="ellipsis")
@@ -480,8 +487,7 @@ def _scores(last: dict, *, bars: bool = False) -> Table:
         table.add_column(justify="right", no_wrap=True)
     header = ["Opponent"] + ([""] if bars else []) + ["Score", "W / D / L", "Rounds"]
     table.add_row(*[_line(value) for value in header])
-    for key, name in (("win_vs_hunter", "Space fighter"), ("win_vs_past", "V4 snapshots"),
-                      ("win_exploiter", "Exploiter vs target")):
+    for key, name in _score_pairs(last):
         counts = last.get("match_results", {}).get(key)
         score = counts.get("score", last.get(key)) if isinstance(counts, dict) else last.get(key)
         if isinstance(counts, dict) and counts.get("games", 0) > 0:
@@ -602,11 +608,12 @@ def build(run_dir: Path, recs: list[dict], width: int = 160, height: int = 48,
                     [row.get("ent") for row in history], NEUTRAL, fmt="{:.2f}"),
                     "KL above · entropy below")
     scores = _scores(last, bars=wide)
+    score_rows = 1 + len(_score_pairs(last))  # the header and one row per reported matchup
     layout = Layout()
     base = [Layout(header, size=2), Layout(activity, size=activity_height), report]
     if wide:
         matchup_body = Layout()
-        matchup_body.split_column(Layout(scores, size=4), Layout(AreaGraph(
+        matchup_body.split_column(Layout(scores, size=score_rows), Layout(AreaGraph(
             [row.get("win_vs_hunter") for row in history], BLUE,
             [row.get("win_vs_past") for row in history], NEUTRAL, hi=1, down_hi=1, fmt="{:.0%}")))
         p_scores = _panel("Training matches", matchup_body, "Space fighter above · V4 snapshots below · draws = ½")
@@ -619,7 +626,7 @@ def build(run_dir: Path, recs: list[dict], width: int = 160, height: int = 48,
         charts = Layout()
         charts.split_row(Layout(p_duration), Layout(p_value))
         p_scores = _panel("Training matches", scores, "Observed training outcomes · draws = ½")
-        sections = [*base, Layout(p_scores, size=6), Layout(charts, ratio=1)]
+        sections = [*base, Layout(p_scores, size=score_rows + 2), Layout(charts, ratio=1)]
         if height >= 30:
             extra = Layout()
             extra.split_row(Layout(p_losses), Layout(p_gain), Layout(p_speed))
