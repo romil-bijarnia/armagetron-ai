@@ -42,6 +42,8 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 #include "rScreen.h"
 #include "rRender.h"
 #include "eCamera.h"
+#include "tRectangle.h"
+#include "gArenaBackdrop.h"
 #include "tConfiguration.h"
 #include "gExplosion.h"
 #include "tMath.h"
@@ -255,9 +257,28 @@ void gWallRim::RenderReal(const eCamera *cam){
         REAL X_SCALE=sg_RimStretchX;
         REAL Z_SCALE=sg_RimStretchY;
 
+        // The stadium lives outside the map. Only outer bounding-box faces
+        // have an unambiguous exterior; inset/diagonal custom-map walls keep
+        // their ordinary rim instead of putting architecture in the track.
+        tRectangle const & bounds = eWallRim::GetBounds();
+        eCoord outward(0,0);
+        bool backdrop = sg_blacklightVisuals && !sg_MoviePack() && (*p2-*p1).Norm() > .001f;
+        if (backdrop)
+        {
+            auto onFace = [](REAL a, REAL b, REAL face)
+            { return std::fabs(a-face)<.01f && std::fabs(b-face)<.01f; };
+            if (onFace(p1->x,p2->x,bounds.GetLow().x)) outward = eCoord(-1,0);
+            else if (onFace(p1->x,p2->x,bounds.GetHigh().x)) outward = eCoord(1,0);
+            else if (onFace(p1->y,p2->y,bounds.GetLow().y)) outward = eCoord(0,-1);
+            else if (onFace(p1->y,p2->y,bounds.GetHigh().y)) outward = eCoord(0,1);
+            else backdrop = false;
+        }
+
         // determine height and transparency
         bool transparency = sg_bugTransparency || ( sg_bugTransparencyDemand && renderHeight_ < height );
         REAL h = transparency ? height : renderHeight_;
+        if (backdrop)
+            h = std::min(h, REAL(3));
         if ( transparency )
             glDisable( GL_DEPTH_TEST );
 
@@ -463,6 +484,18 @@ void gWallRim::RenderReal(const eCamera *cam){
                 material.Select();
             }
             gWallRim_helper(*p1,*p2,tBeg,tEnd,h,Z_SCALE,false);
+            if (backdrop)
+            {
+                RenderEnd();
+                auto corner = [&](eCoord const & point)
+                {
+                    return
+                        (std::fabs(point.x-bounds.GetLow().x)<.01f || std::fabs(point.x-bounds.GetHigh().x)<.01f) &&
+                        (std::fabs(point.y-bounds.GetLow().y)<.01f || std::fabs(point.y-bounds.GetHigh().y)<.01f);
+                };
+                gArenaBackdrop::RenderSegment(P1.x,P1.y,P2.x,P2.y,outward.x,outward.y,
+                                              rim_wall_red,rim_wall_green,rim_wall_blue,corner(P1),corner(P2));
+            }
         }
 
         //eWall::Render_helper(edge,(p1->x+p1->y)/SCALE,(p2->x+p2->y)/SCALE,40,height);

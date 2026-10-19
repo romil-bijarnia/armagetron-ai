@@ -30,6 +30,7 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 #include "rSDL.h"
 
 #include "tConfiguration.h"
+#include <algorithm>
 
 // floor mirror
 #ifndef DEDICATED
@@ -55,6 +56,7 @@ static tSettingItem<REAL> f_m("FLOOR_MIRROR_INT",sr_floorMirror_strength);
 #include "eDebugLine.h"
 #include "tDirectories.h"
 #include "eRectangle.h"
+#include "tConsole.h"
 
 #define eWall_h 4
 #define view_h 2.7
@@ -72,6 +74,140 @@ static tSettingItem<REAL> sec_lowerSkyHeight("LOWER_SKY_HEIGHT",se_lowerSkyHeigh
 #ifndef DEDICATED
 
 extern bool sg_MoviePack();
+extern bool sg_blacklightVisuals;
+
+#ifdef HAVE_GLEW
+namespace
+{
+GLuint se_floorReflectionProgram = 0;
+bool se_floorReflectionFailed = false;
+
+void se_UnloadFloorReflection()
+{
+    if ( se_floorReflectionProgram )
+        glDeleteProgram( se_floorReflectionProgram );
+    se_floorReflectionProgram = 0;
+    se_floorReflectionFailed = false;
+}
+
+static rCallbackBeforeScreenModeChange se_floorReflectionUnload( &se_UnloadFloorReflection );
+
+GLuint se_CompileFloorShader( GLenum type, char const * source )
+{
+    GLuint shader = glCreateShader( type );
+    glShaderSource( shader, 1, &source, NULL );
+    glCompileShader( shader );
+    GLint compiled = GL_FALSE;
+    glGetShaderiv( shader, GL_COMPILE_STATUS, &compiled );
+    if ( !compiled )
+    {
+        glDeleteShader( shader );
+        return 0;
+    }
+    return shader;
+}
+
+bool se_PrepareFloorReflection()
+{
+    if ( se_floorReflectionFailed )
+        return false;
+    if ( se_floorReflectionProgram )
+        return true;
+    char const * vertexSource =
+        "#version 120\n"
+        "varying vec3 eyePosition;\n"
+        "varying vec3 floorNormal;\n"
+        "void main() {\n"
+        "    eyePosition = (gl_ModelViewMatrix * gl_Vertex).xyz;\n"
+        "    floorNormal = gl_NormalMatrix * vec3(0.0, 0.0, 1.0);\n"
+        "    gl_Position = ftransform();\n"
+        "    gl_TexCoord[0] = gl_TextureMatrix[0] * gl_MultiTexCoord0;\n"
+        "    gl_FrontColor = gl_Color;\n"
+        "    gl_BackColor = gl_Color;\n"
+        "}\n";
+    char const * fragmentSource =
+        "#version 120\n"
+        "uniform sampler2D floorTexture;\n"
+        "uniform float reflectance;\n"
+        "varying vec3 eyePosition;\n"
+        "varying vec3 floorNormal;\n"
+        "void main() {\n"
+        "    float cosine = clamp(abs(dot(normalize(eyePosition), normalize(floorNormal))), 0.0, 1.0);\n"
+        "    float fresnel = pow(1.0 - cosine, 5.0);\n"
+        "    float reflected = reflectance + (1.0 - reflectance) * fresnel;\n"
+        "    vec3 surface = texture2DProj(floorTexture, gl_TexCoord[0]).rgb * gl_Color.rgb;\n"
+        "    gl_FragColor = vec4(surface, 1.0 - reflected);\n"
+        "}\n";
+    GLuint vertex = se_CompileFloorShader( GL_VERTEX_SHADER, vertexSource );
+    GLuint fragment = se_CompileFloorShader( GL_FRAGMENT_SHADER, fragmentSource );
+    if ( vertex && fragment )
+    {
+        se_floorReflectionProgram = glCreateProgram();
+        glAttachShader( se_floorReflectionProgram, vertex );
+        glAttachShader( se_floorReflectionProgram, fragment );
+        glLinkProgram( se_floorReflectionProgram );
+        GLint linked = GL_FALSE;
+        glGetProgramiv( se_floorReflectionProgram, GL_LINK_STATUS, &linked );
+        if ( !linked )
+        {
+            glDeleteProgram( se_floorReflectionProgram );
+            se_floorReflectionProgram = 0;
+        }
+    }
+    if ( vertex ) glDeleteShader( vertex );
+    if ( fragment ) glDeleteShader( fragment );
+    if ( !se_floorReflectionProgram )
+    {
+        se_floorReflectionFailed = true;
+        con << "Floor reflection: shaders unavailable; using the classic reflection.\n";
+    }
+    return se_floorReflectionProgram != 0;
+}
+}
+#endif
+
+// The mirrored scene is already below the floor. Schlick's Fresnel response
+// changes only its visibility through the polished surface: the configured
+// strength is normal-incidence reflectance, increasing at grazing angles.
+// Eye-space directions also support the existing homogeneous infinity plane.
+class se_FloorReflection
+{
+public:
+    explicit se_FloorReflection( REAL alpha )
+    {
+#ifdef HAVE_GLEW
+        if ( !sg_blacklightVisuals || sg_MoviePack() || !sr_alphaBlend ||
+             !sr_floorMirror || alpha >= 1 || !GLEW_VERSION_2_0 || glIsEnabled( GL_FOG ) )
+            return;
+        RenderEnd();
+        if ( !se_PrepareFloorReflection() )
+            return;
+        glGetIntegerv( GL_CURRENT_PROGRAM, &previous_ );
+        glUseProgram( se_floorReflectionProgram );
+        glUniform1i( glGetUniformLocation( se_floorReflectionProgram, "floorTexture" ), 0 );
+        glUniform1f( glGetUniformLocation( se_floorReflectionProgram, "reflectance" ),
+                     std::max( REAL( 0 ), std::min( REAL( 1 ), 1 - alpha ) ) );
+        active_ = true;
+#else
+        (void)alpha;
+#endif
+    }
+    ~se_FloorReflection()
+    {
+#ifdef HAVE_GLEW
+        if ( active_ )
+        {
+            RenderEnd();
+            glUseProgram( previous_ );
+        }
+#endif
+    }
+private:
+#ifdef HAVE_GLEW
+    GLint previous_ = 0;
+    bool active_ = false;
+#endif
+};
 
 // select the lower sky
 static rFileTexture & se_Sky()
@@ -476,6 +612,7 @@ void eGrid::display_simple( eCamera* cam, int viewer,bool floor,
             break;
 
         case rFLOOR_TEXTURE:
+        {
             TexMatrix();
             glLoadIdentity();
             glScalef(1/se_GridSize(),1/se_GridSize(),1.);
@@ -483,6 +620,7 @@ void eGrid::display_simple( eCamera* cam, int viewer,bool floor,
             se_glFloorTexture();
             se_glFloorColor(flooralpha);
 
+            se_FloorReflection reflection( flooralpha );
             infinity_xy_plane( cam->CameraPos(), cam->CameraDir()); 
 
             /* old way: draw every triangle
@@ -500,6 +638,7 @@ void eGrid::display_simple( eCamera* cam, int viewer,bool floor,
             */
 
             break;
+        }
 
         case rFLOOR_TWOTEXTURE:
             se_glFloorColor(flooralpha);

@@ -33,7 +33,8 @@ private:
 
     void OnSelectCore() override
     {
-        int const size = 512;
+        // Preserve narrow panel edges and rounded corners at Retina resolution.
+        int const size = kind_ == Floor ? 2048 : 1024;
         SDL_Surface * raw = SDL_CreateRGBSurface(SDL_SWSURFACE, size, size, 32,
                                                 0x000000ff, 0x0000ff00,
                                                 0x00ff0000, 0xff000000);
@@ -49,18 +50,26 @@ private:
                 Uint8 alpha = 255;
                 if (kind_ == Floor)
                 {
-                    float dx = std::min(x % 128, 128 - x % 128);
-                    float dy = std::min(y % 128, 128 - y % 128);
-                    float minor = std::max(Line(dx, 1.5f), Line(dy, 1.5f));
-                    float major = std::max(Line(std::min(x, size - x), 2.f),
-                                           Line(std::min(y, size - y), 2.f));
-                    float junction = Line(dx, 3.f) * Line(dy, 3.f);
-                    intensity = .105f + .19f * minor + .12f * major + .17f * junction;
+                    // Broad rounded circuit panels leave quiet black glass for
+                    // the reflected bikes and trails instead of a dense wire grid.
+                    float px = std::fabs(float(x) * 512.f / size - 256.f);
+                    float py = std::fabs(float(y) * 512.f / size - 256.f);
+                    float qx = px - 205.f, qy = py - 205.f;
+                    float outside = std::sqrt(std::max(0.f,qx)*std::max(0.f,qx)
+                                              + std::max(0.f,qy)*std::max(0.f,qy));
+                    float edge = outside + std::min(std::max(qx,qy),0.f) - 27.f;
+                    float seam = Line(std::fabs(edge), 1.7f);
+                    float shoulder = Line(std::fabs(edge), 5.f);
+                    float inner = Line(std::fabs(edge+10.f), .9f);
+                    float marker = std::max(Line(px,.8f)*Line(py,4.f),
+                                            Line(py,.8f)*Line(px,4.f));
+                    intensity = .043f + .50f*seam + .07f*shoulder + .035f*inner + .065f*marker;
                 }
                 else if (kind_ == Trail)
                 {
-                    // A bright top edge marks the lethal trail. The body stays
-                    // opaque and smoothly shaded instead of repeating arrows.
+                    // A transparent energy sheet between two narrow optical
+                    // edges. Greyscale modulation preserves every player's hue;
+                    // the field adds light without painting an opaque panel.
                     float v = float(y) / (size - 1);
                     float u = float(x) / size;
                     float top = std::exp(-v * 85.f);
@@ -76,13 +85,16 @@ private:
                 }
                 else
                 {
-                    // Near-black perimeter panels with faint seams and one rail
-                    // along the floor bright enough for the glow pass to pick up.
+                    // Architectural panels with a bright lower rail and a
+                    // restrained second seam above it.
                     float v = float(y) / (size - 1);
-                    float seam = Line(std::min(x % 128, 128 - x % 128), 2.f);
-                    float rail = std::fabs(v - .97f);
-                    intensity = .07f + .03f * v + .05f * seam
-                                + .95f * Line(rail, .004f) + .22f * Line(rail, .02f);
+                    float panel = std::fmod(float(x) * 512.f / size, 128.f);
+                    float seam = Line(std::min(panel, 128.f - panel), 2.f);
+                    float rail = std::fabs(v - .985f);
+                    float upper = std::fabs(v - .93f);
+                    intensity = .035f + .02f * v + .025f * seam
+                                + .94f * Line(rail, .0035f) + .16f * Line(rail, .016f)
+                                + .19f * Line(upper, .0025f);
                 }
                 Uint8 light = Uint8(std::min(1.f, intensity) * 255.f + .5f);
                 row[x] = SDL_MapRGBA(raw->format, light, light, light, alpha);
