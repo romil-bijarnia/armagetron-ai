@@ -36,27 +36,27 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 #include "rRender.h"
 #include "rGL.h"
 #include "rScreen.h"
-#include "rTextureRenderTarget.h"
 #include "tConfiguration.h"
 #include "tConsole.h"
 
-// The glow is a single-level bloom: the finished scene is copied into a texture,
-// its bright parts are extracted into a glow buffer a quarter (an eighth on tall
-// screens) of the screen size, blurred with a separable gaussian and added back
-// onto the scene. Settings:
+// Keep a narrow glow around the light trails and a weaker, wider halo. Both are
+// blurred below screen resolution; the scene and its HUD remain sharp. Settings:
 //   BLOOM            on or off
 //   BLOOM_INTENSITY  how much glow is added (0 disables)
 //   BLOOM_THRESHOLD  brightness (max of r, g, b) from which a pixel glows
-//   BLOOM_RADIUS     tap spacing of the blur in glow buffer pixels; wider halo for more
+//   BLOOM_RADIUS     glow width, relative to a 1080-pixel-tall screen
+//   BLOOM_HALO       strength of the wide halo relative to the narrow glow
 static bool sr_bloom = false;
-static REAL sr_bloomIntensity = 2.5;
+static REAL sr_bloomIntensity = 1.2;
 static REAL sr_bloomThreshold = .5;
-static REAL sr_bloomRadius = 2;
+static REAL sr_bloomRadius = .8;
+static REAL sr_bloomHalo = .25;
 
 static tSettingItem< bool > sr_bloomConf( "BLOOM", sr_bloom );
 static tSettingItem< REAL > sr_bloomIntensityConf( "BLOOM_INTENSITY", sr_bloomIntensity );
 static tSettingItem< REAL > sr_bloomThresholdConf( "BLOOM_THRESHOLD", sr_bloomThreshold );
 static tSettingItem< REAL > sr_bloomRadiusConf( "BLOOM_RADIUS", sr_bloomRadius );
+static tSettingItem< REAL > sr_bloomHaloConf( "BLOOM_HALO", sr_bloomHalo );
 
 #ifdef HAVE_GLEW
 
@@ -73,9 +73,11 @@ struct Target
 
 GLuint sceneTexture = 0;         // copy of the finished scene, screen size
 int sceneWidth = 0, sceneHeight = 0;
-Target glowTarget, scratchTarget; // glow buffer size, ping-pong pair; the glow ends up in glowTarget
-GLuint brightProgram = 0, blurProgram = 0;
+Target glowTarget, scratchTarget; // narrow glow, normally a quarter of the screen
+Target haloTarget, haloScratchTarget; // wide halo, half the narrow glow's resolution
+GLuint brightProgram = 0, blurProgram = 0, compositeProgram = 0;
 GLint brightTexel = -1, brightThreshold = -1, brightTaps = -1, blurStep = -1;
+GLint compositeIntensity = -1, compositeHalo = -1;
 bool failed = false;             // after an error the pass stays off until the next screen mode change
 bool reported = false;           // the reason is printed once
 
@@ -83,7 +85,7 @@ char const * vertexSource =
     "#version 120\n"
     "void main()\n"
     "{\n"
-    "    gl_Position = gl_ModelViewProjectionMatrix * gl_Vertex;\n"
+    "    gl_Position = gl_Vertex;\n"
     "    gl_TexCoord[0] = gl_MultiTexCoord0;\n"
     "}\n";
 
@@ -112,7 +114,8 @@ char const * brightSource =
     "    gl_FragColor = vec4( sum / float( taps * taps ), 1.0 );\n"
     "}\n";
 
-// 13 tap gaussian (sigma 2.5 taps) along the step direction
+// Nine-tap Gaussian, with adjacent taps combined by bilinear filtering: only five
+// texture fetches per pixel. The centre stays much tighter than repeated blurs.
 char const * blurSource =
     "#version 120\n"
     "uniform sampler2D source;\n"
@@ -124,15 +127,83 @@ char const * blurSource =
     "void main()\n"
     "{\n"
     "    vec2 uv = gl_TexCoord[0].xy;\n"
-    "    vec3 c = texture2D( source, uv ).rgb * .1610;\n"
-    "    c += pair( uv, 1.0 ) * .1486;\n"
-    "    c += pair( uv, 2.0 ) * .1169;\n"
-    "    c += pair( uv, 3.0 ) * .0784;\n"
-    "    c += pair( uv, 4.0 ) * .0448;\n"
-    "    c += pair( uv, 5.0 ) * .0218;\n"
-    "    c += pair( uv, 6.0 ) * .0090;\n"
+    "    vec3 c = texture2D( source, uv ).rgb * .227027;\n"
+    "    c += pair( uv, 1.384615 ) * .316216;\n"
+    "    c += pair( uv, 3.230769 ) * .070270;\n"
     "    gl_FragColor = vec4( c, 1.0 );\n"
     "}\n";
+
+// Add glow to the captured scene before applying one scalar highlight shoulder.
+// Independent RGB curves and screen blending shift saturated blue toward cyan
+// and violet toward pink. Scaling the whole vector retains its colour ratios.
+char const * compositeSource =
+    "#version 120\n"
+    "uniform sampler2D scene;\n"
+    "uniform sampler2D glow;\n"
+    "uniform sampler2D halo;\n"
+    "uniform float intensity;\n"
+    "uniform float haloStrength;\n"
+    "void main()\n"
+    "{\n"
+    "    vec2 uv = gl_TexCoord[0].xy;\n"
+    "    vec3 base = texture2D( scene, uv ).rgb;\n"
+    "    vec3 energy = texture2D( glow, uv ).rgb;\n"
+    "    energy += texture2D( halo, uv ).rgb * haloStrength;\n"
+    "    vec3 colour = base + energy * intensity;\n"
+    "    float peak = max( colour.r, max( colour.g, colour.b ) );\n"
+    "    float shoulder = peak;\n"
+    "    if ( peak > 0.75 ) shoulder = 0.75 + 0.25 * ( 1.0 - exp( -( peak - 0.75 ) * 4.0 ) );\n"
+    // Keep the brightness and chroma of bright source cores. Otherwise blue
+    // halo falling on a white headlight would turn the headlight itself blue.
+    "    float basePeak = max( base.r, max( base.g, base.b ) );\n"
+    "    shoulder = max( shoulder, basePeak );\n"
+    "    vec3 mapped = colour * ( shoulder / max( peak, 0.00001 ) );\n"
+    "    vec3 core = base * ( shoulder / max( basePeak, 0.00001 ) );\n"
+    "    vec3 result = mix( mapped, core, smoothstep( 0.85, 1.0, basePeak ) );\n"
+    "    float resultPeak = max( result.r, max( result.g, result.b ) );\n"
+    "    gl_FragColor = vec4( result * ( shoulder / max( resultPeak, 0.00001 ) ), 1.0 );\n"
+    "}\n";
+
+// Program and framebuffer bindings are not part of glPushAttrib. Saving before
+// Prepare also covers allocation and shader failures on the first frame.
+class BloomState
+{
+public:
+    BloomState()
+    {
+        glGetIntegerv( GL_CURRENT_PROGRAM, &program_ );
+        glGetIntegerv( GL_ACTIVE_TEXTURE, &activeTexture_ );
+        glGetIntegerv( GL_FRAMEBUFFER_BINDING_EXT, &framebuffer_ );
+        separateRead_ = GLEW_EXT_framebuffer_blit;
+        if ( separateRead_ )
+            glGetIntegerv( GL_READ_FRAMEBUFFER_BINDING_EXT, &readFramebuffer_ );
+        glPushAttrib( GL_ENABLE_BIT | GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT | GL_VIEWPORT_BIT | GL_TEXTURE_BIT | GL_CURRENT_BIT | GL_POLYGON_BIT );
+        glActiveTexture( GL_TEXTURE0 );
+    }
+
+    ~BloomState()
+    {
+        glUseProgram( program_ );
+        if ( separateRead_ )
+        {
+            glBindFramebufferEXT( GL_DRAW_FRAMEBUFFER_EXT, framebuffer_ );
+            glBindFramebufferEXT( GL_READ_FRAMEBUFFER_EXT, readFramebuffer_ );
+        }
+        else
+            glBindFramebufferEXT( GL_FRAMEBUFFER_EXT, framebuffer_ );
+        glPopAttrib();
+        glActiveTexture( activeTexture_ );
+    }
+
+    void BindScene() const
+    {
+        glBindFramebufferEXT( GL_FRAMEBUFFER_EXT, framebuffer_ );
+    }
+
+private:
+    GLint program_, activeTexture_, framebuffer_, readFramebuffer_;
+    bool separateRead_;
+};
 
 void Fail( char const * reason )
 {
@@ -246,21 +317,28 @@ void Unload()
         glDeleteProgram( brightProgram );
     if ( blurProgram )
         glDeleteProgram( blurProgram );
-    brightProgram = blurProgram = 0;
+    if ( compositeProgram )
+        glDeleteProgram( compositeProgram );
+    brightProgram = blurProgram = compositeProgram = 0;
+    brightTexel = brightThreshold = brightTaps = blurStep = -1;
+    compositeIntensity = compositeHalo = -1;
     if ( sceneTexture )
         glDeleteTextures( 1, &sceneTexture );
     sceneTexture = 0;
     sceneWidth = sceneHeight = 0;
     Destroy( glowTarget );
     Destroy( scratchTarget );
+    Destroy( haloTarget );
+    Destroy( haloScratchTarget );
     failed = false;
+    reported = false;
 }
 
-// the glow buffer is a quarter of the screen, an eighth on tall screens, so the halo
-// covers the same share of the picture at every size
+// A quarter-size core retains thin trails on Retina displays. Small windows need
+// half-size buffers so the glow does not turn into visibly enlarged pixels.
 int Shrink( int height )
 {
-    return height >= 1200 ? 8 : 4;
+    return height < 720 ? 2 : 4;
 }
 
 bool Prepare( int width, int height )
@@ -287,6 +365,19 @@ bool Prepare( int width, int height )
         blurStep = glGetUniformLocation( blurProgram, "step" );
         glUseProgram( 0 );
     }
+    if ( !compositeProgram )
+    {
+        compositeProgram = Link( compositeSource );
+        if ( !compositeProgram )
+            return false;
+        glUseProgram( compositeProgram );
+        glUniform1i( glGetUniformLocation( compositeProgram, "scene" ), 2 );
+        glUniform1i( glGetUniformLocation( compositeProgram, "glow" ), 0 );
+        glUniform1i( glGetUniformLocation( compositeProgram, "halo" ), 1 );
+        compositeIntensity = glGetUniformLocation( compositeProgram, "intensity" );
+        compositeHalo = glGetUniformLocation( compositeProgram, "haloStrength" );
+        glUseProgram( 0 );
+    }
     if ( sceneWidth != width || sceneHeight != height )
     {
         if ( !sceneTexture )
@@ -299,12 +390,35 @@ bool Prepare( int width, int height )
     int glowWidth = ( width + shrink - 1 ) / shrink, glowHeight = ( height + shrink - 1 ) / shrink;
     if ( glowTarget.width != glowWidth || glowTarget.height != glowHeight )
     {
-        bool complete = Create( glowTarget, glowWidth, glowHeight ) && Create( scratchTarget, glowWidth, glowHeight );
-        rTextureRenderTarget::Restore();
-        if ( !complete )
+        if ( !Create( glowTarget, glowWidth, glowHeight ) || !Create( scratchTarget, glowWidth, glowHeight ) )
+            return false;
+    }
+    int haloWidth = ( glowWidth + 1 ) / 2, haloHeight = ( glowHeight + 1 ) / 2;
+    if ( haloTarget.width != haloWidth || haloTarget.height != haloHeight )
+    {
+        if ( !Create( haloTarget, haloWidth, haloHeight ) || !Create( haloScratchTarget, haloWidth, haloHeight ) )
             return false;
     }
     return true;
+}
+
+void Blur( Target const & source, Target const & scratch, Target const & destination, float radius )
+{
+    glUseProgram( blurProgram );
+    glBindFramebufferEXT( GL_FRAMEBUFFER_EXT, scratch.framebuffer );
+    glViewport( 0, 0, scratch.width, scratch.height );
+    glBindTexture( GL_TEXTURE_2D, source.texture );
+    glUniform2f( blurStep, radius / scratch.width, 0 );
+    Quad();
+    glBindFramebufferEXT( GL_FRAMEBUFFER_EXT, destination.framebuffer );
+    glBindTexture( GL_TEXTURE_2D, scratch.texture );
+    glUniform2f( blurStep, 0, radius / scratch.height );
+    Quad();
+}
+
+float Clamp( REAL value, float low, float high )
+{
+    return value < low ? low : ( value > high ? high : value );
 }
 
 static rCallbackBeforeScreenModeChange sr_bloomUnload( &Unload );
@@ -329,80 +443,75 @@ void sr_Bloom()
     while ( glGetError() != GL_NO_ERROR )
         ;
 
-    if ( !Prepare( width, height ) )
     {
-        Fail( "the glow shaders or buffers could not be created" );
-        return;
-    }
+        BloomState state;
+        if ( !Prepare( width, height ) || glGetError() != GL_NO_ERROR )
+        {
+            Fail( "the glow shaders or buffers could not be created" );
+            return;
+        }
 
-    // 1. grab the finished scene (a multisampled window is resolved by the copy)
-    glBindTexture( GL_TEXTURE_2D, sceneTexture );
-    glCopyTexSubImage2D( GL_TEXTURE_2D, 0, 0, 0, 0, 0, width, height );
+        // 1. grab the finished scene (a multisampled window is resolved by the copy)
+        state.BindScene();
+        glBindTexture( GL_TEXTURE_2D, sceneTexture );
+        glCopyTexSubImage2D( GL_TEXTURE_2D, 0, 0, 0, 0, 0, width, height );
 
-    glPushAttrib( GL_ENABLE_BIT | GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT | GL_VIEWPORT_BIT | GL_TEXTURE_BIT | GL_CURRENT_BIT | GL_POLYGON_BIT );
-    glMatrixMode( GL_TEXTURE );
-    glPushMatrix();
-    glLoadIdentity();
-    glMatrixMode( GL_PROJECTION );
-    glPushMatrix();
-    glLoadIdentity();
-    glMatrixMode( GL_MODELVIEW );
-    glPushMatrix();
-    glLoadIdentity();
+        glDisable( GL_DEPTH_TEST );
+        glDepthMask( GL_FALSE );
+        glDisable( GL_ALPHA_TEST );
+        glDisable( GL_BLEND );
+        glDisable( GL_LIGHTING );
+        glDisable( GL_CULL_FACE );
+        glDisable( GL_FOG );
+        glDisable( GL_SCISSOR_TEST );
+        glDisable( GL_STENCIL_TEST );
+        glDisable( GL_COLOR_LOGIC_OP );
+        glDisable( GL_POLYGON_SMOOTH );
+        glDisable( GL_POLYGON_OFFSET_FILL );
+        glDisable( GL_DITHER );
+        glDisable( GL_SAMPLE_ALPHA_TO_COVERAGE );
+        glDisable( GL_SAMPLE_ALPHA_TO_ONE );
+        glDisable( GL_SAMPLE_COVERAGE );
+        for ( int plane = 0; plane < 6; ++plane )
+            glDisable( GL_CLIP_PLANE0 + plane );
+        glColorMask( GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE );
+        glPolygonMode( GL_FRONT_AND_BACK, GL_FILL );
+        glEnable( GL_TEXTURE_2D );
 
-    glDisable( GL_DEPTH_TEST );
-    glDepthMask( GL_FALSE );
-    glDisable( GL_ALPHA_TEST );
-    glDisable( GL_BLEND );
-    glDisable( GL_LIGHTING );
-    glDisable( GL_CULL_FACE );
-    glDisable( GL_FOG );
-    glPolygonMode( GL_FRONT_AND_BACK, GL_FILL );
-    glEnable( GL_TEXTURE_2D );
-    glColor4f( 1, 1, 1, 1 );
-
-    // 2. bright parts, glow buffer size
-    glBindFramebufferEXT( GL_FRAMEBUFFER_EXT, glowTarget.framebuffer );
-    glViewport( 0, 0, glowTarget.width, glowTarget.height );
-    glUseProgram( brightProgram );
-    glUniform2f( brightTexel, 1.f / width, 1.f / height );
-    glUniform1f( brightThreshold, sr_bloomThreshold );
-    glUniform1i( brightTaps, Shrink( height ) / 2 );
-    glBindTexture( GL_TEXTURE_2D, sceneTexture );
-    Quad();
-
-    // 3. blur, twice across and twice down
-    glUseProgram( blurProgram );
-    for ( int pass = 0; pass < 2; ++pass )
-    {
-        glBindFramebufferEXT( GL_FRAMEBUFFER_EXT, scratchTarget.framebuffer );
-        glBindTexture( GL_TEXTURE_2D, glowTarget.texture );
-        glUniform2f( blurStep, sr_bloomRadius / glowTarget.width, 0 );
-        Quad();
+        // 2. bright parts, glow buffer size
         glBindFramebufferEXT( GL_FRAMEBUFFER_EXT, glowTarget.framebuffer );
-        glBindTexture( GL_TEXTURE_2D, scratchTarget.texture );
-        glUniform2f( blurStep, 0, sr_bloomRadius / glowTarget.height );
+        glViewport( 0, 0, glowTarget.width, glowTarget.height );
+        glUseProgram( brightProgram );
+        glUniform2f( brightTexel, 1.f / width, 1.f / height );
+        glUniform1f( brightThreshold, Clamp( sr_bloomThreshold, .001f, 1.f ) );
+        glUniform1i( brightTaps, Shrink( height ) / 2 );
+        glBindTexture( GL_TEXTURE_2D, sceneTexture );
+        Quad();
+
+        // 3. a tight core plus a lower-resolution halo. Scale the radius continuously
+        // with the picture height, including when the buffer divisor changes.
+        float radiusPixels = Clamp( sr_bloomRadius, .1f, 4.f ) * 4.f * height / 1080.f;
+        float coreRadius = radiusPixels * glowTarget.height / height;
+        float haloRadius = radiusPixels * 4.f * haloTarget.height / height;
+        Blur( glowTarget, scratchTarget, glowTarget, coreRadius );
+        Blur( glowTarget, haloScratchTarget, haloTarget, haloRadius );
+
+        // 4. Combine the scene copy and glow with a scalar colour-preserving
+        // shoulder. The complete result replaces the old window pixels.
+        state.BindScene();
+        glViewport( 0, 0, width, height );
+        glDisable( GL_BLEND );
+        glUseProgram( compositeProgram );
+        glUniform1f( compositeIntensity, Clamp( sr_bloomIntensity, 0.f, 16.f ) );
+        glUniform1f( compositeHalo, Clamp( sr_bloomHalo, 0.f, 2.f ) );
+        glActiveTexture( GL_TEXTURE2 );
+        glBindTexture( GL_TEXTURE_2D, sceneTexture );
+        glActiveTexture( GL_TEXTURE1 );
+        glBindTexture( GL_TEXTURE_2D, haloTarget.texture );
+        glActiveTexture( GL_TEXTURE0 );
+        glBindTexture( GL_TEXTURE_2D, glowTarget.texture );
         Quad();
     }
-    glUseProgram( 0 );
-
-    // 4. add the glow onto the scene
-    rTextureRenderTarget::Restore();
-    glViewport( 0, 0, width, height );
-    glEnable( GL_BLEND );
-    glBlendFunc( GL_ONE, GL_ONE );
-    glBindTexture( GL_TEXTURE_2D, glowTarget.texture );
-    glColor4f( sr_bloomIntensity, sr_bloomIntensity, sr_bloomIntensity, 1 );
-    Quad();
-
-    glMatrixMode( GL_MODELVIEW );
-    glPopMatrix();
-    glMatrixMode( GL_PROJECTION );
-    glPopMatrix();
-    glMatrixMode( GL_TEXTURE );
-    glPopMatrix();
-    glPopAttrib();
-    glMatrixMode( GL_MODELVIEW );
 
     if ( glGetError() != GL_NO_ERROR )
         Fail( "an OpenGL error happened" );

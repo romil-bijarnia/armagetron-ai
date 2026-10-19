@@ -29,8 +29,8 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 #define ArmageTron_BLOOM_H
 
 //! Lets the bright parts of the finished 3D scene glow (BLOOM, BLOOM_INTENSITY,
-//! BLOOM_THRESHOLD, BLOOM_RADIUS). Call once per frame after every viewport's
-//! scene has been drawn and before any 2D overlay; the whole current framebuffer
+//! BLOOM_THRESHOLD, BLOOM_RADIUS, BLOOM_HALO). Call once per frame after every
+//! viewport's scene has been drawn and before any 2D overlay; the current framebuffer
 //! is processed in place. Does nothing when the setting is off, without GLEW,
 //! or after an OpenGL error.
 void sr_Bloom();
