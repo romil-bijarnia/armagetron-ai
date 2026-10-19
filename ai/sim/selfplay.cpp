@@ -419,7 +419,14 @@ void SelfPlay::Finish( Game & g )
 }
 
 // ------------------------------------------------------------------ search
-void SelfPlay::ImprovedPolicy( Game const & g, Node const & nd, int p, float * out ) const
+// A player's completed Q at a node: the mean return of each visited move, the prior-weighted mix
+// of the network's value and those returns for the others, then min-max rescaled over the legal
+// moves to [0, 1] (mctx's qtransform_completed_by_mix_value). Returns the Gumbel sigma scale
+// (cVisit + maxN) * cScale that turns them into logit bonuses. The rescale is what makes the
+// search bite: raw returns differ between moves by a few hundredths, and spreading them over the
+// full sigma range tells the policy which move the look-ahead preferred instead of adding the
+// same bonus to every move.
+float CompletedQ( Node const & nd, int p, float cVisit, float cScale, float * q )
 {
     float prior[kActions];
     MaskedSoftmax( nd.logits[p], nd.mask[p], prior );
@@ -438,13 +445,28 @@ void SelfPlay::ImprovedPolicy( Game const & g, Node const & nd, int p, float * o
     float vmix = nd.value[p];
     if ( sumN > 0 && den > 0 )
         vmix = ( nd.value[p] + sumN * num / den ) / ( 1 + sumN );
-    float scale = ( cfg.cVisit + maxN ) * cfg.cScale;
-    float z[kActions];
+    float lo = 1e30f, hi = -1e30f;
     for ( int a = 0; a < kActions; ++a )
     {
-        float q = nd.N[p][a] > 0 ? nd.W[p][a] / nd.N[p][a] : vmix;
-        z[a] = nd.logits[p][a] + scale * ( q + 1 ) * .5f;
+        q[a] = nd.N[p][a] > 0 ? nd.W[p][a] / nd.N[p][a] : vmix;
+        if ( nd.mask[p] >> a & 1 )
+        {
+            lo = std::min( lo, q[a] );
+            hi = std::max( hi, q[a] );
+        }
     }
+    float range = hi - lo;  // all moves equal (or none legal): no preference, every bonus is zero
+    for ( int a = 0; a < kActions; ++a )
+        q[a] = range > 1e-8f ? ( q[a] - lo ) / range : 0.f;
+    return ( cVisit + maxN ) * cScale;
+}
+
+void SelfPlay::ImprovedPolicy( Game const & g, Node const & nd, int p, float * out ) const
+{
+    float q[kActions], z[kActions];
+    float scale = CompletedQ( nd, p, cfg.cVisit, cfg.cScale, q );
+    for ( int a = 0; a < kActions; ++a )
+        z[a] = nd.logits[p][a] + scale * q[a];
     MaskedSoftmax( z, nd.mask[p], out );
     (void)g;
 }
@@ -452,28 +474,9 @@ void SelfPlay::ImprovedPolicy( Game const & g, Node const & nd, int p, float * o
 float SelfPlay::RootScore( Game & g, int p, int a ) const
 {
     Node const & r = g.nodes[0];
-    float pol[kActions];
-    // completed Q through the improved policy's ingredients
-    float prior[kActions];
-    MaskedSoftmax( r.logits[p], r.mask[p], prior );
-    int sumN = 0, maxN = 0;
-    float num = 0, den = 0;
-    for ( int b = 0; b < kActions; ++b )
-    {
-        sumN += r.N[p][b];
-        maxN = std::max( maxN, r.N[p][b] );
-        if ( r.N[p][b] > 0 )
-        {
-            num += prior[b] * r.W[p][b] / r.N[p][b];
-            den += prior[b];
-        }
-    }
-    float vmix = r.value[p];
-    if ( sumN > 0 && den > 0 )
-        vmix = ( r.value[p] + sumN * num / den ) / ( 1 + sumN );
-    float q = r.N[p][a] > 0 ? r.W[p][a] / r.N[p][a] : vmix;
-    (void)pol;
-    return g.gumbel[p][a] + r.logits[p][a] + ( cfg.cVisit + maxN ) * cfg.cScale * ( q + 1 ) * .5f;
+    float q[kActions];
+    float scale = CompletedQ( r, p, cfg.cVisit, cfg.cScale, q );
+    return g.gumbel[p][a] + r.logits[p][a] + scale * q[a];
 }
 
 int SelfPlay::SelectRoot( Game & g, int p )

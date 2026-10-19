@@ -173,6 +173,42 @@ static void SearchLegalActions( bool lowFinite = false, bool turnBlocked = false
     }
 }
 
+// The search's training target must follow the look-ahead even when the returns behind the moves
+// differ by hundredths: completed Q is rescaled over the legal moves before it becomes a logit
+// bonus. Mapping [-1, 1] straight onto the bonus range gave every move nearly the same bonus and
+// the target stayed the network's own policy.
+static void SearchPrefersSlightlyBetterReturns()
+{
+    Fixture f( 2 );
+    f.Next();
+    f.sp.cfg.sims = 24;
+    f.sp.cfg.searchProb = 1;
+    f.sp.cfg.gumbel = 0;
+    Game & game = f.sp.games[0];
+    int const decision = game.decision;
+    for ( int guard = 0; game.decision == decision && guard < 64; ++guard )
+    {
+        std::vector< float > logits( f.batch * kActions, 0 ), values( f.batch, 0 );
+        for ( int i = 0; i < f.batch; ++i )
+            if ( game.requests[i].node >= 0 )
+            {
+                // every look-ahead position under the root's left turn is worth a little more
+                assert( !game.path.empty() && game.path[0].first == 0 );
+                values[i] = game.path[0].second % kActions == ACT_LEFT ? .02f : -.02f;
+            }
+        f.sp.Feed( logits.data(), values.data(), f.batch );
+        f.Collect();
+    }
+    assert( game.decision == decision + 1 );
+    Node const & root = game.nodes[0];
+    assert( root.N[0][ACT_LEFT] > 0 );
+    for ( int a = 0; a < kActions; ++a )
+        if ( a != ACT_LEFT && root.N[0][a] > 0 )
+            assert( root.W[0][ACT_LEFT] / root.N[0][ACT_LEFT] > root.W[0][a] / root.N[0][a] );
+    assert( f.hasPolicy[1] && f.policy[kActions + ACT_LEFT] > .9f );
+    assert( game.world.cycles[0].dx == -1 && !game.world.cycles[0].braking );
+}
+
 static void HunterBranchesMatchKnownControl( int macro, int replan, int cachedAction )
 {
     Fixture f( 2 );
@@ -411,6 +447,7 @@ int main()
     SearchLegalActions();
     SearchLegalActions( true );
     SearchLegalActions( false, true );
+    SearchPrefersSlightlyBetterReturns();
     HunterBranchesMatchKnownControl( 1, 3, ACT_STRAIGHT );
     HunterBranchesMatchKnownControl( 2, 2, ACT_LEFT_BRAKE );
     HunterBranchesMatchKnownControl( 3, 3, ACT_STRAIGHT );
