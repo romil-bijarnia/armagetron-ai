@@ -258,6 +258,15 @@ public:
 
     virtual void OnSelect(bool enforce);
     using rSurfaceTexture::OnSelect;
+
+    void SetColor(gRealColor const &color)
+    {
+        if (color_ != color)
+        {
+            color_=color;
+            Unload();
+        }
+    }
 };
 
 gTextureCycle::gTextureCycle(rSurface const & surface, const gRealColor& color,bool repx,bool repy,bool w)
@@ -2284,6 +2293,36 @@ private:
 
 static eLegacyWavData cycle_run("moviesounds/engine.wav","sound/cyclrun.wav");
 
+namespace
+{
+void sg_RefreshPlayerCycleColor(ePlayerNetID *player)
+{
+    gCycle *cycle=player ? dynamic_cast<gCycle *>(player->Object()) : NULL;
+    // ControlObject can run before the cycle's visual initialization. Its own
+    // initialization below handles that case without touching uninitialized textures.
+    if (!cycle || cycle->GOID()<0)
+        return;
+    gRealColor body,trail;
+    player->Color(body.r_,body.g_,body.b_);
+    player->TrailColor(trail.r_,trail.g_,trail.b_);
+    se_MakeColorValid(body.r_,body.g_,body.b_,1.0f);
+    se_MakeColorValid(trail.r_,trail.g_,trail.b_,.5f);
+    if (cycle->color_ == body && cycle->trailColor_ == trail)
+        return;
+    cycle->color_=body;
+    cycle->trailColor_=trail;
+#ifndef DEDICATED
+    if (cycle->customTexture) cycle->customTexture->SetColor(body);
+    if (cycle->bodyTex) cycle->bodyTex->SetColor(body);
+    if (cycle->wheelTex) cycle->wheelTex->SetColor(body);
+    // Wall lists contain the colour, so invalidate only on an actual change.
+    rDisplayList::ClearAll();
+#endif
+}
+
+static eCallbackPlayerColor sg_playerCycleColorChanged(&sg_RefreshPlayerCycleColor);
+}
+
 void gCycle::MyInitAfterCreation(){
 #ifndef DEDICATED
     joystick_ = tNEW( gJoystick( this ) );
@@ -2338,7 +2377,7 @@ void gCycle::MyInitAfterCreation(){
         }
     }
 
-    if (sn_GetNetState()!=nCLIENT){
+    if (sn_GetNetState()!=nCLIENT || (se_IndividualPlayerColors() && player)){
         if(!player)
         { // distribute AI colors
             // con << current_ai << ':' << take_ai << ':' << maxmindist <<  "\n\n\n";
@@ -5140,6 +5179,14 @@ gCycle::gCycle( Game::CycleSync const & sync, nSenderInfo const & sender )
 
     color_.ReadSync( sync.color() );
     trailColor_ = color_;
+
+    if (se_IndividualPlayerColors() && player)
+    {
+        // Native clients can display each rider's RGB even when the server
+        // sends a team-mixed cycle colour. Missing players retain the sync fallback.
+        player->Color(color_.r_,color_.g_,color_.b_);
+        player->TrailColor(trailColor_.r_,trailColor_.g_,trailColor_.b_);
+    }
 
     se_MakeColorValid( color_.r_, color_.g_, color_.b_, 1.0f );
     se_MakeColorValid( trailColor_.r_, trailColor_.g_, trailColor_.b_, .5f );

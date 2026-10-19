@@ -28,6 +28,7 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 #include "gAIBase.h"
 #include "gNeural.h"
 #include "gArena.h"
+#include "gStuff.h"
 #include "eGrid.h"
 #include "ePath.h"
 #include "eGameObject.h"
@@ -1094,6 +1095,14 @@ static REAL rgb_ai[MAXAI_COLOR][3]={
                                        {.5,.5,.5}
                                    };
 
+// The cinematic presentation starts with warm and cool light colours. These
+// are the players' real colours, so bikes, trails, names and the minimap agree.
+static REAL const rgb_lightcycle[MAXAI_COLOR][3]={
+    {1,.34,.02}, {.02,.84,1}, {.18,.40,1}, {1,.72,.02},
+    {.76,.18,1}, {.02,1,.62}, {1,.52,.04}, {1,.10,.40},
+    {.44,.28,1}, {.18,.65,1}, {.46,.94,1}, {.88,.12,.05}, {.06,.74,.58}
+};
+
 static nNetObjectDescriptor<gAIPlayer,Game::AIPlayerSync> gAIPlayer_init(330);
 
 nNetObjectDescriptorBase const & gAIPlayer::DoGetDescriptor() const
@@ -1132,6 +1141,7 @@ gAIPlayer::gAIPlayer():
     log       = NULL;
 
     // find a good color
+    REAL const (*palette)[3] = sg_blacklightVisuals ? rgb_lightcycle : rgb_ai;
 
     current_ai=(current_ai+1) % MAXAI_COLOR;
     int take_ai=current_ai;
@@ -1162,9 +1172,9 @@ gAIPlayer::gAIPlayer():
                 se_FloorColor(R, G, B);
             }
             REAL dist=
-                fabs(R - rgb_ai[try_ai][0])+
-                fabs(G - rgb_ai[try_ai][1])+
-                fabs(B - rgb_ai[try_ai][2]);
+                fabs(R - palette[try_ai][0])+
+                fabs(G - palette[try_ai][1])+
+                fabs(B - palette[try_ai][2]);
 
             score+=exp(-dist*dist*4);
 
@@ -1192,9 +1202,9 @@ gAIPlayer::gAIPlayer():
     }
 
 
-    color.r_ = static_cast<int>(rgb_ai[take_ai][0] * 15);
-    color.g_ = static_cast<int>(rgb_ai[take_ai][1] * 15);
-    color.b_ = static_cast<int>(rgb_ai[take_ai][2] * 15);
+    color.r_ = static_cast<int>(palette[take_ai][0] * 15);
+    color.g_ = static_cast<int>(palette[take_ai][1] * 15);
+    color.b_ = static_cast<int>(palette[take_ai][2] * 15);
 
 
     ping = 0;
