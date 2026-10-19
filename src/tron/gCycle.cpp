@@ -70,6 +70,8 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 #ifndef DEDICATED
 #define DONTDOIT
 #include "rRender.h"
+#include "gLightcycleModel.h"
+#include "gLightcycleMaterial.h"
 #endif
 
 // TODO: get rid of this
@@ -4398,6 +4400,85 @@ void gCycleWallsDisplayListManager::RenderAll( eCamera const * camera, gCycle * 
     RenderAll( camera, cycle, wallList_ );
 }
 
+namespace
+{
+void LightcycleGroundLight(gRealColor const & colour)
+{
+    RenderEnd();
+    glPushAttrib(GL_ENABLE_BIT | GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT |
+                 GL_CURRENT_BIT | GL_TEXTURE_BIT | GL_POLYGON_BIT | GL_LIGHTING_BIT);
+#ifdef HAVE_GLEW
+    GLint oldProgram=0;
+    if (GLEW_VERSION_2_0)
+    {
+        glGetIntegerv(GL_CURRENT_PROGRAM,&oldProgram);
+        glUseProgram(0);
+    }
+#endif
+    glDisable(GL_LIGHTING);
+    glDisable(GL_TEXTURE_2D);
+    glDisable(GL_ALPHA_TEST);
+    glDisable(GL_CULL_FACE);
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA,GL_ONE);
+    glDepthMask(GL_FALSE);
+    glDepthFunc(GL_LEQUAL);
+    glShadeModel(GL_SMOOTH);
+
+    // Smooth local pools, strongest at the wheels and falling to zero before
+    // they reach the next cycle. They follow heading but stay on the ground
+    // when the visual bike leans into a turn.
+    auto pool = [&](float x,float radiusX,float radiusY,float power)
+    {
+        auto energy = [power](float r)
+        { return power*std::exp(-4.f*r*r)*(1.f-r*r); };
+        for(int band=0;band<6;++band)
+        {
+            float inner=band/6.f,outer=(band+1)/6.f;
+            glBegin(GL_QUAD_STRIP);
+            for(int i=0;i<=48;++i)
+            {
+                float a=i*(2.f*M_PI/48.f),c=std::cos(a),s=std::sin(a);
+                glColor4f(colour.r_,colour.g_,colour.b_,energy(inner));
+                glVertex3f(x+radiusX*inner*c,radiusY*inner*s,.014f);
+                glColor4f(colour.r_,colour.g_,colour.b_,energy(outer));
+                glVertex3f(x+radiusX*outer*c,radiusY*outer*s,.014f);
+            }
+            glEnd();
+        }
+    };
+    pool(gLightcycleModel::RearAxle,1.25f,.95f,.38f);
+    pool(gLightcycleModel::FrontAxle,1.25f,.95f,.38f);
+    pool(.15f,1.55f,.78f,.13f);
+
+    // The white nose lamps project a short, soft cone onto the polished floor.
+    // This is local illumination; it does not blur the scene or HUD.
+    auto beamVertex = [](float u,float v)
+    {
+        float width=.24f+u*.90f;
+        float fade=(1.f-u)*(1.f-u)*std::exp(-2.5f*u);
+        fade*=std::min(1.f,u*18.f)*(1.f-v*v)*(1.f-v*v);
+        glColor4f(.68f,.88f,1.f,.42f*fade);
+        glVertex3f(gLightcycleModel::FrontAxle+.62f+u*6.f,v*width,.016f);
+    };
+    for(int row=0;row<20;++row)
+    {
+        float u0=row/20.f,u1=(row+1)/20.f;
+        glBegin(GL_QUAD_STRIP);
+        for(int col=0;col<=16;++col)
+        {
+            float v=-1.f+col/8.f;
+            beamVertex(u0,v);beamVertex(u1,v);
+        }
+        glEnd();
+    }
+#ifdef HAVE_GLEW
+    if (GLEW_VERSION_2_0) glUseProgram(oldProgram);
+#endif
+    glPopAttrib();
+}
+}
+
 void gCycle::Render(const eCamera *cam){
     /*
     // for use when there's rendering problems on one specific occasion
@@ -4459,6 +4540,7 @@ void gCycle::Render(const eCamera *cam){
         	   } */
 #endif
 
+        bool const blacklightCycle = sg_blacklightVisuals && !mp;
         GLfloat color[4]={1,1,1,1};
         static GLfloat lposa[4] = { 320, 240, 200,0};
         static GLfloat lposb[4] = { -240, -100, 200,0};
@@ -4496,6 +4578,9 @@ void gCycle::Render(const eCamera *cam){
         //glTranslatef(-1.84,0,0);
         if (!mp)
             glTranslatef(-1.5,0,0);
+
+        if (blacklightCycle && !blinking)
+            LightcycleGroundLight(color_);
 
         glPushMatrix();
 
@@ -4538,6 +4623,17 @@ void gCycle::Render(const eCamera *cam){
 
             if ( !blinking )
             {
+                if (blacklightCycle)
+                {
+                    RenderEnd();
+                    gLightcycleMaterial::Scope material(color_.r_,color_.g_,color_.b_,
+                        gLightcycleModel::RearAxle,gLightcycleModel::FrontAxle,gLightcycleModel::WheelRadius);
+                    gLightcycleModel::Render(color_.r_, color_.g_, color_.b_,
+                                            std::atan2(rotationRearWheel.y, rotationRearWheel.x),
+                                            std::atan2(rotationFrontWheel.y, rotationFrontWheel.x));
+                }
+                else
+                {
                 bodyTex->Select();
                 body->Render();
 
@@ -4569,6 +4665,7 @@ void gCycle::Render(const eCamera *cam){
 
                 front->Render();
                 glPopMatrix();
+                }
             }
             
             glPopMatrix();
@@ -4589,7 +4686,6 @@ void gCycle::Render(const eCamera *cam){
         glDisable(GL_LIGHT0);
         glDisable(GL_LIGHT1);
         glDisable(GL_LIGHTING);
-
         //glDisable(GL_TEXTURE);
         glDisable(GL_TEXTURE_2D);
         glColor3f(1,1,1);
