@@ -31,6 +31,7 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 #include "tInitExit.h"
 #include "gWall.h"
 #include "gCycle.h"
+#include "gStuff.h"
 #include "nConfig.h"
 #include "eGrid.h"
 #include "eTeam.h"
@@ -38,6 +39,8 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 #include "tMath.h"
 #include "eLadderLog.h"
 #include "eSoundMixer.h"
+#include <algorithm>
+#include <cmath>
 #ifdef USEPARTICLES
 #include "papi.h"
 #endif
@@ -416,7 +419,138 @@ bool sg_crashExplosion = true;
 bool sg_crashExplosionHud = true;
 
 #ifndef DEDICATED
+namespace
+{
+class ExplosionVisualState
+{
+public:
+    explicit ExplosionVisualState(bool world)
+    {
+        RenderEnd();
+        glPushAttrib(GL_ENABLE_BIT | GL_CURRENT_BIT | GL_COLOR_BUFFER_BIT |
+                     GL_DEPTH_BUFFER_BIT | GL_TEXTURE_BIT | GL_LINE_BIT |
+                     GL_POLYGON_BIT | GL_LIGHTING_BIT);
+#ifdef HAVE_GLEW
+        if (GLEW_VERSION_2_0)
+        {
+            glGetIntegerv(GL_CURRENT_PROGRAM,&program_);
+            glUseProgram(0);
+        }
+        if (GLEW_VERSION_1_3)
+        {
+            glGetIntegerv(GL_ACTIVE_TEXTURE,&texture_);
+            GLint units=1;
+            glGetIntegerv(GL_MAX_TEXTURE_UNITS,&units);
+            for (GLint unit=0;unit<units;++unit)
+            {
+                glActiveTexture(GL_TEXTURE0+unit);
+                glDisable(GL_TEXTURE_1D); glDisable(GL_TEXTURE_2D);
+                glDisable(GL_TEXTURE_3D); glDisable(GL_TEXTURE_CUBE_MAP);
+            }
+            glActiveTexture(GL_TEXTURE0);
+        }
+        if (GLEW_VERSION_1_4) glBlendEquation(GL_FUNC_ADD);
+#endif
+        glDisable(GL_TEXTURE_1D); glDisable(GL_TEXTURE_2D);
+        glDisable(GL_LIGHTING); glDisable(GL_ALPHA_TEST); glDisable(GL_CULL_FACE);
+        glDisable(GL_LINE_SMOOTH); glDisable(GL_POLYGON_OFFSET_FILL);
+        if (world) glEnable(GL_DEPTH_TEST); else glDisable(GL_DEPTH_TEST);
+        glDepthMask(GL_FALSE);
+        glEnable(GL_BLEND); glBlendFunc(GL_SRC_ALPHA,GL_ONE);
+        glShadeModel(GL_SMOOTH);
+        glLineWidth(1.25f);
+    }
+    ~ExplosionVisualState()
+    {
+        RenderEnd();
+        glPopAttrib();
+#ifdef HAVE_GLEW
+        if (GLEW_VERSION_2_0) glUseProgram(program_);
+        if (GLEW_VERSION_1_3) glActiveTexture(texture_);
+#endif
+    }
+private:
+#ifdef HAVE_GLEW
+    GLint program_=0,texture_=GL_TEXTURE0;
+#endif
+};
+}
+
 void gExplosion::Render(const eCamera *cam){
+    if (sg_blacklightVisuals && !sg_MoviePack())
+    {
+        REAL age=lastTime-createTime;
+        if (!sg_crashExplosion || !std::isfinite(age) || age<0 || age>=1.f)
+            return;
+        ExplosionVisualState state(true);
+        REAL r=explosion_r,g=explosion_g,b=explosion_b;
+        clamp01(r); clamp01(g); clamp01(b);
+
+        // A very short, local ion flash replaces the arena-spanning spokes.
+        // World-space planes also work under the mirrored scene transform.
+        if (age<.14f)
+        {
+            REAL fade=1-age/.14f;
+            REAL radius=.12f+.50f*(age/.14f);
+            for (int plane=0;plane<3;++plane)
+            {
+                BeginTriangleFan();
+                glColor4f(r*.70f+.30f,g*.70f+.30f,b*.70f+.30f,.80f*fade*fade);
+                glVertex3f(pos.x,pos.y,.30f);
+                glColor4f(r,g,b,0);
+                for (int point=0;point<=16;++point)
+                {
+                    REAL angle=point*(6.2831853f/16);
+                    REAL a=radius*std::cos(angle),c=radius*std::sin(angle);
+                    glVertex3f(pos.x+(plane==2 ? 0 : a),pos.y+(plane==0 ? c : plane==2 ? a : 0),
+                               plane==0 ? .30f : std::max(REAL(.012f),REAL(.30f+c)));
+                }
+                RenderEnd();
+            }
+        }
+
+        BeginTriangles();
+        int count=std::min(40,expvec.Len());
+        for (int i=0;i<count;++i)
+        {
+            REAL life=.62f+.055f*(i%7);
+            if (age>=life) continue;
+            REAL remaining=1-age/life;
+            REAL fade=remaining*remaining;
+            REAL nx=expvec[i].x[0],ny=expvec[i].x[1],nz=expvec[i].x[2];
+            REAL radius=(.12f+2.8f*(1-std::exp(-age*2.9f)))*(.70f+.05f*(i%7));
+            REAL x=pos.x+nx*radius,y=pos.y+ny*radius;
+            REAL z=std::max(REAL(.025f),REAL(.18f+nz*(.35f+1.6f*age)-1.2f*age*age));
+            REAL angle=i*2.3999632f+age*(4+i%5);
+            REAL width=(.035f+.012f*(i%3))*(.65f+.35f*remaining);
+            REAL length=(.075f+.035f*(i%4))*(.65f+.35f*remaining);
+            REAL sx=std::cos(angle)*width,sy=std::sin(angle)*width;
+            // Small tumbling triangular pieces, not long rays from the origin.
+            glColor4f(r,g,b,.90f*fade);
+            glVertex3f(x+nx*length,y+ny*length,z+nz*length);
+            glColor4f(r*.45f,g*.45f,b*.45f,.48f*fade);
+            glVertex3f(x+sx,y+sy,z+.45f*width);
+            glVertex3f(x-sx,y-sy,std::max(REAL(.012f),z-.45f*width));
+        }
+        RenderEnd();
+        BeginLines();
+        for (int i=0;i<count;++i)
+        {
+            REAL life=.62f+.055f*(i%7);
+            if (age>=life) continue;
+            REAL fade=1-age/life;
+            REAL radius=(.12f+2.8f*(1-std::exp(-age*2.9f)))*(.70f+.05f*(i%7));
+            REAL x=pos.x+expvec[i].x[0]*radius,y=pos.y+expvec[i].x[1]*radius;
+            REAL z=std::max(REAL(.025f),REAL(.18f+expvec[i].x[2]*(.35f+1.6f*age)-1.2f*age*age));
+            REAL tail=.035f+.10f*fade;
+            glColor4f(r,g,b,.80f*fade*fade);
+            glVertex3f(x,y,z);
+            glColor4f(r,g,b,0);
+            glVertex3f(x-expvec[i].x[0]*tail,y-expvec[i].x[1]*tail,
+                       std::max(REAL(.012f),z-expvec[i].x[2]*tail));
+        }
+        return;
+    }
     //std::cout << "Starting render\n";
 #ifdef USEPARTICLES
     /*if(sg_crashExplosion){
@@ -504,6 +638,27 @@ void gExplosion::Render(const eCamera *cam){
 
 void gExplosion::Render2D(tCoord scale) const {
 #ifndef DEDICATED
+    if (sg_blacklightVisuals && !sg_MoviePack())
+    {
+        REAL age=lastTime-createTime;
+        if (!sg_crashExplosionHud || !std::isfinite(age) || age<0 || age>=.75f)
+            return;
+        ExplosionVisualState state(false);
+        REAL r=explosion_r,g=explosion_g,b=explosion_b;
+        clamp01(r); clamp01(g); clamp01(b);
+        REAL fade=1-age/.75f;
+        REAL pulse=.25f+.55f*(1-fade);
+        REAL sx=std::isfinite(scale.x) ? std::max(REAL(.4f),std::min(REAL(2.4f),REAL(std::fabs(scale.x)))) : 1;
+        REAL sy=std::isfinite(scale.y) ? std::max(REAL(.4f),std::min(REAL(2.4f),REAL(std::fabs(scale.y)))) : 1;
+        glColor4f(r,g,b,.90f*fade*fade);
+        BeginLineLoop();
+        for (int point=0;point<32;++point)
+        {
+            REAL angle=point*(6.2831853f/32);
+            glVertex2f(pos.x+sx*pulse*std::cos(angle),pos.y+sy*pulse*std::sin(angle));
+        }
+        return;
+    }
     if(sg_crashExplosionHud){
         REAL a1=(lastTime-createTime)+.01f;//+.2;
         REAL e=a1-1;
