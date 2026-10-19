@@ -53,6 +53,7 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 #include "eSpawn.h"
 #include "uInput.h"
 #include "uInputQueue.h"
+#include "uInputTime.h"
 #include "nNetObject.h"
 #include "tToDo.h"
 #include "gMenus.h"
@@ -799,6 +800,26 @@ static int absolute_winner=0;
 static REAL lastTime_gameloop=0;
 static REAL lastTimeTimestep=0;
 
+#ifndef DEDICATED
+static uInputTimeMapper sg_inputTimeMapper;
+static Uint32 sg_inputFrameTicks = 0;
+static double sg_inputFrameSystemTime = -1;
+
+class gInputFrameClock: public su_TimerCallback
+{
+public:
+    REAL GetTime() override { return REAL(sg_inputTimeMapper.CurrentTime()); }
+    REAL GetEventTime(SDL_Event const &event) override
+    {
+#if SDL_VERSION_ATLEAST(2,0,0)
+        return REAL(sg_inputTimeMapper.EventTime(event.common.timestamp));
+#else
+        return GetTime();
+#endif
+    }
+};
+#endif
+
 static int wishWinner = 0;
 static char const * wishWinnerMessage = "";
 
@@ -857,6 +878,7 @@ void exit_game_objects(eGrid *grid){
     su_prefetchInput=false;
 
 #ifndef DEDICATED
+	sg_inputTimeMapper.Reset();
 	cCockpit::AfterRoundProcess();
 #endif
 
@@ -4566,6 +4588,13 @@ bool gGame::GameLoop(bool input){
     if (input){
         su_HandleDelayedEvents();
 
+        // The system clock may have advanced again during a round/state transition.
+        // In that case there is no matching SDL snapshot to interpolate from.
+        sg_inputTimeMapper.BeginFrame(sg_inputFrameTicks, gtime, lastTime_gameloop,
+            state == GS_PLAY && sg_inputFrameSystemTime == tSysTimeFloat()
+            && !tRecorder::IsPlayingBack() && !tLockstepActive());
+        gInputFrameClock inputClock;
+
         SDL_Event tEvent;
 
         uInputProcessGuard inputProcessGuard;
@@ -4944,6 +4973,13 @@ void sg_EnterGameCore( nNetState enter_state ){
 
         // do the regular simulation
         tAdvanceFrame();
+
+#ifndef DEDICATED
+        // Pair this SDL clock sample with tAdvanceFrame, before StateUpdate and work
+        // in GameLoop can consume time. Game time remains the authoritative clock.
+        sg_inputFrameTicks = SDL_GetTicks();
+        sg_inputFrameSystemTime = tSysTimeFloat();
+#endif
 
         goon=GameLoop() && sn_GetNetState() == enter_state;
 

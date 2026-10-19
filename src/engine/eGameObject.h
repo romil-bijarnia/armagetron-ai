@@ -243,6 +243,9 @@ public:
     // Receives control from ePlayer
     virtual bool Act(uActionPlayer *Act,REAL x);
 
+    // Human input only; bots and synchronized movement continue to use Act/Turn.
+    virtual bool ActLocalInput(uActionPlayer *act, REAL x) { return Act(act, x); }
+
     // does a timestep and all interactions for every gameobject
     static void s_Timestep(eGrid *grid, REAL currentTime, REAL minTimestep);
 

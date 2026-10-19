@@ -28,6 +28,7 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 #include "eEventNotification.h"
 #include "gCycle.h"
 #include "gArenaMaterial.h"
+#include "gCycleInput.h"
 #include "nConfig.h"
 #include "rModel.h"
 //#include "eTess.h"
@@ -3735,6 +3736,17 @@ REAL gCycle::PathfindingModifier( const eWall *w ) const
         return 1;
 }
 
+
+static int sg_cycleInputBuffer = 0;
+static tConfItem<int> sg_cycleInputBufferConf("CYCLE_INPUT_BUFFER", sg_cycleInputBuffer);
+
+bool gCycle::ActLocalInput(uActionPlayer *act, REAL x)
+{
+    bool const turn = act && (se_turnLeft == *act || se_turnRight == *act);
+    if (turn && x > .5 && gCycleInput::BufferFull(sg_cycleInputBuffer, PendingTurnCount()))
+        return true;
+    return Act(act, x);
+}
 
 bool gCycle::Act(uActionPlayer *Act, REAL x){
     // delegate to joystick

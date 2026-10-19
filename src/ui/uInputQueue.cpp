@@ -40,13 +40,13 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 
 static su_TimerCallback *timer=NULL;
 
-su_TimerCallback::su_TimerCallback(){
+su_TimerCallback::su_TimerCallback(): previous_(timer){
     timer = this;
 }
 
 su_TimerCallback::~su_TimerCallback(){
     if (timer == this)
-        timer = NULL;
+        timer = previous_;
 }
 
 static inline REAL Time(){
@@ -329,6 +329,10 @@ bool su_GetSDLInput(SDL_Event &tEvent,REAL &time){
                 false;
 #endif
         }
+        // Stamp only live events, after polling (or retrieving the prefetched event).
+        // Playback already carries its authoritative game time in the archive.
+        if (ret && timer)
+            time=timer->GetEventTime(tEvent);
         sr_UnlockSDL();
         input_get=false;
     }

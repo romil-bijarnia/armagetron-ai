@@ -314,6 +314,7 @@ public:
     REAL PathfindingModifier( const eWall *w ) const override;
 
     bool Act(uActionPlayer *Act,REAL x) override;
+    bool ActLocalInput(uActionPlayer *act, REAL x) override;
 
     bool DoTurn(int dir) override;
     void DropWall( bool buildNew=true );                                    //!< Drops the current wall and builds a new one

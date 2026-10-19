@@ -67,8 +67,10 @@ extern bool su_contInput;
 int su_InputThread(void *);
 
 class su_TimerCallback{
+    su_TimerCallback *previous_;
 public:
     virtual REAL GetTime()=0;
+    virtual REAL GetEventTime(SDL_Event const &) { return GetTime(); }
     su_TimerCallback();
     virtual ~su_TimerCallback();
 };

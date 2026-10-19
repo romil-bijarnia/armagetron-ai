@@ -4798,7 +4798,7 @@ bool ePlayer::Act(uAction *act,REAL x){
 
         bool objectAct = false; // set to true if an action of the object was triggered
         bool ret = ((cam    && cam->Act(reinterpret_cast<uActionCamera *>(act),x)) ||
-                    ( objectAct = (object && se_GameTime()>=0 && object->Act(reinterpret_cast<uActionPlayer *>(act),x))));
+                    ( objectAct = (object && se_GameTime()>=0 && object->ActLocalInput(reinterpret_cast<uActionPlayer *>(act),x))));
 
         if (bool(netPlayer) && (objectAct || !se_chatter))
             netPlayer->Activity();

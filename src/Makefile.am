@@ -153,7 +153,7 @@ libtron_a_SOURCES=tron/gAIBase.cpp tron/gAIBase.h tron/gAICharacter.cpp tron/gAI
 	tron/gMenus.cpp tron/gMenus.h tron/gParser.cpp tron/gParser.h tron/gParticles.cpp tron/gParticles.h\
 	tron/gNeural.cpp tron/gNeural.h tron/gNeuralAsync.h tron/gNeuralNet.cpp tron/gNeuralNet.h tron/gSensor.cpp tron/gSensor.h tron/gServerBrowser.cpp tron/gServerBrowser.h tron/gSparks.cpp tron/gSparks.h\
 	tron/gStuff.cpp tron/gStuff.h tron/gTeam.cpp tron/gTeam.h tron/gWall.cpp\
-	tron/gWall.h tron/gArenaMaterial.h\
+	tron/gWall.h tron/gArenaMaterial.h tron/gCycleInput.h\
 	tron/gServerFavorites.h tron/gServerFavorites.cpp\
 	tron/gStatistics.h tron/gStatistics.cpp\
 	tron/gStatList.h tron/gStatList.cpp\
@@ -194,7 +194,7 @@ libtron_a_SOURCES +=\
 	tron/gWinZone.h            tron/gWinZone.cpp
 endif
 
-libui_a_SOURCES=ui/uInput.cpp ui/uInput.h ui/uInputQueue.cpp ui/uInputQueue.h ui/uMenu.cpp ui/uMenu.h
+libui_a_SOURCES=ui/uInput.cpp ui/uInput.h ui/uInputQueue.cpp ui/uInputQueue.h ui/uInputTime.h ui/uMenu.cpp ui/uMenu.h
 
 if OS_X_TOOLKIT
 if !BUILDDEDICATED
