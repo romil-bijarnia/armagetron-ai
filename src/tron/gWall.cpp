@@ -31,6 +31,7 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 #include "gWall.h"
 #include "gStuff.h"
 #include "gArenaMaterial.h"
+#include "gLightwallMaterial.h"
 #include "eGrid.h"
 #include "eWall.h"
 #include "math.h"
@@ -1079,11 +1080,15 @@ void gNetPlayerWall::RenderList(bool list, gWallRenderMode renderMode ){
 
 
 inline bool upperlinecolor(REAL r,REAL g,REAL b, REAL a){
-    if (rTextureGroups::TextureMode[rTextureGroups::TEX_WALL]<0)
+    if (sg_blacklightVisuals && !sg_MoviePack())
+    {
+        // Off/low-detail texture settings still retain coloured energy edges.
+        glTexCoord3f(0,0,-1);
+        // Emissive filaments keep the player's hue, including saturated red.
+        glColor4f(r,g,b,a);
+    }
+    else if (rTextureGroups::TextureMode[rTextureGroups::TEX_WALL]<0)
         glColor4f(1,1,1,a);
-    else if (sg_blacklightVisuals)
-        // a white-hot core that keeps a hint of the trail's colour
-        glColor4f(r*.35f+.65f,g*.35f+.65f,b*.35f+.65f,a);
     else{
         /*
           REAL upperline_alpha=fabs(se_cameraRise*2);
@@ -1118,7 +1123,54 @@ static const bool sg_renderBulkLines = true;
 static const bool sg_renderBulkQuads = true;
 #endif
 
+// Local colour reflected onto the glass beside the lower filament. The constant
+// white edge texel reuses the energy material without a texture/state switch inside
+// cached wall lists. Six narrow, fading quads cost twelve triangles per segment.
+static void sg_TrailFloorSpill(eCoord const & p1,eCoord const & p2,
+                              REAL r,REAL g,REAL b,REAL alpha1,REAL alpha2,REAL height)
+{
+    eCoord delta=p2-p1;
+    REAL length=delta.Norm();
+    if (length<.00001f || height<=0)
+        return;
+    eCoord normal(-delta.y/length,delta.x/length);
+    REAL offsets[]={0,.12f,.32f,.62f};
+    REAL fade[]={1,.36f,.07f,0};
+    REAL strength=.17f;
+    bool const premultiplied=gLightwallMaterial::IsActive();
+    if (!premultiplied)
+    {
+        // The shader marks spill as alpha-zero additive emission. Keep the
+        // same illumination when using the straight-alpha compatibility path.
+        RenderEnd();
+        glBlendFunc(GL_SRC_ALPHA,GL_ONE);
+    }
+    BeginQuads();
+    for (int side=-1;side<=1;side+=2)
+        for (int band=0;band<3;++band)
+        {
+            eCoord inner=normal*(side*offsets[band]*height);
+            eCoord outer=normal*(side*offsets[band+1]*height);
+            // A stable white edge texel supplies spill, never animated caustics.
+            glTexCoord3f(.5f,0,-2);
+            glColor4f(r,g,b,alpha1*strength*fade[band]);
+            glVertex3f(p1.x+inner.x,p1.y+inner.y,.006f);
+            glColor4f(r,g,b,alpha2*strength*fade[band]);
+            glVertex3f(p2.x+inner.x,p2.y+inner.y,.006f);
+            glColor4f(r,g,b,alpha2*strength*fade[band+1]);
+            glVertex3f(p2.x+outer.x,p2.y+outer.y,.006f);
+            glColor4f(r,g,b,alpha1*strength*fade[band+1]);
+            glVertex3f(p1.x+outer.x,p1.y+outer.y,.006f);
+        }
+    if (!premultiplied)
+    {
+        RenderEnd();
+        glBlendFunc(GL_SRC_ALPHA,GL_ONE_MINUS_SRC_ALPHA);
+    }
+}
+
 void gNetPlayerWall::RenderNormal(const eCoord &p1,const eCoord &p2,REAL ta,REAL te,REAL r,REAL g,REAL b,REAL a, gWallRenderMode mode ){
+    bool const energy = sg_blacklightVisuals && !sg_MoviePack();
     REAL hfrac=1;
 
     if (bool(cycle_) && !cycle_->Alive() && gCycle::WallsStayUpDelay() >= 0 ){
@@ -1138,9 +1190,12 @@ void gNetPlayerWall::RenderNormal(const eCoord &p1,const eCoord &p2,REAL ta,REAL
             if (alpha>1) alpha=1;
             hfrac=1-dt;
 
-            r+=ca;
-            b+=ca;
-            g+=ca;
+            if (!energy)
+            {
+                r+=ca;
+                b+=ca;
+                g+=ca;
+            }
 
             a*=alpha;
         }
@@ -1157,6 +1212,12 @@ void gNetPlayerWall::RenderNormal(const eCoord &p1,const eCoord &p2,REAL ta,REAL
             glVertex3f(p1.x,p1.y,h*hfrac);
             upperlinecolor(r,g,b,a);
             glVertex3f(p2.x,p2.y,h*hfrac);
+            if (energy)
+            {
+                upperlinecolor(r,g,b,a*.82f);
+                glVertex3f(p1.x,p1.y,.012f*hfrac);
+                glVertex3f(p2.x,p2.y,.012f*hfrac);
+            }
         }
 
         //glColor4f(r,g,b,a);
@@ -1173,22 +1234,27 @@ void gNetPlayerWall::RenderNormal(const eCoord &p1,const eCoord &p2,REAL ta,REAL
         if ( mode & gWallRenderMode_Quads && sg_renderBulkQuads )
         {
             BeginQuads();
+            REAL panelAlpha = energy ? a : 1;
+            if (energy && rTextureGroups::TextureMode[rTextureGroups::TEX_WALL] <= 0)
+                panelAlpha *= .27f;
 
-            glColor4f(r,g,b,1);
+            glColor4f(r,g,b,panelAlpha);
             glTexCoord2f(ta,hfrac);
             glVertex3f(p1.x,p1.y,extrarise);
             
-            glColor4f(r,g,b,1);
+            glColor4f(r,g,b,panelAlpha);
             glTexCoord2f(ta,0);
             glVertex3f(p1.x,p1.y,extrarise + h*hfrac);
             
-            glColor4f(r,g,b,1);
+            glColor4f(r,g,b,panelAlpha);
             glTexCoord2f(te,0);
             glVertex3f(p2.x,p2.y,extrarise + h*hfrac);
             
-            glColor4f(r,g,b,1);
+            glColor4f(r,g,b,panelAlpha);
             glTexCoord2f(te,hfrac);
             glVertex3f(p2.x,p2.y,extrarise);
+            if (energy)
+                sg_TrailFloorSpill(p1,p2,r,g,b,a,a,hfrac);
         }
     }
 }
@@ -1208,6 +1274,7 @@ void gNetPlayerWall::RenderBegin(const eCoord &p1,const eCoord &pp2,REAL ta,REAL
         return;
     }
 
+    bool const energy = sg_blacklightVisuals && !sg_MoviePack();
     REAL hfrac=1;
 
     eCoord p2 = pp2;
@@ -1232,9 +1299,14 @@ void gNetPlayerWall::RenderBegin(const eCoord &p1,const eCoord &pp2,REAL ta,REAL
             if (alpha>1) alpha=1;
             hfrac=1-dt;
 
-            r+=ca;
-            b+=ca;
-            g+=ca;
+            if (energy)
+                a *= alpha;
+            else
+            {
+                r+=ca;
+                b+=ca;
+                g+=ca;
+            }
         }
         //a*=alpha;
     }
@@ -1279,10 +1351,24 @@ void gNetPlayerWall::RenderBegin(const eCoord &p1,const eCoord &pp2,REAL ta,REAL
                 REAL y=(p1.y+frag*(p2.y-p1.y))*(1-xfunc(rat))+ppos.y*xfunc(rat);
 
                 REAL H=h*hfrac*hfunc(rat);
-                upperlinecolor(r,g,b,a*afunc(rat));
+                upperlinecolor(r,g,b,a*(energy ? .82f+.18f*afunc(rat) : afunc(rat)));
                 glVertex3f(x+H*cycle_->skew*sfunc(rat)*cycle_->dir.y,
                            y-H*cycle_->skew*sfunc(rat)*cycle_->dir.x,
                            H);//+se_cameraZ*.005);
+            }
+            if (energy)
+            {
+                RenderEnd();
+                BeginLineStrip();
+                for (int i=0;i<=segs;++i)
+                {
+                    REAL frag=i*seginv;
+                    REAL rat=ra+frag*(re-ra);
+                    REAL x=(p1.x+frag*(p2.x-p1.x))*(1-xfunc(rat))+ppos.x*xfunc(rat);
+                    REAL y=(p1.y+frag*(p2.y-p1.y))*(1-xfunc(rat))+ppos.y*xfunc(rat);
+                    upperlinecolor(r,g,b,a*.82f*(.82f+.18f*afunc(rat)));
+                    glVertex3f(x,y,.012f*hfrac);
+                }
             }
         }
     }
@@ -1298,18 +1384,46 @@ void gNetPlayerWall::RenderBegin(const eCoord &p1,const eCoord &pp2,REAL ta,REAL
             REAL y=(p1.y+frag*(p2.y-p1.y))*(1-xfunc(rat))+ppos.y*xfunc(rat);
 
             // bottom
-            glColor4f(r+cfunc(rat),g+cfunc(rat),b+cfunc(rat),a*afunc(rat));
+            REAL alpha = a*(energy ? .82f+.18f*afunc(rat) : afunc(rat));
+            if (energy && rTextureGroups::TextureMode[rTextureGroups::TEX_WALL] <= 0)
+                alpha *= .27f;
+            if (energy)
+                glColor4f(r,g,b,alpha);
+            else
+                glColor4f(r+cfunc(rat),g+cfunc(rat),b+cfunc(rat),alpha);
             glTexCoord2f(ta+(te-ta)*frag,hfrac);
             glVertex3f(x,y,0);
 
             // top
             //glTexCoord2f(ta+(te-ta)*frag,hfrac*(1-hfunc(rat)));
-            glColor4f(r+cfunc(rat),g+cfunc(rat),b+cfunc(rat),a*afunc(rat));
+            if (energy)
+                glColor4f(r,g,b,alpha);
+            else
+                glColor4f(r+cfunc(rat),g+cfunc(rat),b+cfunc(rat),alpha);
             glTexCoord2f(ta+(te-ta)*frag,0);
             REAL H=h*hfrac*hfunc(rat);
             glVertex3f(x+H*cycle_->skew*sfunc(rat)*cycle_->dir.y,
                        y-H*cycle_->skew*sfunc(rat)*cycle_->dir.x,
                        H);
+        }
+    }
+
+    if (energy && hfrac>0 && (mode & gWallRenderMode_Quads) && sg_renderBeginQuads)
+    {
+        RenderEnd();
+        eCoord previous;
+        REAL previousAlpha=0;
+        for (int i=0;i<=segs;++i)
+        {
+            REAL frag=i*seginv;
+            REAL rat=ra+frag*(re-ra);
+            eCoord point((p1.x+frag*(p2.x-p1.x))*(1-xfunc(rat))+ppos.x*xfunc(rat),
+                         (p1.y+frag*(p2.y-p1.y))*(1-xfunc(rat))+ppos.y*xfunc(rat));
+            REAL alpha=a*(.82f+.18f*afunc(rat));
+            if (i>0)
+                sg_TrailFloorSpill(previous,point,r,g,b,previousAlpha,alpha,hfrac);
+            previous=point;
+            previousAlpha=alpha;
         }
     }
 

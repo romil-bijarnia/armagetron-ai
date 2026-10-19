@@ -46,6 +46,7 @@ private:
             for (int x = 0; x < size; ++x)
             {
                 float intensity;
+                Uint8 alpha = 255;
                 if (kind_ == Floor)
                 {
                     float dx = std::min(x % 128, 128 - x % 128);
@@ -61,9 +62,17 @@ private:
                     // A bright top edge marks the lethal trail. The body stays
                     // opaque and smoothly shaded instead of repeating arrows.
                     float v = float(y) / (size - 1);
-                    float top = std::exp(-v * 34.f);
-                    float bottom = std::exp(-(1.f - v) * 42.f);
-                    intensity = .34f + .16f * (1.f - v) + .50f * top + .28f * bottom;
+                    float u = float(x) / size;
+                    float top = std::exp(-v * 85.f);
+                    float bottom = std::exp(-(1.f - v) * 60.f);
+                    float shoulder = std::exp(-v * 14.f);
+                    float foot = std::exp(-(1.f - v) * 10.f);
+                    float weave = .5f + .5f * std::sin(v * 452.38934f
+                                      + .55f * std::sin(u * 6.2831853f));
+                    float edge = std::max(top,bottom);
+                    intensity = .60f + .025f*weave + .12f*shoulder + .09f*foot + .35f*edge;
+                    float opacity = .27f + .014f*weave + .13f*shoulder + .10f*foot + .72f*edge;
+                    alpha = Uint8(std::min(1.f,opacity)*255.f+.5f);
                 }
                 else
                 {
@@ -76,7 +85,7 @@ private:
                                 + .95f * Line(rail, .004f) + .22f * Line(rail, .02f);
                 }
                 Uint8 light = Uint8(std::min(1.f, intensity) * 255.f + .5f);
-                row[x] = SDL_MapRGBA(raw->format, light, light, light, 255);
+                row[x] = SDL_MapRGBA(raw->format, light, light, light, alpha);
             }
         }
         Upload(surface);

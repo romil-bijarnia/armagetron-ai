@@ -696,6 +696,7 @@ bool eGameObject::DiedWhileMoving()
 
 // draws it to the screen using OpenGL
 void eGameObject::Render(const eCamera *){}
+void eGameObject::RenderEarly(const eCamera *){}
 void eGameObject::Render2D(tCoord scale) const {}
 
 // *******************************************************************************
@@ -925,6 +926,12 @@ void eGameObject::RenderAll(eGrid *grid, const eCamera *cam){
     //if (!sr_glOut)
     //    return;
     
+    // Opaque subparts of otherwise translucent objects must precede all normal
+    // renders. Each view, including its mirror pass, gets this phase once.
+    if (sr_glOut)
+        for (int i=grid->gameObjects.Len()-1;i>=0;--i)
+            grid->gameObjects(i)->RenderEarly(cam);
+
     // first, we need to render all the non-alpha blended objects.
     // if we encounter non-alpha blended objects after alpha blended objects
     // have already been rendered, we need to re-sort them to the back.

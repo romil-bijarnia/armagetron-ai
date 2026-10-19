@@ -125,6 +125,8 @@ class gCycleWallsDisplayListManager
     friend class gNetPlayerWall;
 
 public:
+    enum RenderPass { AllPass, EdgePass, MembranePass };
+
     gCycleWallsDisplayListManager();
     ~gCycleWallsDisplayListManager();
 
@@ -132,10 +134,13 @@ public:
     static bool CannotHaveList( REAL distance, gCycle const * cycle );
 
     //! renders all walls scheduled for display list usage
-    void RenderAllWithDisplayList( eCamera const * camera, gCycle * cycle );
+    void RenderAllWithDisplayList( eCamera const * camera, gCycle * cycle, RenderPass pass = AllPass );
 
     //! render all walls in a list
-    static void RenderAll( eCamera const * camera, gCycle * cycle, gNetPlayerWall * list );
+    static void RenderAll( eCamera const * camera, gCycle * cycle, gNetPlayerWall * list, RenderPass pass = AllPass );
+
+    //! globally early Blacklight edge phase; normal rendering draws membranes later
+    void RenderEdges( eCamera const * camera, gCycle * cycle );
 
     //! render all walls
     void RenderAll( eCamera const * camera, gCycle * cycle );
@@ -147,13 +152,19 @@ public:
     void Clear( int inhibit = 0 )
     {
         displayList_.Clear( inhibit );
+        edgeDisplayList_.Clear( inhibit );
+        prepared_ = false;
     }
 private:
+    void PrepareLists( gCycle * cycle );
+    void RenderPassWithState( eCamera const * camera, gCycle * cycle, RenderPass pass );
     gNetPlayerWall *                wallList_;                      //!< linked list of all walls
     gNetPlayerWall *                wallsWithDisplayList_;          //!< linked list of all walls with display list    
-    rDisplayList                    displayList_;                   //!< combined display list
+    rDisplayList                    displayList_;                   //!< classic combined or Blacklight membrane list
+    rDisplayList                    edgeDisplayList_;               //!< Blacklight early edge list
     REAL                            wallsWithDisplayListMinDistance_; //!< minimal distance of the walls with display list
     int                             wallsInDisplayList_;            //!< number of walls in the current display list
+    bool                            prepared_;                      //!< shared membership prepared by the early phase
 };
 #endif
 

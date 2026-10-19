@@ -72,6 +72,7 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 #include "rRender.h"
 #include "gLightcycleModel.h"
 #include "gLightcycleMaterial.h"
+#include "gLightwallMaterial.h"
 #endif
 
 // TODO: get rid of this
@@ -2272,6 +2273,19 @@ public:
     }
 #endif
 private:
+    bool RendersAlpha() const override
+    {
+        // The membrane stays translucent; its depth-tested edges use the early
+        // phase so a different cycle cannot draw rear edges over a front sheet.
+        return sg_blacklightVisuals && !sg_MoviePack();
+    }
+
+    void RenderEarly(eCamera const * camera) override
+    {
+        if (sg_blacklightVisuals && !sg_MoviePack())
+            cycle_->displayList_.RenderEdges(camera,cycle_);
+    }
+
     virtual void Render( eCamera const * camera )
     {
         cycle_->displayList_.RenderAll( camera, cycle_ );
@@ -4216,6 +4230,7 @@ gCycleWallsDisplayListManager::gCycleWallsDisplayListManager()
     , wallsWithDisplayList_(0)
     , wallsWithDisplayListMinDistance_(0)
     , wallsInDisplayList_(0)
+    , prepared_(false)
 {
 }
 
@@ -4238,12 +4253,8 @@ bool gCycleWallsDisplayListManager::CannotHaveList( REAL distance, gCycle const 
             ( cycle->ThisWallsLength() > 0 && cycle->GetDistance() - cycle->ThisWallsLength() > distance );
 }
 
-void gCycleWallsDisplayListManager::RenderAllWithDisplayList( eCamera const * camera, gCycle * cycle )
+void gCycleWallsDisplayListManager::PrepareLists( gCycle * cycle )
 {
-    dir_eWall_select();
-
-    glDisable(GL_CULL_FACE);
-    
     gNetPlayerWall * run = 0;
     // transfer walls with display list into their list
 
@@ -4273,21 +4284,25 @@ void gCycleWallsDisplayListManager::RenderAllWithDisplayList( eCamera const * ca
     if ( CannotHaveList( wallsWithDisplayListMinDistance_, cycle ) )
     {
         tailExpired=true;
-        displayList_.Clear(0);
+        Clear(0);
     }
     // check if enough new walls are present to warrant altering the display list
     else if ( wallsWithPossibleDisplayList >= 3 ||
          wallsWithPossibleDisplayList * 5 > wallsInDisplayList_ )
     {
         // yes? Ok, rebuild the list in this case, too
-        displayList_.Clear(0);
+        Clear(0);
     }
 
-    // call display list
-    if ( displayList_.Call() )
+    // Both Blacklight lists share exactly one wall membership. Rebuild both if
+    // either cache is missing; otherwise an old edge list could outlive a changed
+    // membrane list (or a newly inhibited wall could be recorded as static).
+    bool const energy = sg_blacklightVisuals && !sg_MoviePack();
+    if (displayList_.IsSet() && (!energy || edgeDisplayList_.IsSet()))
     {
         return;
     }
+    Clear(0);
 
     // remove and render walls without display list
     run = wallsWithDisplayList_;
@@ -4319,68 +4334,98 @@ void gCycleWallsDisplayListManager::RenderAllWithDisplayList( eCamera const * ca
         }
     }
 
-    if ( !wallsWithDisplayList_ )
+    wallsWithDisplayListMinDistance_ = 1E+30;
+    wallsInDisplayList_ = 0;
+    run = wallsWithDisplayList_;
+    while (run)
     {
-        return;
+        wallsWithDisplayListMinDistance_ = std::min(wallsWithDisplayListMinDistance_,run->BegPos());
+        ++wallsInDisplayList_;
+        run = run->Next();
     }
-
-    // fill display list
-    rDisplayListFiller filler( displayList_ );
-
-    if ( rDisplayList::IsRecording() )
-    {
-        wallsWithDisplayListMinDistance_ = 1E+30;
-        wallsInDisplayList_ = 0;
-
-        // bookkeeping of walls in the display list
-        run = wallsWithDisplayList_;
-        while( run )
-        {
-            gNetPlayerWall * next = run->Next();
-            if ( run->BegPos() < wallsWithDisplayListMinDistance_ )
-            {
-                wallsWithDisplayListMinDistance_ = run->BegPos();
-            }
-            wallsInDisplayList_++;
-            run = next;
-        }
-    }
-
-    // render walls with display list
-    RenderAll( camera, cycle, wallsWithDisplayList_ );
 }
 
-void gCycleWallsDisplayListManager::RenderAll( eCamera const * camera, gCycle * cycle, gNetPlayerWall * list )
+void gCycleWallsDisplayListManager::RenderAllWithDisplayList( eCamera const * camera, gCycle * cycle, RenderPass pass )
+{
+    dir_eWall_select();
+    glDisable(GL_CULL_FACE);
+    if (!wallsWithDisplayList_)
+        return;
+    rDisplayList & cache = pass == EdgePass ? edgeDisplayList_ : displayList_;
+    if (cache.Call())
+        return;
+    rDisplayListFiller filler(cache);
+
+    // render walls with display list
+    RenderAll( camera, cycle, wallsWithDisplayList_, pass );
+}
+
+void gCycleWallsDisplayListManager::RenderAll( eCamera const * camera, gCycle * cycle, gNetPlayerWall * list, RenderPass pass )
 {
     if( !list )
     {
         return;
     }
 
-    // first, render all lines
-    sr_DepthOffset(true);
-    if ( rTextureGroups::TextureMode[rTextureGroups::TEX_WALL] != 0 )
-        glDisable(GL_TEXTURE_2D);
-    // the blacklight look draws the core line thick enough to be seen on a dense screen
-    if ( sg_blacklightVisuals )
-        glLineWidth( sr_screenHeight > 640 ? sr_screenHeight / 640.f : 1.f );
-    
-    gNetPlayerWall * run = list;
-    while( run )
+    bool const energy = sg_blacklightVisuals && !sg_MoviePack();
+    if (energy)
     {
-        gNetPlayerWall * next = run->Next();
-        run->RenderList( true, gNetPlayerWall::gWallRenderMode_Lines );
-        run = next;
+        RenderEnd();
+        glDisable(GL_LIGHTING);
+        glDisable(GL_ALPHA_TEST);
+        glEnable(GL_BLEND);
+        // The shader supplies premultiplied colour. The fixed-function path
+        // supplies straight colour; both preserve same-hue overlaps.
+        glBlendFunc(gLightwallMaterial::IsActive() ? GL_ONE : GL_SRC_ALPHA,
+                    GL_ONE_MINUS_SRC_ALPHA);
+        glDepthMask(GL_TRUE);
+        glDisable(GL_LINE_SMOOTH);
+        glShadeModel(GL_SMOOTH);
     }
 
-    RenderEnd();
-    if ( sg_blacklightVisuals )
-        glLineWidth( 1 );
+    if (pass != MembranePass)
+    {
+        // All cycles' crisp edges are drawn in the early phase, before any
+        // membrane can attenuate them. Classic retains its combined pass.
+        sr_DepthOffset(true);
+        if (energy || rTextureGroups::TextureMode[rTextureGroups::TEX_WALL] != 0 )
+            glDisable(GL_TEXTURE_2D);
+        if (energy)
+            glLineWidth(std::max(1.f,sr_screenHeight/1000.f));
+        gNetPlayerWall * run = list;
+        while (run)
+        {
+            gNetPlayerWall * next = run->Next();
+            run->RenderList(true,gNetPlayerWall::gWallRenderMode_Lines);
+            run = next;
+        }
+
+        RenderEnd();
+        if (energy)
+            glLineWidth(1);
+    }
     sr_DepthOffset(false);
-    if ( rTextureGroups::TextureMode[rTextureGroups::TEX_WALL] != 0 )
+    if (pass == EdgePass)
+        return;
+    if (energy)
+    {
+        if (rTextureGroups::TextureMode[rTextureGroups::TEX_WALL] > 0)
+            glEnable(GL_TEXTURE_2D);
+        else
+            glDisable(GL_TEXTURE_2D);
+    }
+    else if (rTextureGroups::TextureMode[rTextureGroups::TEX_WALL] != 0)
         glEnable(GL_TEXTURE_2D);
+    if (energy)
+    {
+        // A light field must not mask other walls or the bikes behind it.
+        // This state is recorded with the geometry, so cached and new trails
+        // agree without shader uniforms or display-list special cases.
+        glDepthMask(GL_FALSE);
+        glTexEnvi(GL_TEXTURE_ENV,GL_TEXTURE_ENV_MODE,GL_MODULATE);
+    }
     
-    run = list;
+    gNetPlayerWall * run = list;
     while( run )
     {
         gNetPlayerWall * next = run->Next();
@@ -4391,13 +4436,78 @@ void gCycleWallsDisplayListManager::RenderAll( eCamera const * camera, gCycle * 
     RenderEnd();
 }
 
+void gCycleWallsDisplayListManager::RenderEdges( eCamera const * camera, gCycle * cycle )
+{
+    if (sg_blacklightVisuals && !sg_MoviePack())
+        RenderPassWithState(camera,cycle,EdgePass);
+}
+
 void gCycleWallsDisplayListManager::RenderAll( eCamera const * camera, gCycle * cycle )
 {
-    // render everything you can with a display list
-    RenderAllWithDisplayList( camera, cycle );
+    RenderPassWithState(camera,cycle,sg_blacklightVisuals && !sg_MoviePack() ? MembranePass : AllPass);
+}
+
+void gCycleWallsDisplayListManager::RenderPassWithState( eCamera const * camera, gCycle * cycle, RenderPass pass )
+{
+    bool const energy = sg_blacklightVisuals && !sg_MoviePack();
+    bool const textured = rTextureGroups::TextureMode[rTextureGroups::TEX_WALL] > 0;
+    static bool previousEnergy = energy;
+    static bool previousTextured = textured;
+    if (previousEnergy != energy || (energy && previousTextured != textured))
+    {
+        // Material and blend commands are cached alongside the wall vertices.
+        // Switching looks must not replay the previous look's rendering state.
+        rDisplayList::ClearAll();
+        previousEnergy = energy;
+        previousTextured = textured;
+    }
+    struct TrailState
+    {
+        bool active;
+        explicit TrailState(bool energy) : active(energy)
+        {
+            if (active)
+            {
+                RenderEnd();
+                glPushAttrib(GL_ENABLE_BIT | GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT |
+                             GL_LINE_BIT | GL_CURRENT_BIT | GL_TEXTURE_BIT |
+                             GL_POLYGON_BIT | GL_LIGHTING_BIT);
+            }
+        }
+        ~TrailState()
+        {
+            if (active)
+            {
+                RenderEnd();
+                glPopAttrib();
+            }
+        }
+    } state(energy);
+
+    // Dynamic uniforms are set once per cycle, outside its cached wall lists.
+    gLightwallMaterial::Scope flow(energy && textured,
+                                   se_GameTime(),cycle->GetDistance()/2.5f);
+    bool const premultiplied=gLightwallMaterial::IsActive();
+    static bool previousPremultiplied=premultiplied;
+    if (previousPremultiplied != premultiplied)
+    {
+        // Cached GL blend commands must follow shader success/fallback and
+        // context changes, rather than replaying the other colour convention.
+        rDisplayList::ClearAll();
+        previousPremultiplied=premultiplied;
+    }
+
+    // Membership is prepared once per view by the edge phase. If drawing an
+    // animated edge invalidates it, the membrane phase prepares it again safely.
+    if (pass != MembranePass || !prepared_)
+        PrepareLists(cycle);
+    prepared_ = pass == EdgePass;
+
+    // Each phase retains its own cache; no membrane is redrawn in the edge pass.
+    RenderAllWithDisplayList( camera, cycle, pass );
 
     // then, render the rest
-    RenderAll( camera, cycle, wallList_ );
+    RenderAll( camera, cycle, wallList_, pass );
 }
 
 namespace

@@ -204,6 +204,9 @@ public:
     //! draws object to the screen using OpenGL
     virtual void Render(const eCamera *cam);
 
+    //! depth-tested subparts that must precede every object's translucent render
+    virtual void RenderEarly(const eCamera *cam);
+
     // draws it to the screen in two dimensions using OpenGL (ie. for the HUD map)
     virtual void Render2D(tCoord scale) const;
 
