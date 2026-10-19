@@ -7,7 +7,33 @@ from types import SimpleNamespace
 import pytest
 from rich.console import Console
 
-from arma_ai.cli_progress import build
+from arma_ai.cli_progress import build, report_lines
+
+
+def test_report_lines_show_gain_match_counts_and_live_rates():
+    record = {"trainer": "teach", "update": 11300, "time": 100, "search_kl": .176, "pg": .276, "vf": .374,
+              "ent": .33, "value_explained": .26, "win_vs_hunter": 0., "win_exploiter": 1.,
+              "match_results": {"win_vs_hunter": {"wins": 0, "draws": 0, "losses": 2, "games": 2},
+                                "win_exploiter": {"wins": 1, "draws": 0, "losses": 0, "games": 1}}}
+    progress = {"trainer": "teach", "update": 11305, "time": 120, "phase": "learning", "sps": 16,
+                "config": {"snapshot_every": 1000, "log_every": 25}}
+    live = SimpleNamespace(fresh=True, running=True, label="TRAINING", detail="", method="teach")
+    lines = [line.plain for line in report_lines(progress, [record], live, width=110, now=120, started=80)]
+    assert lines == ["Report u11,300 · 20s ago · gain 0.176 · policy 0.276 · value 0.374 · entropy 0.33 · value EV 0.26",
+                     "Space fighter 0% (0W 0D 2L) · Exploiter 100% (1W 0D 0L)",
+                     "16 decisions/s · 15.0 updates/min · next snapshot u12,000"]
+    narrow = [line.plain for line in report_lines(progress, [record], live, width=60, now=120, started=80)]
+    assert narrow[:2] == ["Report u11,300 · 20s ago · gain 0.176 · policy 0.276 · value 0.374",
+                          "Hunter 0% (0W 0D 2L) · Exploiter 100% (1W 0D 0L)"]
+    stopped = SimpleNamespace(fresh=False, running=False, label="STOPPED", detail="", method="teach")
+    assert len(report_lines(progress, [record], stopped, width=110, now=120)) == 2  # no live rates
+    assert report_lines(progress, [], stopped, width=110, now=120)[0].plain == "No saved report yet"
+
+
+def test_terminal_shows_search_gain_with_the_losses(tmp_path):
+    text = output(tmp_path, {"trainer": "teach", "update": 100, "time": 119, "pg": .123, "vf": .456, "search_kl": .078},
+                  {"trainer": "teach", "update": 101, "time": 120, "phase": "learning"})
+    assert "Policy 0.1230  ·  Value 0.4560  ·  Gain 0.0780" in text
 
 
 def output(tmp_path, record, progress, width=110, fresh=True, *, running=None, height=32, now=120):

@@ -91,6 +91,61 @@ def update_rate(progress: dict, records: list[dict], started: float | None) -> f
     return 60 * (progress["update"] - first["update"]) / (now - first["time"])
 
 
+def report_lines(progress: dict, records: list[dict], status, *, width: int, now: float,
+                 started: float | None = None) -> list[Text]:
+    """The latest saved report under the activity line: what training is doing to the policy.
+
+    Gain is the KL between the search's target and the network's policy, the one number that
+    says whether self-play is teaching anything; the match scores carry their counts."""
+    def line(value: str, style: str = DIM) -> Text:
+        return Text(value, style=style, no_wrap=True, overflow="ellipsis")
+
+    history = eligible_records(records, progress)
+    if not history:
+        return [line("No saved report yet")]
+    last = history[-1]
+    live = status.running and status.fresh
+    narrow = width < 90
+    sep = " · "
+    head = [f"Report u{last.get('update', 0):,}", age(last.get("time", now), now)]
+    if started and last.get("time", 0) < started:
+        head.append("previous session")
+    numbers = [("gain", last.get("search_kl"), 3), ("policy", last.get("pg"), 3), ("value", last.get("vf"), 3)]
+    if not narrow:
+        numbers += [("entropy", last.get("ent"), 2), ("value EV", last.get("value_explained"), 2)]
+    shown = [f"{label} {value:.{decimals}f}" for label, value, decimals in numbers
+             if isinstance(value, (int, float)) and math.isfinite(value)]
+    lines = [line(sep.join(head + shown), "default")]
+    matches = []
+    for key, label, short in (("win_vs_hunter", "Space fighter", "Hunter"), ("win_vs_past", "Past selves", "Past"),
+                              ("win_exploiter", "Exploiter", "Exploiter")):
+        counts = last.get("match_results", {}).get(key)
+        score = last.get(key)
+        if isinstance(counts, dict) and counts.get("games"):
+            score = (counts["wins"] + .5 * counts["draws"]) / counts["games"]
+            detail = f" ({counts['wins']}W {counts['draws']}D {counts['losses']}L)"
+        elif isinstance(score, (int, float)) and math.isfinite(score):
+            detail = ""
+        else:
+            continue
+        matches.append(f"{short if narrow else label} {score:.0%}{detail}")
+    if matches:
+        lines.append(line(sep.join(matches)))
+    if live:
+        rates = []
+        if nonnegative(progress.get("sps")):
+            rates.append(f"{progress['sps']:,.0f} decisions/s")
+        per_minute = update_rate(progress, history, started)
+        if per_minute is not None:
+            rates.append(f"{per_minute:.1f} updates/min")
+        every, update = progress.get("config", {}).get("snapshot_every"), progress.get("update")
+        if isinstance(every, int) and every > 0 and nonnegative(update):
+            rates.append(f"next snapshot u{(update // every + 1) * every:,}")
+        if rates:
+            lines.append(line(sep.join(rates)))
+    return lines
+
+
 def build_imitation(run_dir: Path, progress: dict, status, *, width: int, height: int,
                     now: float, started: float | None = None) -> Group:
     """Imitation has phase work and cumulative updates, not an RL replay buffer or value loss."""
@@ -265,8 +320,9 @@ def build(run_dir: Path, progress: dict, records: list[dict], status, *, width: 
     if not warming and history:
         stamp = f"u{last.get('update', 0):,}  ·  {age(last.get('time', now), now)}"
         previous = "previous session" if started and last.get("time", 0) < started else "recorded" if not status.fresh else "reported"
+        gain = f"  ·  Gain {number(last['search_kl'])}" if nonnegative(last.get("search_kl")) else ""
         loss_lines = [line(f"Loss {stamp}  ·  {previous}"),
-                      line(f"Policy {number(last.get('pg'))}  ·  Value {number(last.get('vf'))}", "default")]
+                      line(f"Policy {number(last.get('pg'))}  ·  Value {number(last.get('vf'))}{gain}", "default")]
         body.extend(loss_lines)
     elif not warming:
         body.append(line("Loss: awaiting first report"))
@@ -401,29 +457,36 @@ def run(run_dir: Path, console: Console, *, once: bool = False) -> None:
     from .inline_ui import add_task, finite, progress_bar, update_bar
 
     progress, status, started, pid = {}, None, None, None
+    records, metrics_state = [], {}
     bar = progress_bar(console)
     task = add_task(bar)
 
     def refresh():
-        nonlocal progress, status, pid, started
+        nonlocal progress, status, pid, started, records
         progress = read_progress(run_dir / "progress.json")
-        status = training_status(run_dir, progress, [])
+        records = read_metrics(run_dir / "metrics.jsonl", metrics_state)
+        status = training_status(run_dir, progress, records)
         if progress.get("pid") != pid or (started is None and status.running):
             pid = progress.get("pid")
             started = (progress.get("started_at") or process_started(pid)) if status.running else None
 
     def frame():
         info = inline_activity(progress, status)
+        now = time.time()
+        # Imitation reports elsewhere; otherwise the last RL report rides under the activity line.
+        imitating = status.running and (getattr(status, "method", None) or progress.get("trainer")) == "imitate"
+        report = [] if imitating else report_lines(progress, records, status, width=console.width, now=now,
+                                                   started=started)
         if not status.running or not status.fresh:
             label = info["stage"]
             if finite(info["update"]):
                 label += f" · Blacklight update {info['update']:,}"
             if finite(info["saved_update"]):
                 label += f" · saved u{info['saved_update']:,}"
-            return Text(label, style=WARNING if status.label in ("STALE", "FAILED") else DIM,
-                        no_wrap=True, overflow="ellipsis")
-        update_bar(bar, task, **info, elapsed=time.time() - started if started else None)
-        return bar.get_renderable()
+            return Group(Text(label, style=WARNING if status.label in ("STALE", "FAILED") else DIM,
+                              no_wrap=True, overflow="ellipsis"), *report)
+        update_bar(bar, task, **info, elapsed=now - started if started else None)
+        return Group(bar.get_renderable(), *report)
 
     refresh()
     cfg = progress.get("config", {})

@@ -436,6 +436,10 @@ def _activity(progress: dict, current: dict, status: TrainingStatus, width: int,
             elapsed = max(0, now - saved_at)
             lines.append(_bar("Next save", elapsed / interval, f"{_duration(elapsed)}/{_duration(interval)}",
                               inner_width, due=elapsed >= interval))
+        snapshot = cfg.get("snapshot_every")
+        if _finite(update) and isinstance(snapshot, int) and snapshot > 0:
+            lines.append(_bar("Next snapshot", update % snapshot / snapshot,
+                              f"u{(update // snapshot + 1) * snapshot:,}", inner_width))
         target = progress.get("max_updates", cfg.get("max_updates"))
         if _finite(update) and _finite(target) and target > 0:
             lines.append(_bar("Update target", update / target, f"{update:,}/{target:,}", inner_width))
@@ -495,12 +499,14 @@ def _arenas(last: dict) -> Panel:
 
 def _reports(records: list[dict], rows: int, now: float) -> Panel:
     table = Table.grid(padding=(0, 2), expand=True)
-    for _ in range(6):
+    for _ in range(7):
         table.add_column(no_wrap=True, justify="right")
-    table.add_row(*[_line(value) for value in ("Update", "Age", "Policy loss", "Value loss", "Value EV", "Decisions/s")])
+    table.add_row(*[_line(value) for value in ("Update", "Age", "Policy loss", "Value loss", "Gain", "Value EV",
+                                               "Decisions/s")])
     for row in reversed(records[-rows:]):
         table.add_row(_line(f"{row['update']:,}", "default"), _line(ago(now - row.get("time", now))),
                       _line(_number(row.get("pg"), ".4f")), _line(_number(row.get("vf"), ".4f")),
+                      _line(_number(row.get("search_kl"), ".3f")),
                       _line(_number(row.get("value_explained"), ".3f")), _line(_number(row.get("sps"))))
     return _panel("Recent saved reports", table)
 
@@ -570,6 +576,10 @@ def build(run_dir: Path, recs: list[dict], width: int = 160, height: int = 48,
                        [row.get("vf") for row in history], NEUTRAL, fmt="{:.3f}"), "Policy above · value below")
     p_speed = _chart("Logged throughput", AreaGraph([row.get("sps") for row in history], BLUE),
                      "Decisions/s in saved reports")
+    gain_value = f" · {last['search_kl']:.3f}" if _finite(last.get("search_kl")) else ""
+    p_gain = _chart("Search gain" + gain_value, AreaGraph([row.get("search_kl") for row in history], BLUE,
+                    [row.get("ent") for row in history], NEUTRAL, fmt="{:.2f}"),
+                    "KL above · entropy below")
     scores = _scores(last, bars=wide)
     layout = Layout()
     base = [Layout(header, size=2), Layout(activity, size=activity_height), report]
@@ -580,7 +590,7 @@ def build(run_dir: Path, recs: list[dict], width: int = 160, height: int = 48,
             [row.get("win_vs_past") for row in history], NEUTRAL, hi=1, down_hi=1, fmt="{:.0%}")))
         p_scores = _panel("Training matches", matchup_body, "Space fighter above · V4 snapshots below · draws = ½")
         first, second, third = Layout(), Layout(), Layout()
-        first.split_row(Layout(p_scores, ratio=3), Layout(p_duration, ratio=2))
+        first.split_row(Layout(p_scores, ratio=3), Layout(p_gain, ratio=2), Layout(p_duration, ratio=2))
         second.split_row(Layout(p_value), Layout(p_losses), Layout(p_speed))
         third.split_row(Layout(_arenas(last), ratio=2), Layout(_reports(history, 7, now), ratio=3))
         layout.split_column(*base, Layout(first, ratio=1), Layout(second, ratio=1), Layout(third, size=10), footer)
@@ -591,7 +601,7 @@ def build(run_dir: Path, recs: list[dict], width: int = 160, height: int = 48,
         sections = [*base, Layout(p_scores, size=6), Layout(charts, ratio=1)]
         if height >= 30:
             extra = Layout()
-            extra.split_row(Layout(p_losses), Layout(p_speed))
+            extra.split_row(Layout(p_losses), Layout(p_gain), Layout(p_speed))
             sections.append(Layout(extra, ratio=1))
         layout.split_column(*sections, footer)
     return layout

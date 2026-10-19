@@ -131,6 +131,18 @@ def test_supervisor_waiting_for_child_is_starting_not_training(tmp_path, monkeyp
     assert not status.running
 
 
+@pytest.mark.parametrize("size", [(100, 30), (160, 48)])
+def test_search_gain_is_charted_with_entropy_and_listed(tmp_path, monkeypatch, size):
+    monkeypatch.setattr(dash, "_processes", lambda: {})
+    recs = [{"trainer": "teach", "update": update, "time": time.time(), "ep_len": 400, "sps": 60, "ent": .3,
+             "search_kl": .138 - .01 * i, "pg": .25, "vf": .2, "value_explained": .5}
+            for i, update in enumerate((25, 50, 75))]
+    output = render(tmp_path / "v4", recs, {}, *size)
+    assert "Search gain · 0.118" in output and "KL above · entropy below" in output
+    if size[0] == 160:
+        assert "Gain" in output and "0.118" in output and "0.138" in output
+
+
 def test_entropy_is_normalized_over_six_controls(tmp_path):
     assert dash.policy_focus({"ent": math.log(6), "actions": 6}, tmp_path) == pytest.approx(0)
     assert dash.policy_focus({"ent": math.log(6)}, tmp_path) == pytest.approx(0)
