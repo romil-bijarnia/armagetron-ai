@@ -156,6 +156,11 @@ static REAL sg_speedCycleSoundMach=0.1f;
 static tSettingItem<REAL> c_ssm("CYCLE_SOUND_MACH",
                                sg_speedCycleSoundMach);
 
+// volume of the cycle's engine hum, 0 to 1; 0 keeps it silent (it used to be fixed at 0.3)
+static REAL sg_cycleSoundVolume=0;
+static tSettingItem<REAL> c_csv("CYCLE_SOUND_VOLUME",
+                                sg_cycleSoundVolume);
+
 // time after spawning it takes the cycle to start building a wall
 static REAL sg_cycleWallTime=0.0;
 static nSettingItemWatched<REAL>
@@ -4983,9 +4988,9 @@ void gCycle::SoundMix(Sint16 *dest,unsigned int len,
           }
         */
 
-        if (engine)
+        if (engine && sg_cycleSoundVolume > 0)
         {
-            REAL const engineVolume = 0.3;
+            REAL const engineVolume = sg_cycleSoundVolume < 1 ? sg_cycleSoundVolume : 1;
 
             REAL const dopplerPitchAdjusted = sg_speedCycleSoundMach*dopplerPitch/sg_speedCycleSound;
             REAL const dopplerFactor = dopplerPitchAdjusted > 0 ? 1 + dopplerPitchAdjusted : 1/(1 - dopplerPitchAdjusted);
