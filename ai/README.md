@@ -75,12 +75,16 @@ checkpoint is `latest.pt`, and `snapshots/` keeps a copy of it once per
 `--snapshot-every` updates (default 1000) to fall back on. Closing the optional
 viewer never stops training.
 
-By default, 25% of duels start in a close encounter: parallel riding, crossing
-paths or offset head-on approaches. Distances, timing, position, reflection and
-heading vary. These use normal physics and resources; the remaining duels and
-all four-player games keep the normal arena spawns. The purpose is to give the
-policy more fighting practice alongside full-round strategy. Set
-`--combat-prob 0` for standard spawns only, or choose another fraction up to 1.
+By default, half of the duels start in a close encounter: parallel riding,
+crossing paths or offset head-on approaches. Distances, timing, position,
+reflection and heading vary. These use normal physics and resources; the
+remaining duels and all four-player games keep the normal arena spawns. The
+purpose is to give the policy more fighting practice alongside full-round
+strategy. Set `--combat-prob 0` for standard spawns only, or choose another
+fraction up to 1. Three rounds in ten are against the space fighter
+(`--hunter-prob`), and the outcome is discounted by 0.997 per decision
+(`--gamma`), so a win ten seconds away is worth 55% of an immediate one and the
+fighter is paid for finishing, not for surviving.
 
 Search against the space fighter follows its actual cached move and brake hold
 until its next replan (normally 0.05–0.10 s), then uses the network's value for

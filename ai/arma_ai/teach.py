@@ -69,6 +69,7 @@ class Config:
     games: int = 256  # rounds played at once
     sims: int = 24  # simulations per searched decision
     macro: int = 2  # decisions per search step (0.1 s, the turn delay)
+    gamma: float = 0.997  # discount per decision: a win 10 s away is worth 55% of one now, so it closes fights
     search_prob: float = 0.25
     gumbel: float = 1.0
     temperature: float = 1.0
@@ -83,9 +84,9 @@ class Config:
     value_coef: float = 1.0
     aux_coef: float = 0.25
     own_coef: float = 0.5  # weight of the ownership map loss (who holds each cell two seconds on)
-    hunter_prob: float = 0.20  # rounds against the simulator's space fighter (a minimax over territory)
+    hunter_prob: float = 0.30  # rounds against the simulator's space fighter (a minimax over territory that cuts)
     hunter_depth: int = 2  # how many plies it looks ahead
-    combat_prob: float = 0.25  # fraction of duels starting in a varied close encounter
+    combat_prob: float = 0.50  # fraction of duels starting in a varied close encounter: the close fight is the job
     max_grad_norm: float = 1.0
     bf16: bool = True  # train in bfloat16 (about 20% faster on Apple GPUs)
     replay_ratio: float = 1.5  # training samples per generated one (the rest of the GPU goes to self-play)
@@ -204,7 +205,7 @@ class Actor:
         self.device = torch.device(cfg.device)
         self.half = self.device.type == "mps"
         self.rng = random.Random(cfg.seed + 17)
-        self.sp = SelfPlay(cfg.games, sims=cfg.sims, macro=cfg.macro, search_prob=cfg.search_prob,
+        self.sp = SelfPlay(cfg.games, sims=cfg.sims, macro=cfg.macro, gamma=cfg.gamma, search_prob=cfg.search_prob,
                            temperature=cfg.temperature, gumbel=cfg.gumbel, threads=cfg.threads,
                            value_steps=cfg.value_steps, hunter_depth=cfg.hunter_depth, recurrent=True)
         self.sp.set_ring(AGENT_MAIN, rings[0])
@@ -425,6 +426,8 @@ class Learner:
             raise ValueError("max_updates must be zero (unlimited) or a positive total update cap")
         if cfg.snapshot_every < 0:
             raise ValueError("snapshot_every must be zero (never) or a positive update interval")
+        if not (math.isfinite(cfg.gamma) and 0 < cfg.gamma <= 1):
+            raise ValueError("gamma must be a discount in (0, 1]")
         if not math.isfinite(cfg.combat_prob) or not 0 <= cfg.combat_prob <= 1:
             raise ValueError("combat_prob must be between zero and one")
         # Ring.window reserves the oldest 4096 slots while its writer is active. A smaller
@@ -578,7 +581,8 @@ class Learner:
     def hyperparameters(self) -> dict:
         """Resolved settings for the live viewer, including the actual optimiser values."""
         names = ("batch", "weight_decay", "value_coef", "aux_coef", "own_coef", "max_grad_norm", "bf16",
-                 "replay_ratio", "warmup", "sequence_burn_in", "sequence_unroll", "ring", "exploiter_ring", "sims", "macro", "search_prob", "gumbel",
+                 "replay_ratio", "warmup", "sequence_burn_in", "sequence_unroll", "ring", "exploiter_ring", "sims", "macro", "gamma",
+                 "search_prob", "gumbel",
                  "temperature", "value_steps", "hunter_prob", "hunter_depth", "combat_prob", "exploiter_prob",
                  "exploiter_win", "exploiter_games",
                  "exploiter_patience", "publish_seconds", "save_seconds", "seed")

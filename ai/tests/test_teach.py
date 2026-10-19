@@ -24,7 +24,10 @@ def test_elo_fit_orders_players_and_anchors_the_builtin_ai():
 def test_new_run_defaults_use_the_current_fighter():
     cfg = Config()
     assert cfg.run == "runs/blacklight"
-    assert cfg.combat_prob == .25
+    # The fighter trains for the close fight: half of its duels start in one, three rounds in
+    # ten are against the cutting space fighter, and a win ten seconds away is worth 55% of one now.
+    assert cfg.combat_prob == .5 and cfg.hunter_prob == .3
+    assert cfg.gamma == .997 and cfg.gamma ** 200 == pytest.approx(.549, abs=.001)
     assert cfg.max_updates == 0
 
 
