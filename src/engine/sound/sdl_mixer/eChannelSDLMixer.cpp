@@ -90,14 +90,15 @@ eChannel::eChannel() : m_Delayed(false) {
 #endif // DEDICATED
 }
 
-void eChannel::PlaySound(eWavData& sound) {
+void eChannel::PlaySound(eWavData& sound, REAL gain) {
 #ifdef HAVE_LIBSDL_MIXER
+    if (!sound.GetWavData()) return;
     if(m_isPlaying) {
         Mix_HaltChannel(m_ChannelID);
         //std::cerr << "Channel occupied, halting: " << m_ChannelID << "\n";
     }
     int theChannel;
-    Mix_Volume(m_ChannelID, sound.GetVolume());
+    Mix_Volume(m_ChannelID, std::max(0, std::min(128, static_cast<int>(sound.GetVolume() * gain))));
     theChannel = Mix_PlayChannel(m_ChannelID, sound.GetWavData(), 0);
 
     if(theChannel != m_ChannelID) {
@@ -145,14 +146,19 @@ void eChannel::Set3d(eCoord home, eCoord soundPos, eCoord homeDirection) {
 #endif // DEDICATED
 }
 
-void eChannel::Set3d(eCamera const &camera, eGameObject const &soundOrigin, REAL volume) {
+bool eChannel::Set3d(eCamera const &camera, eGameObject const &soundOrigin, REAL volume) {
 #ifdef HAVE_LIBSDL_MIXER
     REAL r, l, doppler;
     camera.GetSoundVolume(soundOrigin, r, l, doppler);
     r *= volume;
     l *= volume;
-    Mix_SetPanning(m_ChannelID, std::min(255, static_cast<int>(l*255)), std::min(255, static_cast<int>(r*255)));
+    if (!std::isfinite(l) || !std::isfinite(r) || std::max(l, r) < 1.0f / 255)
+        return false;
+    Mix_SetPanning(m_ChannelID, std::max(0, std::min(255, static_cast<int>(l*255))),
+                               std::max(0, std::min(255, static_cast<int>(r*255))));
+    return true;
 #endif // DEDICATED
+    return false;
 }
 
 void eChannel::Update() {

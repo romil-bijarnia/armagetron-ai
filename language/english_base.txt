@@ -702,6 +702,8 @@ camera_in_max_focus_distance_help     This, multiplied by the current speed, det
 
 cycle_sound_mach_help                   Doppler effect strength; this is the mach number a cyle is moving at if it is driving at CYCLE_SOUND_SPEED
 cycle_sound_volume_help                 Volume of the cycles' engine hum, 0 to 1; 0 keeps it silent
+cycle_turn_sound_volume_help            Turn feedback volume, 0 to 1; 0 mutes it
+cycle_turn_sound_remote_volume_help     Other riders' turn feedback relative to your own, 0 to 1
 cycle_input_buffer_help                 Use a single pending turn for local controls (1), or the classic unlimited queue (0). Excess turn presses are ignored while full.
 bloom_help                              Let the bright parts of the scene glow (needs shaders)
 bloom_intensity_help                    Strength of the glow; 0 turns it off

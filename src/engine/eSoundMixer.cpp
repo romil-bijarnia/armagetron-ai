@@ -41,6 +41,7 @@ eSoundMixer by Dave Fancella
 #include "tConsole.h"
 #include "tError.h"
 #include "eGameObject.h"
+#include "eCamera.h"
 #include "eCoord.h"
 
 #include "eSoundMixer.h"
@@ -112,6 +113,17 @@ static tConfItem<int> se("MUSIC_ACTIVE", musicActive);
 float buffersize = 1.0;
 static tConfItem<float> sbs("SOUND_BUFFER_SIZE", buffersize);
 
+// One-shot feedback is independent of the continuous engine-hum volume.
+static REAL se_turnSoundVolume = 1.0f;
+static tSettingItem<REAL> turnVolumeConf("CYCLE_TURN_SOUND_VOLUME", se_turnSoundVolume);
+static REAL se_otherTurnSoundVolume = 0.35f;
+static tSettingItem<REAL> otherTurnVolumeConf("CYCLE_TURN_SOUND_REMOTE_VOLUME", se_otherTurnSoundVolume);
+
+static REAL se_SoundGain(REAL value)
+{
+    return std::isfinite(value) ? std::max(REAL(0), std::min(REAL(1), value)) : 0;
+}
+
 namespace
 {
 static tConfigMigration migrate([](tString const &savedInVersion){
@@ -156,7 +168,7 @@ std::unique_ptr<eMusicTrack> eSoundMixer::m_TitleTrack{};
 std::unique_ptr<eMusicTrack> eSoundMixer::m_GuiTrack{};
 std::unique_ptr<eMusicTrack> eSoundMixer::m_GameTrack{};
 
-eSoundMixer::eSoundMixer()
+eSoundMixer::eSoundMixer() : m_active(false)
 {
 #ifdef HAVE_LIBSDL_MIXER
     m_Grid = NULL;
@@ -340,6 +352,16 @@ void eSoundMixer::Init() {
     m_SoundEffects.resize(15);
     m_SoundEffects[CYCLE_TURN].LoadWavFile(vpath.GetReadPath("sound/cycle_turn.ogg") );
     m_SoundEffects[CYCLE_TURN].SetVolume(60);
+    // Rounded attacks and short, slightly different air sweeps keep successive
+    // turns readable without repeating the old percussive click.
+    char const *turnFiles[] = {"sound/cycle_turn_air_a.wav", "sound/cycle_turn_air_b.wav",
+                              "sound/cycle_turn_air_c.wav"};
+    m_TurnSounds.resize(3);
+    for (unsigned int i = 0; i < m_TurnSounds.size(); ++i)
+    {
+        m_TurnSounds[i].LoadWavFile(vpath.GetReadPath(turnFiles[i]));
+        m_TurnSounds[i].SetVolume(60);
+    }
     m_SoundEffects[CYCLE_EXPLOSION].LoadWavFile(vpath.GetReadPath( "sound/expl.ogg" ));
     m_SoundEffects[ANNOUNCER_1].LoadWavFile(vpath.GetReadPath("sound/1voicemale.ogg") );
     m_SoundEffects[ANNOUNCER_2].LoadWavFile(vpath.GetReadPath("sound/2voicemale.ogg") );
@@ -426,13 +448,31 @@ void eSoundMixer::SDLMusicFinished() {
 #endif
 }
 
+eWavData &eSoundMixer::SoundForEvent(int soundEffect)
+{
+#ifdef HAVE_LIBSDL_MIXER
+    if (soundEffect == CYCLE_TURN && !m_TurnSounds.empty())
+    {
+        // Audio variation must not consume the simulation's random sequence.
+        auto &sound = m_TurnSounds[m_NextTurnSound++ % m_TurnSounds.size()];
+        if (sound.GetWavData())
+            return sound;
+    }
+#endif
+    return m_SoundEffects[soundEffect];
+}
+
 void eSoundMixer::PushButton( int soundEffect ) {
 #ifdef HAVE_LIBSDL_MIXER
     if (!m_active) return;
 
+    REAL gain = soundEffect == CYCLE_TURN ? se_SoundGain(se_turnSoundVolume) : 1;
+    if (gain <= 0) return;
+
     int theChannel = FirstAvailableChannel();
     if( theChannel < 0) return;
-    m_Channels[ theChannel ].PlaySound(m_SoundEffects[soundEffect]);
+    Mix_SetPanning(theChannel, 255, 255);
+    m_Channels[ theChannel ].PlaySound(SoundForEvent(soundEffect), gain);
 #endif // DEDICATED
 }
 
@@ -440,21 +480,38 @@ void eSoundMixer::PushButton( int soundEffect, eGameObject const &noiseMaker, RE
 #ifdef HAVE_LIBSDL_MIXER
     if (!m_active) return;
 
+    bool const turn = soundEffect == CYCLE_TURN;
+    REAL gain = turn ? se_SoundGain(se_turnSoundVolume) : 1;
+    if (gain <= 0 || !std::isfinite(volume) || volume <= 0) return;
+
     // If we don't have an owner yet, just call regular PushButton
     if(!m_Grid)
         return PushButton(soundEffect);
 
+    // Select once, so split-screen listeners hear the same event variant.
+    eWavData &sound = SoundForEvent(soundEffect);
     auto &cameras = m_Grid->Cameras();
     for(auto *pCamera: cameras)
     {
         if(!pCamera)
             continue;
 
+        REAL spatialVolume = volume;
+        if (turn && pCamera->Center() != &noiseMaker)
+        {
+            // A nearby opponent remains audible; turns across the arena should
+            // not form a constant ticking bed beneath the local rider.
+            eCoord receiver = pCamera->Center() ? pCamera->Center()->Position() : pCamera->CenterPos();
+            REAL distanceSquared = (noiseMaker.Position() - receiver).NormSquared();
+            spatialVolume *= se_SoundGain(se_otherTurnSoundVolume) / (1 + distanceSquared / 400);
+        }
+        if (spatialVolume <= 0) continue;
+
         int theChannel = FirstAvailableChannel();
 
         if( theChannel < 0) continue;
-        m_Channels[theChannel].Set3d(*pCamera, noiseMaker, volume);
-        m_Channels[theChannel].PlaySound(m_SoundEffects[soundEffect]);
+        if (!m_Channels[theChannel].Set3d(*pCamera, noiseMaker, spatialVolume)) continue;
+        m_Channels[theChannel].PlaySound(sound, gain);
     }
 
 #endif // DEDICATED

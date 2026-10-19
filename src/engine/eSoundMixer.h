@@ -151,6 +151,7 @@ public:
 private:
     // Gets the first available channel
     int FirstAvailableChannel();
+    eWavData &SoundForEvent(int soundEffect);
 
     static std::unique_ptr<eSoundMixer> _instance;
 
@@ -169,6 +170,8 @@ private:
     std::unique_ptr<tPlayList> m_Playlist;
 
     std::deque<eWavData> m_SoundEffects;
+    std::deque<eWavData> m_TurnSounds;
+    unsigned int m_NextTurnSound = 0;
     std::deque<eChannel> m_Channels;
     int m_numChannels;
 

@@ -3823,7 +3823,7 @@ private:
 
 namespace
 {
-    auto const cycleTurnSoundVolume = 4.0f;
+    auto const cycleTurnSoundVolume = 1.0f;
 }
 
 bool gCycle::DoTurn(int d)

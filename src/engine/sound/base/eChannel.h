@@ -88,8 +88,8 @@ public:
     void SetId(int newID) { m_ChannelID = newID; };
 
     void Set3d(eCoord home, eCoord soundPos, eCoord homeDirection);
-    void Set3d(eCamera const &camera, eGameObject const &soundOrigin, REAL volume);
-    void PlaySound(eWavData& sound);
+    bool Set3d(eCamera const &camera, eGameObject const &soundOrigin, REAL volume);
+    void PlaySound(eWavData& sound, REAL gain = 1);
     void LoopSound(eWavData& sound);
     void StopSound() {
 #ifndef DEDICATED
