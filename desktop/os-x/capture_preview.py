@@ -36,7 +36,9 @@ def png(path, pixels, width, height):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--client", type=Path, default=ROOT / "build-macos/Armagetron Advanced.app/Contents/MacOS/armagetronad")
+    built_client = ROOT / "build-macos/Armagetron Advanced.app/Contents/MacOS/armagetronad"
+    installed_client = Path("/Applications/Armagetron Advanced.app/Contents/MacOS/armagetronad")
+    ap.add_argument("--client", type=Path, default=built_client if built_client.is_file() else installed_client)
     ap.add_argument("--output", type=Path, required=True)
     ap.add_argument("--classic", action="store_true")
     ap.add_argument("--load-only", action="store_true", help="render without GPU readback, for concurrent latency checks")
@@ -45,6 +47,12 @@ def main():
     ap.add_argument("--font", type=Path, help="optional installed font to verify with the local preset")
     ap.add_argument("--set", action="append", default=[], metavar="KEY=VALUE",
                     help="override one local client setting for a controlled comparison")
+    ap.add_argument("--server-set", action="append", default=[], metavar="KEY=VALUE",
+                    help="override one isolated preview-server setting")
+    ap.add_argument("--capture-at", type=float, action="append", default=None,
+                    help="capture at this elapsed second; repeat to choose multiple frames")
+    ap.add_argument("--video", type=Path, help="also record the actual rendered frames to an MP4 (use MAX_FPS=60)")
+    ap.add_argument("--video-after", type=float, default=4, help="start recording after this elapsed second")
     ap.add_argument("--seconds", type=float, default=15)
     ap.add_argument("--neural-slots", type=int, default=0,
                     help="use the native recurrent policy for this many of the four server bots")
@@ -60,6 +68,19 @@ def main():
         ap.error("--neural-slots must be between zero and four")
     if args.neural_model and not args.neural_model.is_file():
         ap.error("--neural-model must be an existing policy file")
+    encoder = shutil.which("ffmpeg") if args.video else None
+    if args.video and (args.load_only or not encoder or not 0 <= args.video_after < args.seconds):
+        ap.error("video requires ffmpeg, frame readback, and --video-after within the capture duration")
+    marks = args.capture_at if args.capture_at is not None else [4, 8, 12]
+    if args.capture_at is not None and any(not 0 < mark < args.seconds for mark in marks):
+        ap.error("capture times must be positive and below --seconds")
+
+    def settings(values):
+        for setting in values:
+            key, separator, value = setting.partition("=")
+            if not separator or not re.fullmatch(r"[A-Z][A-Z_0-9]*", key) or '\n' in value or '\r' in value:
+                ap.error("settings must be one KEY=VALUE each")
+            yield key, value
     root = args.output.resolve()
     root.mkdir(parents=True, exist_ok=True)
     for side in ("server", "client"):
@@ -68,6 +89,7 @@ def main():
     server_settings = ArenaConfig(slots=args.neural_slots, builtin_ais=4 - args.neural_slots,
                                   lockstep_dt=0).settings()
     server_settings.update(SERVER_PORT=str(args.port), NEURAL_END_ROUND_WITHOUT_NEURAL="0")
+    server_settings.update(dict(settings(args.server_set)))
     if args.neural_slots:
         server_settings["NEURAL_DEBUG"] = "1"
         if args.neural_model:
@@ -102,19 +124,24 @@ TEXT_OUT 1
         if not args.font.is_file():
             ap.error("font file does not exist")
         config += f"FONT_TYPE 3\nFONT_FILE_CUSTOM {args.font.resolve()}\nUSE_CUSTOM_FONT 1\n"
-    for setting in args.set:
-        key, separator, value = setting.partition("=")
-        if not separator or not re.fullmatch(r"[A-Z][A-Z_0-9]*", key) or '\n' in value or '\r' in value:
-            ap.error("--set must be one KEY=VALUE setting")
+    for key, value in settings(args.set):
         config += f"{key} {value}\n"
     (root / "client/config/autoexec.cfg").write_text(config)
-    bundle = ROOT / "build-macos/Armagetron Advanced.app/Contents"
+    client_path = args.client.resolve()
+    if client_path.parent.name == "MacOS" and client_path.parent.parent.name == "Contents":
+        bundle = client_path.parent.parent
+    else:
+        # A bare incremental-build executable uses the installed game assets.
+        bundle = installed_client.parent.parent
     resources = bundle / "Resources/armagetronad"
     configdir = bundle / "etc/armagetronad"
     processes = []
     dimensions = []
     started = time.monotonic()
     frames = 0
+    recording = None
+    recording_log = None
+    recorded_frames = 0
     try:
         with (root / "server.log").open("w") as log:
             server = subprocess.Popen([str(ENGINE_BIN), "--daemon", "--datadir", str(ENGINE_DATA),
@@ -176,17 +203,47 @@ TEXT_OUT 1
                 del buffer[:length]
                 frames += 1
                 elapsed = time.monotonic() - started
-                for mark in (4, 8, 12):
+                if args.video and elapsed >= args.video_after:
+                    if recording is None:
+                        video = args.video.resolve()
+                        video.parent.mkdir(parents=True, exist_ok=True)
+                        recording_log = (root / "video-encoder.log").open("wb")
+                        recording = subprocess.Popen([
+                            encoder, "-hide_banner", "-loglevel", "error", "-y",
+                            "-f", "rawvideo", "-pixel_format", "rgb24",
+                            "-video_size", f"{width}x{height}", "-framerate", "60", "-i", "pipe:0",
+                            "-an", "-c:v", "libx264", "-preset", "veryfast", "-crf", "19",
+                            "-pix_fmt", "yuv420p", "-movflags", "+faststart", str(video)
+                        ], stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=recording_log)
+                    recording.stdin.write(frame)
+                    recorded_frames += 1
+                for mark in marks:
                     if elapsed >= mark and mark not in captured:
-                        png(root / f"frame-{mark:02}.png", frame, width, height)
+                        png(root / f"frame-{mark:02g}.png", frame, width, height)
                         captured.add(mark)
         if not captured:
             raise RuntimeError(f"No rendered frames captured; see {root / 'client.log'}")
         report = {"frames": frames, "dimensions": dimensions, "elapsed_seconds": time.monotonic() - started,
                   "classic": args.classic, "hidden": True, "captures": sorted(captured)}
+        if recording is not None:
+            recording.stdin.close()
+            if recording.wait(timeout=15) != 0:
+                raise RuntimeError(f"Video encoder failed; see {root / 'video-encoder.log'}")
+            report.update(video=str(args.video.resolve()), video_frames=recorded_frames, video_fps=60)
         (root / "capture.json").write_text(json.dumps(report, indent=2) + "\n")
         print(json.dumps(report))
     finally:
+        if recording is not None:
+            if not recording.stdin.closed:
+                recording.stdin.close()
+            if recording.poll() is None:
+                try:
+                    recording.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    recording.kill()
+                    recording.wait()
+        if recording_log is not None:
+            recording_log.close()
         for process in reversed(processes):
             if process.poll() is None:
                 process.terminate()
