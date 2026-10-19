@@ -843,6 +843,7 @@ static gCycle *Cycle(int id){
 #endif
 
 #include "rRender.h"
+#include "rBloom.h"
 
 
 
@@ -1420,6 +1421,9 @@ void RenderAllViewports(eGrid *grid){
 			}
 
         }
+
+        // every viewport's scene is complete and nothing flat is drawn yet: let it glow
+        sr_Bloom();
 
         // glDisable( GL_FOG );
     }

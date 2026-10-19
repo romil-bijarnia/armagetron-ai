@@ -4308,6 +4308,9 @@ void gCycleWallsDisplayListManager::RenderAll( eCamera const * camera, gCycle * 
     sr_DepthOffset(true);
     if ( rTextureGroups::TextureMode[rTextureGroups::TEX_WALL] != 0 )
         glDisable(GL_TEXTURE_2D);
+    // the blacklight look draws the core line thick enough to be seen on a dense screen
+    if ( sg_blacklightVisuals )
+        glLineWidth( sr_screenHeight > 640 ? sr_screenHeight / 640.f : 1.f );
     
     gNetPlayerWall * run = list;
     while( run )
@@ -4318,6 +4321,8 @@ void gCycleWallsDisplayListManager::RenderAll( eCamera const * camera, gCycle * 
     }
 
     RenderEnd();
+    if ( sg_blacklightVisuals )
+        glLineWidth( 1 );
     sr_DepthOffset(false);
     if ( rTextureGroups::TextureMode[rTextureGroups::TEX_WALL] != 0 )
         glEnable(GL_TEXTURE_2D);

@@ -702,6 +702,10 @@ camera_in_max_focus_distance_help     This, multiplied by the current speed, det
 
 cycle_sound_mach_help                   Doppler effect strength; this is the mach number a cyle is moving at if it is driving at CYCLE_SOUND_SPEED
 cycle_sound_volume_help                 Volume of the cycles' engine hum, 0 to 1; 0 keeps it silent
+bloom_help                              Let the bright parts of the scene glow (needs shaders)
+bloom_intensity_help                    Strength of the glow; 0 turns it off
+bloom_threshold_help                    Brightness, 0 to 1, from which a pixel starts to glow
+bloom_radius_help                       Width of the glow, as blur spacing in glow buffer pixels
 sound_self_factor_help                  Amplitude suppression factor for your own engine sound or other looped sounds from game objects
 sound_receiver_size_help                Basic size of the virtual microphone in meters
 sound_receiver_size_distance_help       Additional size of the virtual microphone from the distance of the camera to its target

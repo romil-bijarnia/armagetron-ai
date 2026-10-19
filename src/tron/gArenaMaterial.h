@@ -67,13 +67,13 @@ private:
                 }
                 else
                 {
-                    // Quiet perimeter panels and one luminous low rail provide
-                    // a boundary cue without the old advertising texture.
+                    // Near-black perimeter panels with faint seams and one rail
+                    // along the floor bright enough for the glow pass to pick up.
                     float v = float(y) / (size - 1);
                     float seam = Line(std::min(x % 128, 128 - x % 128), 2.f);
                     float rail = std::fabs(v - .97f);
-                    intensity = .20f + .04f * v + .035f * seam
-                                + .60f * Line(rail, .003f) + .12f * Line(rail, .018f);
+                    intensity = .07f + .03f * v + .05f * seam
+                                + .95f * Line(rail, .004f) + .22f * Line(rail, .02f);
                 }
                 Uint8 light = Uint8(std::min(1.f, intensity) * 255.f + .5f);
                 row[x] = SDL_MapRGBA(raw->format, light, light, light, 255);

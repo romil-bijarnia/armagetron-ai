@@ -414,6 +414,13 @@ void gWallRim::RenderReal(const eCamera *cam){
             REAL rwr = (rim_wall_red * .7) + intensity;
             REAL rwg = (rim_wall_green * .7) + intensity;
             REAL rwb = (rim_wall_blue * .7) + intensity;
+            if (sg_blacklightVisuals)
+            {
+                // the blacklight look lights every rim wall the same: dark panels, one glowing rail
+                rwr = rim_wall_red;
+                rwg = rim_wall_green;
+                rwb = rim_wall_blue;
+            }
             
             RenderEnd( true );
             Color(rwr, rwg, rwb);
@@ -936,7 +943,9 @@ void gNetPlayerWall::RenderList(bool list, gWallRenderMode renderMode ){
                 return;
             }
 
-            REAL intensity = .7 + .3 * xs/denom;
+            // the classic look fakes lighting by dimming walls that run along y;
+            // the blacklight look keeps every trail at full brightness so the glow is even
+            REAL intensity = sg_blacklightVisuals ? 1 : .7 + .3 * xs/denom;
             r *= intensity;
             g *= intensity;
             b *= intensity;
@@ -1072,6 +1081,9 @@ void gNetPlayerWall::RenderList(bool list, gWallRenderMode renderMode ){
 inline bool upperlinecolor(REAL r,REAL g,REAL b, REAL a){
     if (rTextureGroups::TextureMode[rTextureGroups::TEX_WALL]<0)
         glColor4f(1,1,1,a);
+    else if (sg_blacklightVisuals)
+        // a white-hot core that keeps a hint of the trail's colour
+        glColor4f(r*.35f+.65f,g*.35f+.65f,b*.35f+.65f,a);
     else{
         /*
           REAL upperline_alpha=fabs(se_cameraRise*2);
