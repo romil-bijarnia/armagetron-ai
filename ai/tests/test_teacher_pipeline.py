@@ -69,6 +69,10 @@ def test_v4_teacher_actor_learner_checkpoint_resume(tmp_path: Path, device: str)
         assert starting["warmup_target"] == kwargs["warmup"] and starting["actions"] == 6
         assert starting["warmup_ready_target"] == 8 and starting["warmup_searched_target"] == 4
         assert 0 < starting["started_at"] <= starting["time"]
+        helper = starting["exploiter"]
+        assert helper["phase"] == "warming_up" and helper["generation"] == 0
+        assert helper["updates"] == helper["session_updates"] == helper["fresh_samples"] == 0
+        assert helper["ready_target"] == 8 and helper["searched_target"] == 4
         first.run()
         assert first.update == 2
         assert first.generated[0] > 0 and first.decisions > 0
@@ -89,6 +93,9 @@ def test_v4_teacher_actor_learner_checkpoint_resume(tmp_path: Path, device: str)
         path = tmp_path / "v4" / "latest.pt"
         ck = torch.load(path, map_location="cpu", weights_only=True)
         assert net_version(ck["model"]) == 4 and ck["update"] == 2
+        assert set(ck) == {"trainer", "model", "opt", "last_training_method", "imitation_state", "exploiter",
+                           "exploiter_opt", "update", "xupdates", "generation", "trained", "generated",
+                           "decisions", "games", "config"}  # the canonical checkpoint's keys, unchanged
         assert not {"net", "bootstrap", "bootstrap_trained", "warm_value_every"} & ck["config"].keys()
         assert "bootstrapping" not in ck
         assert ck["last_training_method"] == "rl"
@@ -124,11 +131,41 @@ def test_v4_teacher_actor_learner_checkpoint_resume(tmp_path: Path, device: str)
         rows = [json.loads(line) for line in (tmp_path / "v4" / "metrics.jsonl").read_text().splitlines()]
         assert [row["update"] for row in rows] == [1, 2, 3]
         assert all(row["trainer"] == "teach" and row["actions"] == 6 and row["net"] == 4 for row in rows)
+        assert all(row["exploiter_updates"] == row["exploiter_session_updates"] == 0 for row in rows)
+        assert all(row["exploiter_phase"] == "warming_up" and row["exploiter_ready_samples"] == 0 for row in rows)
         final = json.loads(progress_path.read_text())
         assert final["phase"] == "stopped" and final["update"] == 3
         assert all(np.isfinite([row[k] for k in ("pg", "vf", "aux", "own", "safe_kill", "grad_norm")]).all()
                    for row in rows)
         assert torch.load(path, map_location="cpu", weights_only=True)["update"] == 3
         assert sorted(file.name for file in resumed.run_dir.glob("*.pt")) == ["latest.pt"]
+    finally:
+        torch.set_num_threads(old_threads)
+
+
+def test_main_network_learns_from_rounds_against_the_exploiter(tmp_path: Path):
+    """With every round the main network against the current exploiter, the main network's
+    updates can only come from those rounds, and the exploiter learns in none of them."""
+    old_threads = torch.get_num_threads()
+    torch.set_num_threads(2)
+    try:
+        learner = Learner(Config(run=str(tmp_path / "vs"), games=2, sims=2, macro=2, search_prob=1.0, threads=2,
+                                 ring=8192, exploiter_ring=8192, batch=8, warmup=16, replay_ratio=1.0,
+                                 hunter_prob=0.0, exploiter_prob=1.0, exploiter_train_share=0.0,
+                                 sequence_burn_in=2, sequence_unroll=4, value_steps=4, combat_prob=1,
+                                 device="cpu", bf16=False, log_every=1, max_updates=2, resume=False))
+        learner.run()
+        assert learner.update == 2 and learner.trained[0] > 0 and learner.generated[0] > 0
+        assert learner.generated[1] == 0 and learner.trained[1] == 0 and learner.session_xupdates == 0
+        frame = json.loads((learner.run_dir / "watch.json").read_text())
+        assert frame["matchup_kind"] == "exploiter" and frame["arena_kind"] == "main"
+        assert sorted(frame["opponent_names"]) == ["Current policy", "Exploiter 0"]
+        assert frame["players"][frame["me"]]["agent_id"] == 0
+        progress = json.loads((learner.run_dir / "progress.json").read_text())
+        assert progress["exploiter"]["phase"] == "warming_up" and progress["exploiter"]["fresh_samples"] == 0
+        rows = [json.loads(line) for line in (learner.run_dir / "metrics.jsonl").read_text().splitlines()]
+        assert [row["update"] for row in rows] == [1, 2]
+        assert all(row["exploiter_samples"] == 0 and row["exploiter_trained"] == 0 for row in rows)
+        assert "win_exploiter" not in rows[-1]
     finally:
         torch.set_num_threads(old_threads)

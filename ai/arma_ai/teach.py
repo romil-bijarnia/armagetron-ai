@@ -16,7 +16,8 @@ How it works:
   network value bootstraps the continuation. Network opponents retain full tree search.
 * Most rounds are the network against itself: duels on three arena sizes and four-player
   free-for-alls. An exploiter trains against a frozen current-policy target and is refreshed
-  after it solves that target or exhausts its update budget.
+  after it solves that target or exhausts its update budget; in the other half of its rounds
+  the main network plays the current exploiter and learns from it.
 * V4 guides its own search from the start, exploring all six steering/brake actions.
 
 Two processes share the GPU: the actor (self-play) and the learner (this one), connected by
@@ -99,6 +100,7 @@ class Config:
     log_every: int = 25
     max_updates: int = 0  # total main-network update cap (0 runs until stopped), including resumed updates
     exploiter_prob: float = 0.20  # rounds played by the exploiter
+    exploiter_train_share: float = 0.50  # ... of which this share trains it against the frozen target; the rest train the main network against it
     exploiter_win: float = 0.60  # refresh the exploiter once it wins this often...
     exploiter_games: int = 400  # ... over this many of its recent rounds
     exploiter_patience: int = 30_000  # or after this many of its updates, whichever is first
@@ -293,7 +295,12 @@ class Actor:
         if (x < cfg.exploiter_prob and AGENT_EXPLOITER in self.nets and AGENT_TARGET in self.nets
                 and self.model_generations[AGENT_EXPLOITER] == self.model_generations[AGENT_TARGET]):
             size = r.choice(DUEL_SIZES)
-            agents, learn, kind = [AGENT_EXPLOITER, AGENT_TARGET], [1, 0], ("exploiter", None)
+            if r.random() < cfg.exploiter_train_share:
+                # the exploiter's own training round: it learns, the frozen target does not
+                agents, learn, kind = [AGENT_EXPLOITER, AGENT_TARGET], [1, 0], ("exploiter", None)
+            else:
+                # the main network against the current exploiter: it learns, the exploiter does not
+                agents, learn, kind = [AGENT_MAIN, AGENT_EXPLOITER], [1, 0], ("exploiter", "main")
         elif cfg.exploiter_prob <= x < cfg.exploiter_prob + cfg.hunter_prob:
             # the space fighter: it plays for territory and punishes hesitation, from the first round on
             size = r.choice(DUEL_SIZES)
@@ -332,6 +339,9 @@ class Actor:
         elif kind == "hunter":
             self.results["win_vs_hunter"].append(score)
         elif kind == "exploiter":
+            if name == "main":
+                self.results["win_vs_exploiter"].append(score)  # the main network's score, never a promotion
+                return
             if self.game_models[g][AGENT_EXPLOITER][2] != self.exploiter_gen:
                 return  # an older pinned helper cannot promote the current generation
             self.exploiter_results.append(score)
@@ -430,6 +440,8 @@ class Learner:
             raise ValueError("gamma must be a discount in (0, 1]")
         if not math.isfinite(cfg.combat_prob) or not 0 <= cfg.combat_prob <= 1:
             raise ValueError("combat_prob must be between zero and one")
+        if not math.isfinite(cfg.exploiter_train_share) or not 0 <= cfg.exploiter_train_share <= 1:
+            raise ValueError("exploiter_train_share must be between zero and one")
         # Ring.window reserves the oldest 4096 slots while its writer is active. A smaller
         # window can never produce the ready samples batch() requires, regardless of runtime.
         read_margin = 4096
@@ -480,6 +492,8 @@ class Learner:
         self.xopt = self._optimizer(self.exploiter)
         self.update = 0
         self.xupdates = 0  # updates of the current exploiter
+        self.session_xupdates = 0  # exploiter updates this session, over all of its generations
+        self.exploiter_phase = "warming_up"  # what the exploiter's learning loop did last
         self.generation = 0  # exploiters so far
         self.trained = [0, 0]  # samples trained per agent, over the whole run
         self.generated = [0, 0]  # samples generated per agent, over the whole run
@@ -567,7 +581,8 @@ class Learner:
                "warmup_ready_target": ready_target, "warmup_searched_target": searched_target,
                "ready_samples": len(ready), "searched_samples": int(np.count_nonzero(ring.has_policy[ready])),
                "batch": self.cfg.batch, "actions": self.main.n_actions, "net": self.main.version,
-               "sps": round(self.sps), "evals_s": round(self.evals_s)}
+               "sps": round(self.sps), "evals_s": round(self.evals_s),
+               "exploiter": self.exploiter_readiness()}
         tmp = self.run_dir / "progress.json.tmp"
         try:
             tmp.write_text(json.dumps(rec) + "\n")
@@ -578,13 +593,31 @@ class Learner:
                 print(f"could not write terminal progress: {exc}", flush=True)
                 self._progress_warning = True
 
+    def exploiter_readiness(self) -> dict:
+        """Whether the exploiter can learn right now and how much it has: the samples of its own
+        generation that are ready and searched against what a batch needs, its updates against its
+        patience, and what its learning loop did last. A stalled exploiter is visible here."""
+        ring, boundary = self.rings[1], self.boundary[1]
+        ready = ring.window()
+        if boundary:
+            ready = ready[ring.gen[ready] >= boundary]
+        ready = ready[ring.generation[ready] == self.generation]
+        _, ready_target, searched_target = replay_requirements(self.cfg.warmup, self.cfg.batch)
+        return {"generation": self.generation, "phase": self.exploiter_phase,
+                "updates": self.xupdates, "patience": self.cfg.exploiter_patience,
+                "session_updates": self.session_xupdates,
+                "fresh_samples": ring.written() - boundary, "warmup_target": self.cfg.warmup,
+                "ready_samples": int(len(ready)), "ready_target": ready_target,
+                "searched_samples": int(np.count_nonzero(ring.has_policy[ready])), "searched_target": searched_target,
+                "trained": self.trained[1], "session_trained": self.session_trained[1]}
+
     def hyperparameters(self) -> dict:
         """Resolved settings for the live viewer, including the actual optimiser values."""
         names = ("batch", "weight_decay", "value_coef", "aux_coef", "own_coef", "max_grad_norm", "bf16",
                  "replay_ratio", "warmup", "sequence_burn_in", "sequence_unroll", "ring", "exploiter_ring", "sims", "macro", "gamma",
                  "search_prob", "gumbel",
                  "temperature", "value_steps", "hunter_prob", "hunter_depth", "combat_prob", "exploiter_prob",
-                 "exploiter_win", "exploiter_games",
+                 "exploiter_train_share", "exploiter_win", "exploiter_games",
                  "exploiter_patience", "publish_seconds", "save_seconds", "seed")
         return {**{name: getattr(self.cfg, name) for name in names},
                 "lr": self.opt.param_groups[0]["lr"],
@@ -643,6 +676,7 @@ class Learner:
         self.exploiter.load_state_dict(self.main.state_dict())
         self.xopt = self._optimizer(self.exploiter)
         self.xupdates = 0
+        self.exploiter_phase = "warming_up"
         self.boundary[1] = self.rings[1].written()
         self.session_trained[1] = 0
         self.publish(main=False, exploiter=True, target=True)
@@ -772,11 +806,15 @@ class Learner:
                     ring = self.rings[agent]
                     fresh = ring.written() - self.boundary[agent]
                     if fresh < cfg.warmup:
-                        continue
-                    if self.session_trained[agent] > cfg.replay_ratio * max(fresh - cfg.warmup // 2, 1):
-                        continue
-                    data = self.batch(ring, cfg.batch, self.boundary[agent], self.generation if agent == 1 else None)
-                    if data is None:
+                        phase = "warming_up"
+                    elif self.session_trained[agent] > cfg.replay_ratio * max(fresh - cfg.warmup // 2, 1):
+                        phase = "caught_up"  # trained the replay ratio's worth of what was generated
+                    else:
+                        data = self.batch(ring, cfg.batch, self.boundary[agent], self.generation if agent == 1 else None)
+                        phase = "learning" if data is not None else "waiting_for_ready"
+                    if agent == 1:
+                        self.exploiter_phase = phase
+                    if phase != "learning":
                         continue
                     out = self.step(net, opt, data)
                     self.trained[agent] += out["n"]
@@ -800,6 +838,7 @@ class Learner:
                             last_log = time.time()
                     else:
                         self.xupdates += 1
+                        self.session_xupdates += 1
                         if self.xupdates >= cfg.exploiter_patience:
                             self.promote(f"{self.xupdates} updates without winning often enough")
                     if cfg.max_updates and self.update >= cfg.max_updates:
@@ -853,13 +892,17 @@ class Learner:
 
     def write_metrics(self, dt: float) -> None:
         n = max(self.acc_n, 1)
+        helper = self.exploiter_readiness()
         rec = {"trainer": "teach", "net": self.main.version, "actions": self.main.n_actions,
                "mode": self.cfg.mode,
                "update": self.update, "steps": self.decisions, "sps": round(self.sps), "evals_s": round(self.evals_s),
                "lr": self.opt.param_groups[0]["lr"], "games": self.games,
                "samples": self.generated[0], "trained": self.trained[0],
                "replay": round(self.trained[0] / max(self.generated[0], 1), 2),
-               "exploiter_gen": self.generation,
+               "exploiter_gen": self.generation, "exploiter_updates": self.xupdates,
+               "exploiter_session_updates": self.session_xupdates, "exploiter_phase": helper["phase"],
+               "exploiter_samples": self.generated[1], "exploiter_trained": self.trained[1],
+               "exploiter_ready_samples": helper["ready_samples"],
                "ep_len": float(np.mean(self.lengths)) if self.lengths else 0.0,
                "match_results": match_results(self.window), "match_window": 400,
                **{k: round(v / n, 5) for k, v in self.acc.items()},
@@ -889,6 +932,8 @@ def parse_config(argv=None) -> Config:
         "torch_threads": "CPU tensor workers per actor/learner, separate from simulator --threads",
         "max_updates": "stop and save at this total main-network update count (0: unlimited)",
         "combat_prob": "fraction of duels with varied close encounter starts; 0 keeps only standard spawns",
+        "exploiter_train_share": "share of the exploiter's rounds (--exploiter-prob) that train it against the frozen "
+                                 "target; the rest train the main network against the current exploiter",
     }
     defaults = {**asdict(Config()), **MODE_DEFAULTS[mode.mode], "mode": mode.mode}
     for f, v in defaults.items():
@@ -901,6 +946,8 @@ def parse_config(argv=None) -> Config:
         ap.error("--torch-threads and --threads must be positive")
     if not math.isfinite(cfg.combat_prob) or not 0 <= cfg.combat_prob <= 1:
         ap.error("--combat-prob must be between zero and one")
+    if not math.isfinite(cfg.exploiter_train_share) or not 0 <= cfg.exploiter_train_share <= 1:
+        ap.error("--exploiter-train-share must be between zero and one")
     return cfg
 
 
