@@ -62,6 +62,8 @@ extern bool sr_ZTrick;     // Quake-Style z-buffer trick: do
 extern bool sg_moviepackInstalled; // do we have the mp on disk?
 extern bool sg_moviepackUse;       // do we use it?
 
+extern bool sg_blacklightVisuals;  // clean arena materials; rendering only
+
 bool sg_MoviePack();
 
 #ifdef POWERPAK_DEB

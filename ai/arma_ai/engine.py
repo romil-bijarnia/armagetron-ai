@@ -10,6 +10,7 @@ sends the answers back.
 from __future__ import annotations
 
 import os
+import re
 import selectors
 import shutil
 import socket
@@ -30,6 +31,42 @@ ENGINE_ROOT = Path(os.environ.get("ARMA_ENGINE_ROOT", REPO_ROOT / "build-dedicat
 ENGINE_BIN = ENGINE_ROOT / "bin/armagetronad-dedicated"
 ENGINE_DATA = ENGINE_ROOT / "share/games/armagetronad-dedicated"
 ENGINE_CONFIG = ENGINE_ROOT / "etc/games/armagetronad-dedicated"
+AI_CHARACTERS_FILENAME = "ai-characters.cfg"
+_PROFILE_NAME = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_.-]{0,63}\Z")
+
+
+def _profile_names(text: str) -> set[str]:
+    """Validate the private character file without changing its fingerprinted bytes.
+
+    These are supported roster bounds, not claims that the legacy parser enforces
+    them. Stock profiles use trace=30; viewing range is an explicit search budget.
+    """
+    if not isinstance(text, str) or any(not c.isprintable() and c not in "\n\t" for c in text):
+        raise ValueError("AI character contents must be text without control characters")
+    names = set()
+    for number, raw in enumerate(text.splitlines(), 1):
+        line = raw.strip()
+        if not line:
+            continue
+        if line.startswith("#"):
+            # The native loader recognizes comments only in column zero.
+            if not raw.startswith("#"):
+                raise ValueError(f"AI character comment on line {number} must start in column zero")
+            continue
+        fields = line.split(maxsplit=14)
+        if (len(fields) < 14 or not _PROFILE_NAME.fullmatch(fields[0])
+                or any(not re.fullmatch(r"[0-9]+", value) for value in fields[1:14])):
+            raise ValueError(f"AI character line {number} requires a safe name and 13 integer properties")
+        name, values = fields[0], [int(value) for value in fields[1:14]]
+        if name in names:
+            raise ValueError(f"AI character name {name!r} is duplicated")
+        maxima = (10, 10, 64, 30, 10, 10, 10, 10, 10, 10, 3, 10, 10)
+        if any(value > maximum for value, maximum in zip(values, maxima)):
+            raise ValueError(f"AI character line {number} has an unsupported property value")
+        names.add(name)
+    if not names:
+        raise ValueError("AI character contents must contain at least one profile")
+    return names
 
 
 @dataclass
@@ -47,6 +84,31 @@ class ArenaConfig:
     debug: int = 0
     round_time_limit: float = 300  # seconds; then everyone still alive goes down at once (a draw), as in the teacher's sim
     extra: dict[str, str] = field(default_factory=dict)
+    ai_characters: str | None = None  # exact contents of an isolated per-engine character file
+    controlled_profile: str | None = None  # applies to the actual neural/teacher slot identities
+    builtin_profiles: tuple[str, ...] = ()  # ordinary AI players, in engine player-list order
+
+    def __post_init__(self):
+        if not isinstance(self.builtin_profiles, (tuple, list)):
+            raise ValueError("builtin_profiles must be a sequence of exact profile names")
+        self.builtin_profiles = tuple(self.builtin_profiles)
+        selected = (*self.builtin_profiles, *(() if self.controlled_profile is None else (self.controlled_profile,)))
+        if any(not isinstance(name, str) or not _PROFILE_NAME.fullmatch(name) for name in selected):
+            raise ValueError("AI profiles require safe, exact single-token names")
+        if selected or self.ai_characters is not None:
+            if (type(self.slots) is not int or type(self.builtin_ais) is not int
+                    or self.slots < 0 or self.builtin_ais < 0 or self.slots + self.builtin_ais < 1):
+                raise ValueError("named AI rosters require valid nonnegative player counts")
+        if self.controlled_profile is not None and not self.slots:
+            raise ValueError("controlled_profile requires at least one controlled slot")
+        if self.builtin_profiles and len(self.builtin_profiles) != self.builtin_ais:
+            raise ValueError("builtin_profiles must name every ordinary AI player")
+        if self.ai_characters is not None:
+            available = _profile_names(self.ai_characters)
+            if len(available) < self.slots + self.builtin_ais:
+                raise ValueError("AI character file needs one unique provisioning row per AI player")
+            if any(name not in available for name in selected):
+                raise ValueError("requested AI profile is missing from the private character file")
 
     def settings(self) -> dict[str, str]:
         n_ais = self.slots + self.builtin_ais
@@ -87,6 +149,17 @@ class ArenaConfig:
                 f"{prefix}LIMIT_SCORE": "1000000000",
             })
         s.update(self.extra)
+        roster = {}
+        if self.ai_characters is not None:
+            roster["AI_CHARACTER_FILE"] = AI_CHARACTERS_FILENAME
+        if self.controlled_profile is not None:
+            roster["NEURAL_CHARACTER_PROFILE"] = self.controlled_profile
+        if self.builtin_profiles:
+            roster["BUILTIN_CHARACTER_PROFILES"] = " ".join(self.builtin_profiles)
+        for name, value in roster.items():
+            if name in self.extra and self.extra[name] != value:
+                raise ValueError(f"extra settings conflict with the explicit AI roster: {name}")
+        s.update(roster)
         return s
 
 
@@ -97,6 +170,7 @@ class SlotStep:
     mask: int
     maps: np.ndarray | None = None  # (N_MAPS, GRID, GRID) uint8: local, close, global, territory
     scalars: np.ndarray | None = None
+    teacher_action: int | None = None  # native executed control, only in NEURAL_TEACHER mode
 
     @property
     def local(self) -> np.ndarray | None:
@@ -153,9 +227,15 @@ def _parse_step(engine: int, payload: bytes) -> Step:
     slots = []
     g2 = P.GRID * P.GRID
     for _ in range(n):
-        flags, kills, mask, _pad = P.SLOT_HEAD.unpack_from(payload, off)
+        flags, kills, mask, teacher_label = P.SLOT_HEAD.unpack_from(payload, off)
         off += P.SLOT_HEAD.size
         s = SlotStep(flags, kills, mask)
+        if teacher_label:
+            action = teacher_label - 1
+            if (action >= P.N_ACTIONS or not flags & P.FLAG_NEEDS_ACTION
+                    or not flags & P.FLAG_ALIVE or not mask & (1 << action)):
+                raise ValueError(f"Malformed teacher action label {teacher_label} for flags={flags}, mask={mask}")
+            s.teacher_action = action
         if flags & P.FLAG_NEEDS_ACTION:
             s.maps = np.frombuffer(payload, np.uint8, g2 * P.N_MAPS, off).reshape(P.N_MAPS, P.GRID, P.GRID)
             off += g2 * P.N_MAPS
@@ -170,28 +250,49 @@ def _parse_step(engine: int, payload: bytes) -> Step:
 class EnginePool:
     def __init__(self, arenas: list[ArenaConfig], workdir: Path | None = None, base_port: int = 47000,
                  log_engines: bool = False, command=None):
+        if command is None and any(arena.ai_characters is not None or arena.controlled_profile is not None
+                                   or arena.builtin_profiles for arena in arenas):
+            # Old engines merely warn about unknown settings. Refuse them before any
+            # process can silently record/evaluate the wrong profiles under new metadata.
+            try:
+                binary = ENGINE_BIN.read_bytes()
+            except OSError as error:
+                raise RuntimeError("Named AI rosters require a rebuilt dedicated engine at "
+                                   f"{ENGINE_BIN}") from error
+            if any(name not in binary for name in (b"NEURAL_CHARACTER_PROFILE", b"BUILTIN_CHARACTER_PROFILES")):
+                raise RuntimeError("The dedicated engine does not support named AI rosters; "
+                                   "rebuild and stage it before recording or evaluating custom profiles")
         self.arenas = arenas
         self.n = len(arenas)
         self.base_port = base_port
         self.log_engines = log_engines
         self.command = command or self._engine_command
         self._own_workdir = workdir is None
-        self.workdir = Path(workdir or tempfile.mkdtemp(prefix="arma-")).resolve()
-        self.workdir.mkdir(parents=True, exist_ok=True)
-        # Unix socket paths are limited to ~104 bytes on macOS, so the socket lives in $TMPDIR.
-        self._sockdir = Path(tempfile.mkdtemp(prefix="arma"))
-        self.sock_path = str(self._sockdir / "brain.sock")
-        self.listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        self.listener.bind(self.sock_path)
-        self.listener.listen(max(8, self.n))
+        self.workdir = Path(workdir).resolve() if workdir is not None else None
+        self._sockdir = None
+        self.listener = None
+        self._closed = False
         self.procs: list[subprocess.Popen | None] = [None] * self.n
         self.conns: list[socket.socket | None] = [None] * self.n
         self.sel = selectors.DefaultSelector()
         self.waiting: set[int] = set()  # engines blocked on our ACTIONS
         self.restarts = [0] * self.n  # a relaunched engine counts its rounds from 1 again
-        for i in range(self.n):
-            self._spawn(i)
-        self._accept_all()
+        try:
+            if self.workdir is None:
+                self.workdir = Path(tempfile.mkdtemp(prefix="arma-")).resolve()
+            self.workdir.mkdir(parents=True, exist_ok=True)
+            # Unix socket paths are limited to ~104 bytes on macOS, so use $TMPDIR.
+            self._sockdir = Path(tempfile.mkdtemp(prefix="arma"))
+            self.sock_path = str(self._sockdir / "brain.sock")
+            self.listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            self.listener.bind(self.sock_path)
+            self.listener.listen(max(8, self.n))
+            for i in range(self.n):
+                self._spawn(i)
+            self._accept_all()
+        except BaseException:
+            self.close()
+            raise
 
     # ---------------------------------------------------------------- process management
     def _write_config(self, i: int) -> Path:
@@ -202,6 +303,9 @@ class EnginePool:
         s["SERVER_PORT"] = str(self.base_port + i)
         s["NEURAL_SOCKET"] = self.sock_path
         s["NEURAL_ENGINE_ID"] = str(i)
+        characters = self.arenas[i].ai_characters
+        if characters is not None:
+            (root / "userconfig" / AI_CHARACTERS_FILENAME).write_text(characters, encoding="utf-8")
         (root / "userconfig" / "autoexec.cfg").write_text("".join(f"{k} {v}\n" for k, v in s.items()))
         return root
 
@@ -215,34 +319,87 @@ class EnginePool:
     def _spawn(self, i: int) -> None:
         root = self._write_config(i)
         out = open(root / "engine.log", "ab") if self.log_engines else subprocess.DEVNULL
-        self.procs[i] = subprocess.Popen(
-            self.command(i, root, self.sock_path, self.arenas[i]), cwd=root, stdin=subprocess.DEVNULL, stdout=out, stderr=subprocess.STDOUT,
-        )
+        try:
+            self.procs[i] = subprocess.Popen(
+                self.command(i, root, self.sock_path, self.arenas[i]), cwd=root, stdin=subprocess.DEVNULL,
+                stdout=out, stderr=subprocess.STDOUT)
+        finally:
+            if self.log_engines:
+                out.close()
+
+    def _check_startup_children(self, pending: set[int]) -> None:
+        dead = {i: self.procs[i].poll() for i in pending
+                if self.procs[i] is not None and self.procs[i].poll() is not None}
+        if dead:
+            details = []
+            for i, code in sorted(dead.items()):
+                log = self.workdir / f"engine{i:02d}" / "engine.log"
+                tail = ""
+                if self.log_engines:
+                    try:
+                        with log.open("rb") as stream:
+                            stream.seek(0, 2)
+                            stream.seek(max(0, stream.tell() - 2048))
+                            tail = stream.read().decode("utf-8", errors="replace").strip()
+                    except OSError:
+                        pass
+                details.append(f"engine {i} exited {code} before HELLO" + (f": {tail}" if tail else ""))
+            raise RuntimeError("; ".join(details))
+
+    def _startup_hello(self, conn: socket.socket, pending: set[int], deadline: float) -> bytes:
+        """Keep partial HELLO bytes while checking exits and the overall startup deadline."""
+        data = bytearray()
+        wanted = P.HEADER.size
+        while len(data) < wanted:
+            self._check_startup_children(pending)
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise RuntimeError("engine connected but did not complete HELLO before the startup timeout")
+            conn.settimeout(min(.5, remaining))
+            try:
+                chunk = conn.recv(wanted - len(data))
+            except socket.timeout:
+                continue
+            if not chunk:
+                raise RuntimeError("engine disconnected before completing HELLO")
+            data.extend(chunk)
+            if len(data) == P.HEADER.size and wanted == P.HEADER.size:
+                magic, mtype, length = P.HEADER.unpack(data)
+                if magic != P.MAGIC or mtype != P.MSG_HELLO or length != P.HELLO.size:
+                    raise RuntimeError(f"expected a compatible HELLO header, got {(magic, mtype, length)}")
+                wanted += length
+        return bytes(data[P.HEADER.size:])
 
     def _accept_all(self, timeout: float = 60.0) -> None:
-        self.listener.settimeout(timeout)
         pending = {i for i in range(self.n) if self.conns[i] is None}
+        deadline = time.monotonic() + timeout
         while pending:
+            self._check_startup_children(pending)
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise RuntimeError(f"engines {sorted(pending)} never connected before the startup timeout")
+            self.listener.settimeout(min(.5, remaining))
             try:
                 conn, _ = self.listener.accept()
-            except socket.timeout as e:
-                dead = [i for i in pending if self.procs[i] and self.procs[i].poll() is not None]
-                raise RuntimeError(f"engines {sorted(pending)} never connected (exited: {dead})") from e
-            conn.setblocking(True)
-            mtype, payload = self._read_msg(conn)
-            if mtype != P.MSG_HELLO:
-                raise RuntimeError(f"expected HELLO, got message type {mtype}")
-            engine_id, proto, n_slots, grid, nl, ng, ns, nmaps, cell, interval = P.HELLO.unpack(payload)
-            if (proto, grid, nl, ng, ns, nmaps) != (P.PROTOCOL_VERSION, P.GRID, P.N_LOCAL_PLANES, P.N_GLOBAL_PLANES,
-                                                     P.N_SCALARS, P.N_MAPS):
-                raise RuntimeError(f"engine {engine_id} speaks an incompatible protocol: {(proto, grid, nl, ng, ns, nmaps)}")
-            if engine_id not in pending:
-                raise RuntimeError(f"unexpected HELLO from engine {engine_id}")
-            if n_slots != self.arenas[engine_id].slots:
-                raise RuntimeError(f"engine {engine_id} reports {n_slots} slots, expected {self.arenas[engine_id].slots}")
-            self.conns[engine_id] = conn
-            self.sel.register(conn, selectors.EVENT_READ, engine_id)
-            pending.discard(engine_id)
+            except socket.timeout:
+                continue
+            try:
+                payload = self._startup_hello(conn, pending, deadline)
+                engine_id, proto, n_slots, grid, nl, ng, ns, nmaps, cell, interval = P.HELLO.unpack(payload)
+                if (proto, grid, nl, ng, ns, nmaps) != (P.PROTOCOL_VERSION, P.GRID, P.N_LOCAL_PLANES, P.N_GLOBAL_PLANES,
+                                                         P.N_SCALARS, P.N_MAPS):
+                    raise RuntimeError(f"engine {engine_id} speaks an incompatible protocol: {(proto, grid, nl, ng, ns, nmaps)}")
+                if engine_id not in pending:
+                    raise RuntimeError(f"unexpected HELLO from engine {engine_id}")
+                if n_slots != self.arenas[engine_id].slots:
+                    raise RuntimeError(f"engine {engine_id} reports {n_slots} slots, expected {self.arenas[engine_id].slots}")
+                conn.setblocking(True)
+                self.conns[engine_id] = conn
+                self.sel.register(conn, selectors.EVENT_READ, engine_id)
+                pending.discard(engine_id)
+            except BaseException:
+                conn.close()
+                raise
 
     def restart(self, i: int) -> None:
         """Kill and relaunch one engine (used if it crashes)."""
@@ -259,21 +416,31 @@ class EnginePool:
         self._accept_all()
 
     def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        self.sel.close()
         for c in self.conns:
             if c is not None:
                 c.close()
         for p in self.procs:
             if p and p.poll() is None:
-                p.terminate()
+                try:
+                    p.terminate()
+                except ProcessLookupError:
+                    pass
         for p in self.procs:
             if p:
                 try:
                     p.wait(timeout=5)
                 except subprocess.TimeoutExpired:
                     p.kill()
-        self.listener.close()
-        shutil.rmtree(self._sockdir, ignore_errors=True)
-        if self._own_workdir:
+                    p.wait(timeout=5)
+        if self.listener is not None:
+            self.listener.close()
+        if self._sockdir is not None:
+            shutil.rmtree(self._sockdir, ignore_errors=True)
+        if self._own_workdir and self.workdir is not None:
             shutil.rmtree(self.workdir, ignore_errors=True)
 
     def __enter__(self):

@@ -1,18 +1,14 @@
-# Armagetron AI
+# Blacklight — Armagetron AI
 
-A deep reinforcement learning agent for Armagetron Advanced that learns by playing against itself inside the real game engine.
+Blacklight is our AI for Armagetron Advanced, with a policy that can run inside the game without Python.
 
-The game itself does the simulation. The patched Armagetron engine in the rest of this repository adds a neural network bridge: chosen AI cycles stop using the built-in bot logic and instead send what they see to this Python project over a Unix socket every 0.05 s of game time, then execute the turn or brake the network picks. For training, the dedicated server runs headless in lockstep, so game time only advances when the network has answered and dozens of arenas run far faster than real time. The physics (rubber, wall acceleration, turn delay, brakes) are exactly the game's, because they are the game.
+The trainer (`arma-teach`) uses search-guided self-play in the C++ simulator in `sim/`, a league and a learner on the GPU. The simulator has recorded-engine parity tests; the real-engine ladder measures the deployed policy without search. The implemented combat architecture is documented in [docs/V4.md](docs/V4.md).
 
 ## What the network sees
 
-Every decision gets three inputs, all rotated so the cycle always faces up:
+v4 reads four 64×64 maps: Nearby at 2 m per cell, Close at 1 m, the whole arena, and engine-computed territory/distance. Current and previous frames are stacked. Nearby and Close use separate progressive towers that process geometry at 32×32 before further reduction. The arena tower conditions both local branches. Of the 108 engine scalars, 72 own/arena numbers enter their own branch; three 12-number enemy records enter a shared, masked opponent encoder and context-dependent attention pool. Enemy records include braking reserve, rubber usage, and separate left/right turn waits.
 
-- a local map, 64×64 cells of 2 m around the cycle (40 cells ahead, 24 behind), with separate planes for walls, its own trail, enemy trails, team trails, enemy heads, where each nearby enemy will be within the next second, and the outside of the arena;
-- a global map of the whole arena at 64×64;
-- 96 exact numbers: speed, rubber, brake reservoir, turn timing, 16 ray distances with hit types, and position, heading and speed of the three nearest enemies.
-
-It answers with one of four actions: straight, left, right, brake. Turns are masked while the game's turn delay is running, so the network only ever issues moves a human could.
+The policy has six joint controls: straight, left, right, brake, left + brake and right + brake. Illegal turns are masked. V4 has **8,155,373 parameters**, persistent 256-unit memory, a bounded value head, and auxiliary predictions for territory, danger, a credited kill while surviving the next two seconds, and future ownership. Memory also receives the previous executed control and elapsed time. [Full architecture and verification](docs/V4.md).
 
 ## Setting up
 
@@ -24,40 +20,207 @@ uv venv --python 3.13 ~/.venvs/armagetron-ai && ln -s ~/.venvs/armagetron-ai .ve
 
 ## Training
 
+Training resumes the current V4 checkpoint. Choose one of two resource modes:
+
 ```bash
-./trainctl start
+uv run arma-background
+uv run arma-full
 ```
 
-`./trainctl start` trains in the background with the Mac kept awake and restarts itself from the last checkpoint if it ever crashes. `./trainctl gentle` does the same with 6 engines at low priority, for when you're using the laptop. `./trainctl status` shows whether it's running and how far it has got, `./trainctl watch` opens live charts of its progress in the terminal, `./trainctl log` follows the log, and `./trainctl stop` stops it after saving a checkpoint. Any extra flags go to the trainer, for example `./trainctl start --lr 1e-4`; `uv run arma-train --help` lists them all. To run the trainer in the foreground instead, use `uv run arma-train` (Ctrl-C stops it and saves).
+| Mode | Parallel arenas | Simulator workers | Learning batch | Work/rest pacing |
+| --- | ---: | ---: | ---: | --- |
+| `background` | 96 | 4 | 256 | 35% work target per actor and learner, with lower CPU priority |
+| `full` | 256 | All available CPU cores (14 on the reference Mac) | 512 | Uncapped |
 
-An actor process runs 24 engines and picks moves; a learner process runs PPO on the GPU; rollouts move between them through shared memory. Arenas are mixed: self-play duels in three arena sizes, four-player free-for-alls, and matches against the game's strongest built-in AI. Some self-play opponents are frozen snapshots of earlier versions (saved to `runs/main/pool/`) so the policy can't forget how to beat old strategies. Training resumes from `runs/main/latest.pt` automatically. Progress goes to `runs/main/train.log` and `runs/main/metrics.jsonl`; the `win_vs_ai_*` columns are the share of rounds won against the built-in AI.
+Both modes use the Apple GPU for batched inference and learning. The background
+mode adds deliberate, interruptible rest to both workers; it is a work/rest
+budget, not a GPU-utilization percentage or temperature limit. Full mode runs
+without that rest and keeps the Mac awake. Actual utilization depends on the
+balance of simulation, search and learning; more arenas alone do not guarantee
+higher throughput. The architecture and replay capacities are the same.
 
-Reward is +1 for winning a round, up to −1 for dying (scaled by how many opponents were still alive) and +0.1 per kill.
+Each command starts one trainer in the background and resumes `runs/blacklight/latest.pt`.
+An interactive terminal also shows compact inline progress. Ctrl-C closes that
+display while training continues. `--no-watch` keeps the launch detached.
+The older `trainctl` script remains available for existing launchers.
+
+After each restart, the saved network resumes while its temporary replay buffer
+refills. With the default settings, learning waits for 20,000 collected positions,
+10,000 positions with ready training targets, and enough searched targets for half
+a learning batch. Surviving positions normally need another 60 decisions in their
+own arena (three simulated seconds) before their targets are ready. The views show
+all three requirements; overall warmup readiness follows the slowest one.
+
+The viewer stays open across `stop` and mode changes: it clears the old game when
+training stops and follows fresh actor samples when the next run resumes.
+
+To switch an already running trainer, save and stop it, then choose the new mode:
+
+```bash
+uv run arma-stop
+uv run arma-background
+```
+
+`uv run arma-status` reports the current run; `uv run arma-log` follows its log.
+Explicit trainer flags override a mode's defaults, for example
+`uv run arma-background --games 64 --duty-cycle 0.25`. `uv run arma-teach --help`
+lists the controls. The viewer shows the actual resolved configuration and
+optimizer hyperparameters, including overrides.
+
+The actor plays concurrent simulator rounds, searches on selected decisions and
+trains policy, value and auxiliary targets from replay. It mixes self-play,
+a live exploiter and the simulator's space fighter. V4 explores all
+six actions. Temporary worker weights are published while RL runs; the single saved
+checkpoint is `latest.pt`. Closing the optional viewer never stops training.
+
+By default, 25% of duels start in a close encounter: parallel riding, crossing
+paths or offset head-on approaches. Distances, timing, position, reflection and
+heading vary. These use normal physics and resources; the remaining duels and
+all four-player games keep the normal arena spawns. The purpose is to give the
+policy more fighting practice alongside full-round strategy. Set
+`--combat-prob 0` for standard spawns only, or choose another fraction up to 1.
+
+Search against the space fighter follows its actual cached move and brake hold
+until its next replan (normally 0.05–0.10 s), then uses the network's value for
+the continuation. It does not invent different hunter moves or run the hunter's
+expensive planner recursively. Search against network opponents keeps its normal
+depth. These changes improve the training setup; stronger play must be measured
+after training.
+
+## One Blacklight checkpoint, every training session
+
+The current V4 + 256-unit memory architecture is selected and frozen. Improve
+opponents, scenarios and training while keeping this brain and checkpoint. See
+[the architecture decision](docs/BLACKLIGHT-ARCHITECTURE-FREEZE.md) for the remaining
+qualification work and the evidence required before any structural change.
+
+Blacklight uses the V4 architecture. `runs/blacklight/latest.pt` is its single saved training state. `background`, `full`, and
+`imitate` all resume its current weights and cumulative update count, then save
+back to that same file. There is no automatic fresh model, timestamped imitation
+candidate, best-model rollback, previous-checkpoint rotation, or historical pool.
+Parallel games generate experience for the learner; an exclusive lock prevents
+two learners from overwriting V4. RL worker weight files exist only while that
+trainer runs and are removed when it stops.
+
+```bash
+imitate                  # continue learning from strong bots until stopped
+stop                     # save all completed learning and stop either method
+imitate --epochs 3       # optionally do three additional cycles, then stop
+```
+
+`imitate` runs in the foreground and Ctrl-C also saves and stops it. Each cycle
+collects 32 varied teacher lives and performs 120 learning updates. The example
+cache is replaced each cycle; it does not create more model files. Checkpoints
+are saved after learning cycles, periodically during long cycles, and on stop.
+Run `watch` or `status` to see the same V4's progress. Evaluation is separate and
+does not interrupt learning to run an automatic tournament.
+
+The training UI uses one updating line: current stage, V4 update, a progress bar,
+work counts and elapsed time. It cycles through recording, reading, learning,
+checking and saving without printing a new line at each save. Wider terminals
+also show the latest saved update. `background`, `full` and `watch` use the same
+style; RL warmup follows the slowest readiness requirement, and its learning bar
+counts updates toward the next report. The optional `dashboard` retains its
+detailed charts.
+
+Imitation sessions restore their optimizer state as well as weights. Switching
+between RL and imitation preserves the weights and counters and resets optimizer
+moments belonging to the other objective. Stop the current method before starting
+another. If a previously trained run loses its main checkpoint, training reports
+an error instead of silently creating a random fighter.
+
+Teachers use the strongest available built-in profile at the maximum supported
+AI_IQ setting of 100. A single recorded teacher fights one or three ordinary bots,
+with varied arena sizes. Inputs precede the teacher's executed legal controls at
+0.05-second decision boundaries. Whole teacher lives are separated for validation;
+exact duplicate trajectories, missing provenance and truncated recordings are
+rejected. Reports include turn recall and false turns. The stock bots never brake,
+so they supply no braking demonstrations. Imitation learns contiguous sequences
+with burn-in and checks whole-life memory. It supervises policy actions while
+anchoring value, auxiliary and ownership predictions to their starting outputs;
+actual outcome targets train those heads during RL.
+
+`imitate --help` lists settings. `--data` accepts existing demonstration files;
+`--run` explicitly selects a different run for development or testing. Bare
+commands default to the same V4. The package entry point is `uv run arma-imitate`.
+
+### Varied native bot candidates
+
+`imitate --bot-pool diverse` records explicitly selected native profiles, including
+four close-combat-biased candidates, the original wall and Quake presets, a path
+hunter and a defensive tracer. Each 16-life block gives 12 lives to the fighter
+teachers and four to the other styles, split equally between duels and four-player
+games. Opponent styles vary too. The catalog is in `arma_ai/bot_profiles.py`.
+These are candidates, not an established ranking of the best configurations.
+The default remains `--bot-pool stock` until fighting qualification selects a recipe.
+
+The engine loads a private catalog and applies exact per-role names before cycles
+spawn. It rejects unknown or incomplete rosters instead of silently falling back
+to IQ selection. Recordings store the actual profile values and catalog hash.
+The three `holdout_*` configurations never enter the diverse training schedule.
+
+Evaluate frozen Blacklight against one or three named opponents with
+`uv run arma-eval --builtin-profile holdout_fighter --rounds 20`; repeat the
+`--builtin-profile` option to add opponents. Recording also accepts
+`--teacher-profile fighter_cutter --opponent-profile stock_wall`.
+
+This expands native demonstrations and evaluation. Simulator RL still uses
+self-play, Hunter and the live exploiter. Stock-controller demonstrations contain
+no braking; braking and corrective recovery practice still require the RL and
+learner-state portions of the training recipe. Profile settings alone do not
+establish a close-combat win rate or immediate aggression.
 
 ## Watching it play
 
 ```bash
-./trainctl show
+uv run arma-show
 ```
 
-Runs a real match in a headless engine and draws it live in the terminal: every cycle's trail in its own colour, with a scoreboard of wins. `--bots 1 --ais 1` pits it against the game's best bot, `--ais 2 --bots 2` makes a four-player game, `--size 0` uses the full-size arena, `--speed 4` plays at four times real speed and `--walls` sets the trail length in metres (600 by default everywhere here, including training; the game's own default, -1, is endless). Ctrl-C quits.
+Runs a separate policy demonstration in a headless real engine (not a training arena) and draws it in the terminal: every cycle's trail in its own colour, with a scoreboard of wins. `--bots 1 --ais 1` pits it against the game's best bot, `--ais 2 --bots 2` makes a four-player game, `--size 0` uses the full-size arena, `--speed 4` plays at four times real speed and `--walls` sets the trail length in metres (600 by default everywhere here, including training; the game's own default, -1, is endless). Ctrl-C quits.
 
-## Watching it think
+## Watching live training
 
 ```bash
-./trainctl brain
+uv run arma-brain --no-open
 ```
 
-Opens a page in the browser that shows what the network thinks while it plays a live headless match. The arena fills the left of the screen with the match drawn on it and the network's beliefs painted over the floor: who will hold each cell two seconds from now (its ownership head, solid where it is sure), or, with Floor set to "now", who gets to each cell first as the engine computes it. The sixteen sensor rays fan out from the cycle. Beside it: the odds of each move with the one taken, its win chance (the value head), how likely it thinks it is dead within two seconds and the territory share it expects, each with its recent history, plus what it feels (speed, rubber, brake, enemies). To the right, the four 64×64 maps exactly as the network sees them and the 96 exact numbers; hover a cell for what is in it.
+Open the local URL printed by that command. **Live game** follows one selected
+bot in an actual arena of the running trainer. Use the arena/player selectors to
+choose which concurrent game and bot to observe. **Follow bot** and **Whole arena**
+change only the camera. The browser does not run a separate match, advance the
+simulator, play a recording or change training speed. A slow browser receives the
+latest sample instead of a queue of old frames. When training stops or its feed
+becomes stale, the game view clears and reports that state.
 
-Attention paints where a cell of the arena view looks in the v3 attention layers (hover the arena to pick the cell; the cell my head is in otherwise; keys 1 and 2 pick the layer) and shows every head of both layers small. Scroll down for Inside: every stage of both towers, the number branch and the trunk drawn as the pictures they are, one tile per filter lit by how strongly it fires; hover a tile to see that filter large. Space pauses the match and the right arrow steps it one decision at a time, so a single choice can be studied; `[` and `]` change the speed. Run it while training and it follows the newest weights after every update, a bar under each stage showing how much that update changed it, and the numbers page below shows the training itself: win rates, round length, entropy, KL, losses, gradient norm, learning rate and speed, each with its history. Takes the same match flags as `show` (`--ais`, `--bots`, `--size`, `--speed`, `--walls`, `--checkpoint`).
+The selected bot's last executed move, speed, brakes, kills and weight update
+come from the actor. **What the bot sees** displays one of its actual input maps,
+captured with the scalar inputs at that executed root decision. Search branches
+are never substituted for the played game. Opponents use their own trail colors;
+those are other players' real trails, not alternative predicted routes.
+
+**Network** shows the architecture reported by the loaded checkpoint and explains
+each selected stage. Input stages show the selected bot's real observations; policy
+and value stages show the actor's recorded outputs. Intermediate activation tensors
+are not streamed. A checkpoint published on disk can be newer than the weights
+used for the last move; the bot panel names the actual update used.
+
+**Training** shows policy/value and auxiliary losses, learning rate, entropy,
+gradient size, throughput, replay usage and training matchup counts. Each metric
+includes a plain-language explanation. Charts identify their report update/time;
+old losses are labelled as saved reports when training is stopped. The complete
+hyperparameter/resource table uses the trainer's resolved values, falling back to
+saved checkpoint configuration before an updated trainer has run.
+
+Viewing is optional. The live feed contains periodic actual actor samples, so
+intermediate decisions may occur between displayed samples. There are no replay,
+freeze, step or speed controls in this training view.
 
 ## Playing against it in the game itself
 
 The trained network also lives inside the game, so no Python is needed to play it: open Armagetron Advanced, choose Play Game, Local Game, and the first AI opponent is the network (named Brain; with several AIs in the game, the AI team is named after it). Game Setup has a "Neural opponents" setting for how many of the AI players it drives; the rest use the game's built-in AI. The weights are the file `brain/policy.bin` in this repository, exported from a checkpoint with
 
 ```bash
-uv run arma-export                      # runs/main/latest.pt -> brain/policy.bin
+uv run arma-export                      # runs/blacklight/latest.pt -> brain/policy.bin
 ```
 
 Rebuild the app after exporting, or drop the file into `~/Library/Application Support/Armagetron Advanced/brain/policy.bin`, which the game prefers over the bundled one. `NEURAL_SAMPLE 1` in the console makes it draw moves from its probabilities instead of always taking the best one, `NEURAL_NAME` renames it. The C++ side is `src/tron/gNeuralNet.cpp`; `tests/test_cpp_brain.py` checks it against PyTorch.
@@ -68,18 +231,35 @@ Rebuild the app after exporting, or drop the file into `~/Library/Application Su
 uv run arma-play
 ```
 
-This starts a local server whose opponent is driven by the latest checkpoint. Open Armagetron Experimental, go to Play Game, Multiplayer, Custom Connect, and connect to `127.0.0.1` port 4534. Options: `--neural 3` for three network opponents, `--builtin 1` to add built-in bots, `--size 0` for the standard 500 m arena (the default `-3` is the single-player size), `--checkpoint runs/main/pool/u000200.pt` for an older version.
+This starts a local server whose opponent is driven by the latest checkpoint. Open Armagetron Advanced, go to Play Game, Multiplayer, Custom Connect, and connect to `127.0.0.1` port 4534. Options: `--neural 3` for three network opponents, `--builtin 1` to add built-in bots, `--size 0` for the standard 500 m arena (the default `-3` is the single-player size).
+
+The default single-opponent controller prewarms its inference path before starting
+the server, preserving weights, sampling RNG and per-round history. Its configured
+decision interval is 50 ms (20 decisions per second), independent of rendering FPS.
+On the development Mac, a real-engine check of update 11,280 sustained that schedule.
+With a separate 3024×1964, 4×-MSAA game renderer active, all 120 measured server responses
+were under 50 ms (p95 11.45 ms, maximum 14.72 ms), with no skipped decision slots.
+The [timing report](runs/blacklight/audit/controller-latency.json) separates setup,
+warmed inference, real-engine pacing, and concurrent graphics load. It does not
+reconstruct the timing of earlier human matches.
 
 ## Measuring it
 
 ```bash
 uv run arma-eval --rounds 400 --size -3
-uv run arma-eval --opponent runs/main/pool/u000100.pt
 ```
 
-Greedy duels against the strongest built-in AI or another checkpoint; results are appended to `runs/main/eval.jsonl`.
+Greedy duels against the strongest built-in AI or another checkpoint; results are appended to `runs/blacklight/eval.jsonl`.
 
-The full system design, including planned changes and the test plan, is in [docs/DESIGN.md](docs/DESIGN.md).
+Each result also includes `combat`: credited kills, deaths, rounds with a credited
+kill and a surviving policy, wins with and without kill credit, and average win
+duration. These counts cover completed rounds only, including when a time budget
+ends a check early. The engine awards kill credit through enemy influence; this
+records enemy deaths attributed to the policy, but does not establish intent or
+prove that every uncredited win was passive. Judge fighting quality
+alongside wins, draws and losses against fixed opponents on several arena sizes.
+
+The network, learning targets and verification are described in [docs/V4.md](docs/V4.md).
 
 ## Building the engine
 

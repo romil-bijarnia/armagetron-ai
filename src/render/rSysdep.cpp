@@ -48,6 +48,11 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 #include "tRecorder.h"
 #include "rTextureRenderTarget.h"
 #include <memory>
+#include <algorithm>
+#include <cmath>
+#include <numeric>
+#include <sstream>
+#include <vector>
 
 #ifndef DEDICATED
 #include "SDL_thread.h"
@@ -404,6 +409,16 @@ private:
         }
 
 #ifndef DEDICATED
+#if SDL_VERSION_ATLEAST(2,0,0)
+        if ( parser.GetSwitch( "--hidden-window" ) )
+        {
+            sr_hiddenWindow = true;
+#ifdef SDL_HINT_MAC_BACKGROUND_APP
+            SDL_SetHint( SDL_HINT_MAC_BACKGROUND_APP, "1" );
+#endif
+            return true;
+        }
+#endif
         if ( parser.GetSwitch( "--videoout" ) )
         {
             // redirect all regular output to stderr
@@ -430,6 +445,9 @@ private:
         s << "--benchmark                  : renders frames as they were recorded\n";
 #ifndef DEDICATED
         s << "--videoout                   : writes a raw video stream of frames to stdout\n";
+#if SDL_VERSION_ATLEAST(2,0,0)
+        s << "--hidden-window              : render without a visible or focused window (for capture)\n";
+#endif
 #endif
     }
 };
@@ -1399,6 +1417,157 @@ void sr_LimitFPS()
     }
 }
 
+namespace
+{
+bool sr_frameTelemetry = false;
+static tConfItem< bool > sr_frameTelemetryConf( "FRAME_TELEMETRY", sr_frameTelemetry );
+
+bool FrameTelemetryEnabled()
+{
+    return sr_hiddenWindow || sr_frameTelemetry;
+}
+
+bool sr_hiddenGameFramePending = false;
+double sr_hiddenGameTime = 0;
+int sr_hiddenReportedFPS = 0;
+
+struct HiddenFrameTelemetry
+{
+    double periodStart = 0, lastPresentation = 0, lastGameFrame = 0, lastGameTime = 0;
+    bool haveGameTime = false;
+    unsigned presentations = 0, gameFrames = 0, repeatedGameTimes = 0;
+    int reportedFPS = 0;
+    std::vector< double > presentationTimes, gameTimes;
+
+    static double Rate( std::vector< double > const & values )
+    {
+        double total = std::accumulate( values.begin(), values.end(), 0.0 );
+        return total > 0 ? values.size() * 1000.0 / total : 0;
+    }
+
+    static void ReportTimes( std::ostream & report, char const * label, std::vector< double > values )
+    {
+        if ( values.empty() )
+            return;
+        std::sort( values.begin(), values.end() );
+        auto percentile = [&]( double fraction )
+        {
+            size_t rank = size_t( std::ceil( fraction * values.size() ) );
+            return values[std::min( values.size() - 1, std::max( size_t( 1 ), rank ) - 1 )];
+        };
+        size_t slowCount = std::max( size_t( 1 ), size_t( std::ceil( values.size() * .01 ) ) );
+        double slowTotal = std::accumulate( values.end() - slowCount, values.end(), 0.0 );
+        auto overBudget = std::count_if( values.begin(), values.end(), []( double value ) { return value > 1000.0 / 120; } );
+        report << ( sr_hiddenWindow ? "Hidden frame times (" : "Frame times (" ) << label << "): samples=" << values.size()
+                  << " p50_ms=" << percentile( .50 ) << " p95_ms=" << percentile( .95 )
+                  << " p99_ms=" << percentile( .99 ) << " worst_ms=" << values.back()
+                  << " one_percent_low_fps=" << ( slowTotal > 0 ? slowCount * 1000.0 / slowTotal : 0 )
+                  << " over_8_333ms=" << overBudget << "/" << values.size() << '\n';
+    }
+
+    void Present( bool gameFrame, double gameTime, int hudFPS )
+    {
+        double now = tRealSysTimeFloat();
+        if ( periodStart == 0 )
+            periodStart = now;
+        if ( lastPresentation > 0 )
+            presentationTimes.push_back( ( now - lastPresentation ) * 1000 );
+        lastPresentation = now;
+        ++presentations;
+        if ( gameFrame )
+        {
+            ++gameFrames;
+            reportedFPS = hudFPS;
+            if ( lastGameFrame > 0 )
+                gameTimes.push_back( ( now - lastGameFrame ) * 1000 );
+            if ( haveGameTime && gameTime == lastGameTime )
+                ++repeatedGameTimes;
+            lastGameFrame = now;
+            lastGameTime = gameTime;
+            haveGameTime = true;
+        }
+        else
+        {
+            // Menu/loading/console-only presentations are counted separately. Do not fold
+            // their gaps into the consecutive active-game frame-time distribution.
+            lastGameFrame = 0;
+            haveGameTime = false;
+        }
+        if ( now - periodStart >= 5 )
+        {
+            // Build one small aggregate outside the console: console output can itself
+            // request a swap. Sampling does no file I/O or SDL queries between reports.
+            std::ostringstream report;
+            int drawableWidth = sr_screenWidth, drawableHeight = sr_screenHeight;
+#if SDL_VERSION_ATLEAST(2,0,0)
+            SDL_GL_GetDrawableSize( sr_screen, &drawableWidth, &drawableHeight );
+#endif
+            report << ( sr_hiddenWindow ? "Hidden renderer: " : "Renderer: " ) << Rate( presentationTimes ) << " frames/s"
+                      << ( s_videoout ? " (with readback)" : " (no readback)" )
+                      << "; presentations=" << presentations << " game_frames=" << gameFrames
+                      << " non_game_presentations=" << presentations - gameFrames
+                      << " active_game_fps=" << Rate( gameTimes ) << " hud_fps=" << reportedFPS
+                      << " repeated_game_times=" << repeatedGameTimes
+                      << " max_fps=" << sr_maxFPS << " swap_optimize=" << int( rSysDep::swapOptimize_ )
+                      << " vsync_requested=" << int( currentScreensetting.vSync )
+                      << " drawable=" << drawableWidth << "x" << drawableHeight
+                      << " timestamp=" << st_GetCurrentTime( "%Y-%m-%dT%H:%M:%S%z" )
+                      << " pid=" << getpid() << " game_time=" << lastGameTime
+                      << " fullscreen_requested=" << int( currentScreensetting.fullscreen )
+                      << " msaa_requested=" << currentScreensetting.multisamples
+                      << " floor_mirror=" << sr_floorMirror;
+#if SDL_VERSION_ATLEAST(2,0,0)
+            int windowWidth = 0, windowHeight = 0;
+            SDL_GetWindowSize( sr_screen, &windowWidth, &windowHeight );
+            Uint32 flags = SDL_GetWindowFlags( sr_screen );
+            SDL_DisplayMode mode{};
+            int display = SDL_GetWindowDisplayIndex( sr_screen );
+            bool haveMode = display >= 0 && SDL_GetCurrentDisplayMode( display, &mode ) == 0;
+            int sampleBuffers = -1, samples = -1;
+            SDL_GL_GetAttribute( SDL_GL_MULTISAMPLEBUFFERS, &sampleBuffers );
+            SDL_GL_GetAttribute( SDL_GL_MULTISAMPLESAMPLES, &samples );
+            report << " window=" << windowWidth << "x" << windowHeight
+                      << " display_mode_hz=" << ( haveMode ? mode.refresh_rate : 0 )
+                      << " swap_interval=" << SDL_GL_GetSwapInterval()
+                      << " window_flags=" << flags
+                      << " fullscreen=" << int( ( flags & SDL_WINDOW_FULLSCREEN ) != 0 )
+                      << " fullscreen_desktop=" << int( ( flags & SDL_WINDOW_FULLSCREEN_DESKTOP ) == SDL_WINDOW_FULLSCREEN_DESKTOP )
+                      << " focused=" << int( ( flags & SDL_WINDOW_INPUT_FOCUS ) != 0 )
+                      << " hidden=" << int( ( flags & SDL_WINDOW_HIDDEN ) != 0 )
+                      << " minimized=" << int( ( flags & SDL_WINDOW_MINIMIZED ) != 0 )
+                      << " msaa_buffers=" << sampleBuffers << " msaa_samples=" << samples;
+#endif
+            report << '\n';
+            ReportTimes( report, "presentations", presentationTimes );
+            ReportTimes( report, "active game", gameTimes );
+            std::string text = report.str();
+            if ( sr_hiddenWindow )
+                std::cerr << text;
+            if ( sr_frameTelemetry )
+            {
+                std::ofstream log;
+                if ( tDirectories::Var().Open( log, "frame-times.log", std::ios::app ) )
+                    log << text;
+            }
+            periodStart = now;
+            presentations = gameFrames = repeatedGameTimes = 0;
+            presentationTimes.clear();
+            gameTimes.clear();
+        }
+    }
+};
+}
+
+void rSysDep::GameFrameRendered( double gameTime, int reportedFPS )
+{
+    if ( FrameTelemetryEnabled() )
+    {
+        sr_hiddenGameFramePending = true;
+        sr_hiddenGameTime = gameTime;
+        sr_hiddenReportedFPS = reportedFPS;
+    }
+}
+
 void rSysDep::SwapGL(){
     static std::unique_ptr< rTextureRenderTarget > blurTarget;
 
@@ -1547,6 +1716,25 @@ void rSysDep::SwapGL(){
     //#endif
 
     sr_LimitFPS();
+
+    static HiddenFrameTelemetry telemetry;
+    static bool telemetryWasEnabled = false;
+    if ( FrameTelemetryEnabled() )
+    {
+        // Completion-to-completion intervals include readback, swap/GPU waiting, frame
+        // limiting, and intervening game work. Count completed swap calls, not motion-blur
+        // draws without a swap; this measures the render loop, not physical display scanout.
+        telemetryWasEnabled = true;
+        if ( shouldSwap )
+            telemetry.Present( sr_hiddenGameFramePending, sr_hiddenGameTime, sr_hiddenReportedFPS );
+    }
+    else if ( telemetryWasEnabled )
+    {
+        // Re-enabling diagnostics starts a new interval, without a disabled-period gap.
+        telemetry = HiddenFrameTelemetry();
+        telemetryWasEnabled = false;
+    }
+    sr_hiddenGameFramePending = false;
 
     sr_glOut = next_glOut;
 }

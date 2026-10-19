@@ -10,12 +10,16 @@ Engine -> Python
           u32 n_global_planes, u32 n_scalars, u32 n_maps, f32 local_cell, f32 decision_interval
   STEP    u32 round_id, u32 tick, f32 round_time, u8 round_over, u8 n_alive (all cycles),
           u8 n_total (cycles that started the round), u8 n_slots,
-          then per slot: u8 flags, u8 kills, u8 action_mask, u8 pad,
+          then per slot: u8 flags, u8 kills, u8 action_mask, u8 teacher_action_plus_one,
           and if FLAG_NEEDS_ACTION: N_MAPS grids of GRID*GRID u8 (local 2 m, close 1 m, global,
           territory), then scalars[N] f32
 
 Python -> Engine
   ACTIONS u8 n_slots, then n_slots x u8 action (ignored for slots that did not ask)
+
+The teacher byte is zero in normal operation. With NEURAL_TEACHER it is the executed
+native action + 1; all observations precede all teacher actions. ACTIONS then only
+acknowledges the STEP and does not apply those moves a second time.
 
 The engine blocks after every STEP until the matching ACTIONS arrives (lockstep).
 """
@@ -24,7 +28,8 @@ from __future__ import annotations
 
 import struct
 
-PROTOCOL_VERSION = 2
+PROTOCOL_VERSION = 4  # append opponent resources and direction-specific turn timing
+OBSERVATION_VERSION = 2
 MAGIC = 0x414D5241  # b"ARMA" little-endian
 
 MSG_HELLO = 1
@@ -39,14 +44,20 @@ N_TERRITORY_PLANES = 8  # bit 0 I reach first, bit 1 an enemy does, bits 2..7 my
 N_MAPS = 4  # local (2 m), close (1 m), global (arena), territory (arena)
 MAP_NAMES = ("local", "close", "global", "territory")
 MAP_PLANES = (N_LOCAL_PLANES, N_LOCAL_PLANES, N_GLOBAL_PLANES, N_TERRITORY_PLANES)
-N_SCALARS = 96
-N_ACTIONS = 4
+N_SCALARS = 108
+OWN_SCALARS = 72
+ENEMY_EXTRA_OFFSET = 96  # the original 96 fields retain their positions
+ENEMY_EXTRA_FEATURES = 4
+ENEMY_FEATURES = 12
+N_ACTIONS = 6
 
 ACTION_STRAIGHT = 0
 ACTION_LEFT = 1
 ACTION_RIGHT = 2
 ACTION_BRAKE = 3
-ACTION_NAMES = ("straight", "left", "right", "brake")
+ACTION_LEFT_BRAKE = 4
+ACTION_RIGHT_BRAKE = 5
+ACTION_NAMES = ("straight", "left", "right", "brake", "left + brake", "right + brake")
 
 FLAG_ALIVE = 1 << 0
 FLAG_NEEDS_ACTION = 1 << 1

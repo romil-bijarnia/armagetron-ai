@@ -1,8 +1,8 @@
 """Watch the trained AI play, drawn live in the terminal (no game window).
 
-    ./trainctl show                     # two copies of the AI against each other
-    ./trainctl show --bots 1 --ais 1    # the AI against the game's best bot
-    ./trainctl show --ais 2 --bots 2 --size -1 --speed 2
+    uv run arma-show                     # two copies of the AI against each other
+    uv run arma-show --bots 1 --ais 1    # the AI against the game's best bot
+    uv run arma-show --ais 2 --bots 2 --size -1 --speed 2
 
 A real match runs in a headless engine; every cycle's trail is drawn with braille dots in its own
 colour, with a scoreboard beside the arena. Ctrl-C quits.
@@ -19,7 +19,6 @@ from pathlib import Path
 
 from rich import box
 from rich.console import Console, ConsoleOptions, Group, RenderResult
-from rich.layout import Layout
 from rich.live import Live
 from rich.panel import Panel
 from rich.table import Table
@@ -32,12 +31,20 @@ from .play import Brain
 PROJECT = Path(__file__).resolve().parent.parent
 WALLS_STAY_UP = 8.0  # seconds a dead cycle's trail stays solid (the game's SP_WALLS_STAY_UP_DELAY)
 _DOT = ((0x01, 0x08), (0x02, 0x10), (0x04, 0x20), (0x40, 0x80))
-AI_COLORS = ["#22d3ee", "#f472b6", "#facc15", "#4ade80"]
-BOT_COLORS = ["#fb923c", "#a78bfa", "#94a3b8", "#f87171"]
+AI_COLORS = ["#8fafcd", "#c9a977", "#a0b8a3", "#b4a2c3"]
+BOT_COLORS = ["#c28d81", "#9ab9b8", "#b9bca0", "#b6a4a8"]
+DIM = "#8b949e"
+RIM = "#48515d"
 
 
 def dim(hex_color: str, f: float = 0.45) -> str:
     return "#" + "".join(f"{round(int(hex_color[i:i + 2], 16) * f):02x}" for i in (1, 3, 5))
+
+
+def direction(cycle: Cycle) -> str:
+    if abs(cycle.dx) > abs(cycle.dy):
+        return "→" if cycle.dx >= 0 else "←"
+    return "↑" if cycle.dy >= 0 else "↓"
 
 
 @dataclass
@@ -58,7 +65,9 @@ class Cycle:
 
     @property
     def label(self) -> str:
-        return f"AI {self.slot + 1}" if self.slot != 255 else f"{self.name.capitalize()} (bot)"
+        if self.slot == 255:
+            return f"{self.name.capitalize()} (bot)"
+        return "Blacklight" if self.slot == 0 else f"Blacklight {self.slot + 1}"
 
 
 class Match:
@@ -142,7 +151,7 @@ class Arena:
         self.m = match
 
     def __rich_console__(self, console: Console, options: ConsoleOptions) -> RenderResult:
-        cols, rows = options.max_width, options.height or 20
+        cols, rows = max(1, options.max_width), max(1, options.height or 20)
         lx, ly, hx, hy = self.m.bounds
         W, H = cols * 2, rows * 4
         sx, sy = (W - 1) / max(hx - lx, 1e-6), (H - 1) / max(hy - ly, 1e-6)
@@ -184,12 +193,13 @@ class Arena:
         for c in self.m.cycles.values():
             if c.alive:
                 x, y = to_dots(c.x, c.y)
-                heads[(min(max(y // 4, 0), rows - 1), min(max(x // 2, 0), cols - 1))] = c.color
+                heads[(min(max(y // 4, 0), rows - 1), min(max(x // 2, 0), cols - 1))] = (c.color, direction(c))
         for r in range(rows):
             line = Text(no_wrap=True)
             for k in range(cols):
                 if (r, k) in heads:
-                    line.append("⣿", style=f"bold {heads[(r, k)]}")
+                    head_color, heading = heads[(r, k)]
+                    line.append(heading, style=f"bold {head_color}")
                 elif bits[r][k]:
                     line.append(chr(0x2800 + bits[r][k]), style=color[r][k])
                 else:
@@ -197,55 +207,67 @@ class Arena:
             yield line
 
 
-def scoreboard(m: Match, brain: Brain, speed: float) -> Group:
+def scoreboard(m: Match, brain: Brain, speed: float, *, compact: bool = False) -> Group:
+    if not m.cycles:
+        return Group(Text("Waiting for players", style=DIM))
+    if compact:
+        alive = sum(c.alive for c in m.cycles.values())
+        return Group(Text(f"{alive}/{len(m.cycles)} alive  ·  {m.draws} draws", style=DIM))
     t = Table.grid(padding=(0, 1), expand=True)
-    t.add_column(no_wrap=True, width=1)
     t.add_column(no_wrap=True, ratio=1, overflow="ellipsis")
+    t.add_column(no_wrap=True)
     t.add_column(no_wrap=True, justify="right")
-    t.add_column(no_wrap=True, justify="right", width=4)
-    t.add_row("", Text("player", style="bold #d0d0d0"), Text("now", style="bold #d0d0d0"),
-              Text("wins", style="bold #d0d0d0"))
+    t.add_column(no_wrap=True, justify="right")
+    t.add_row(Text("Player", style=DIM), Text("State", style=DIM), Text("Speed", style=DIM),
+              Text("Wins", style=DIM))
     for c in sorted(m.cycles.values(), key=lambda c: (c.slot == 255, c.slot, c.name)):
-        status = Text(f"{c.speed:.0f} m/s", style="#5fd75f") if c.alive else Text("crashed", style="#ff5f5f")
-        t.add_row(Text("■", style=c.color), Text(c.label, style="bold #e4e4e4" if c.alive else "#8a8a8a"),
-                  status, Text(str(m.wins.get(c.pid, 0)), style="bold #e4e4e4"))
-    info = Text(no_wrap=True, overflow="ellipsis")
-    info.append(f"\nround {m.rounds}   ", style="#9e9e9e")
-    info.append(f"{int(m.time // 60)}:{int(m.time % 60):02d}", style="bold #e4e4e4")
-    info.append(f"   draws {m.draws}\n", style="#9e9e9e")
+        label = f"{direction(c)} {c.label}" if c.alive else c.label
+        t.add_row(Text(label, style=c.color if c.alive else DIM),
+                  Text("alive" if c.alive else "out", style=DIM),
+                  Text(f"{c.speed:.0f} m/s" if c.alive else "—", style=DIM),
+                  Text(str(m.wins.get(c.pid, 0))))
+    info = Text(f"Draws {m.draws}", style=DIM, no_wrap=True, overflow="ellipsis")
     if m.last_result:
-        info.append("last round: ", style="#9e9e9e")
-        info.append(m.last_result + "\n", style="bold #5fafd7")
-    info.append(f"\nAI = training update {brain.update}\n", style="#6c6c6c")
-    info.append(f"speed {speed:g}x", style="#6c6c6c")
+        info.append(f"\nLast: {m.last_result}", style=DIM)
     return Group(t, info)
 
 
-def build(m: Match, brain: Brain, speed: float, width: int, height: int) -> Layout:
+def build(m: Match, brain: Brain, speed: float, width: int, height: int) -> Group:
+    """Fit the arena's proportions, with a side table only when there is room for it."""
+    width, height = max(20, min(width, 120)), max(8, height)
     lx, ly, hx, hy = m.bounds
-    aspect = (hx - lx) / max(hy - ly, 1e-6)
-    side = 34
-    rows = max(height - 3, 6)  # arena panel border (2) + footer (1)
-    cols = round(rows * 2 * aspect)  # braille dots are square when a cell is twice as tall as wide
-    if cols + 2 + side > width:
-        cols = max(width - 2 - side, 10)
-        rows = max(round(cols / (2 * aspect)), 4)
-    title = Text()
-    title.append("¹", style="bold #ffffff")
-    title.append("arena", style="bold #2fb9b0")
-    title.append(f"  {hx - lx:.0f} m", style="#9e9e9e")
-    arena = Panel(Arena(m), title=title, title_align="left", box=box.ROUNDED, border_style="#2fb9b0", padding=0)
-    t2 = Text()
-    t2.append("²", style="bold #ffffff")
-    t2.append("match", style="bold #d1589f")
-    board = Panel(scoreboard(m, brain, speed), title=t2, title_align="left", box=box.ROUNDED,
-                  border_style="#d1589f", padding=(0, 1))
-    body = Layout()
-    body.split_row(Layout(arena, size=cols + 2), Layout(board, size=side), Layout(Text(" "), ratio=1))
-    lay = Layout()
-    lay.split_column(Layout(body, size=rows + 2), Layout(Text(" ctrl-c quits", style="#6c6c6c"), size=1),
-                     Layout(Text(" "), ratio=1))
-    return lay
+    aspect = max((hx - lx) / max(hy - ly, 1e-6), .1)
+    wide = width >= 80 and height >= 16
+    compact = not wide and height < len(m.cycles) + 9
+    board_height = 1 if compact or not m.cycles else len(m.cycles) + 2 + bool(m.last_result)
+    side, gap = (34, 3) if wide else (0, 0)
+    available_cols = width - side - gap - 2
+    available_rows = height - 5 - (0 if wide else board_height)
+    rows = max(2, min(available_rows, int(available_cols / (2 * aspect))))
+    cols = max(1, min(available_cols, round(rows * 2 * aspect)))
+    content_width = cols + 2 + side + gap if wide else min(width, max(cols + 2, 46))
+    header = Table.grid(expand=True)
+    header.add_column(ratio=1, no_wrap=True, overflow="ellipsis")
+    header.add_column(justify="right", no_wrap=True)
+    clock = f"{int(m.time // 60)}:{int(m.time % 60):02d}"
+    header.add_row(Text("Blacklight / match", style="bold"), Text(f"Round {m.rounds}  ·  {clock}", style=DIM))
+    identity = Text(f"Blacklight u{brain.update:,}  ·  {speed:g}x  ·  {hx - lx:.0f} x {hy - ly:.0f} m",
+                    style=DIM, no_wrap=True, overflow="ellipsis")
+    arena = Panel(Arena(m), box=box.SQUARE, border_style=RIM, padding=0, width=cols + 2, height=rows + 2)
+    board = scoreboard(m, brain, speed, compact=compact)
+    if wide:
+        body = Table.grid(padding=(0, gap))
+        body.add_column(width=cols + 2)
+        body.add_column(width=side)
+        body.add_row(arena, board)
+    else:
+        body = Group(arena, board)
+    footer = Text("Ctrl-C ends this match.", style=DIM, no_wrap=True, overflow="ellipsis")
+    bounded = Table.grid()
+    bounded.add_column(width=content_width)
+    for item in (header, identity, body, footer):
+        bounded.add_row(item)
+    return Group(bounded)
 
 
 def main() -> None:
@@ -255,7 +277,7 @@ def main() -> None:
     ap.add_argument("--size", type=float, default=-2, help="arena SIZE_FACTOR (-3 small, 0 full-size)")
     ap.add_argument("--speed", type=float, default=1.0, help="playback speed, 1 = real time")
     ap.add_argument("--walls", type=float, default=600, help="trail length in metres (-1 = endless)")
-    ap.add_argument("--checkpoint", type=Path, default=PROJECT / "runs/v3/latest.pt")
+    ap.add_argument("--checkpoint", type=Path, default=PROJECT / "runs/blacklight/latest.pt")
     ap.add_argument("--greedy", action="store_true",
                     help="always take the top move (copies of the AI then tend to mirror each other)")
     ap.add_argument("--snapshot", type=float, default=0,
@@ -285,7 +307,7 @@ def main() -> None:
                 console.print(build(m, brain, args.speed, *console.size), height=console.size.height)
 
         view = Snapshot() if args.snapshot else Live(build(m, brain, args.speed, *console.size), console=console,
-                                                     screen=True, auto_refresh=False)
+                                                     screen=False, auto_refresh=False, vertical_overflow="crop")
         started = time.monotonic()
         try:
             with view as live:

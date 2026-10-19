@@ -32,6 +32,7 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 #include "rViewport.h"
 #include "rConsole.h"
 #include "gGame.h"
+#include "gNeural.h"
 #include "gLogo.h"
 #include "gCommandLineJumpStart.h"
 
@@ -433,6 +434,7 @@ void cleanup(eGrid *grid){
     static bool reentry=true;
     if (reentry){
         reentry=false;
+        gNeural::Shutdown();
         su_contInput=false;
 
         exit_game_objects(grid);
@@ -673,6 +675,11 @@ namespace
 {
 tString sn_configurationSavedInVersion{"0.2.8"};
 tConfItem<tString> sn_configurationSavedInVersionConf("SAVED_IN_VERSION",sn_configurationSavedInVersion);
+
+struct NeuralWorkerCleanup
+{
+    ~NeuralWorkerCleanup() { gNeural::Shutdown(); }
+};
 
 #ifndef DEDICATED
 struct SDLCleanup
@@ -917,6 +924,7 @@ int main(int argc,char **argv){
 #ifndef NOSOUND
             SDLSoundCleanup soundInitAndCleanup; // se_SoundInit() now, se_SoundExit() later
 #endif
+            NeuralWorkerCleanup neuralWorkerCleanup;
 
             if (sr_InitDisplay()){
 
@@ -941,7 +949,10 @@ int main(int argc,char **argv){
 
                     //std::cout << "init sound\n";
 
-                    welcome();
+                    // Headless local profiling needs the same in-process bot/game
+                    // path as Start Game, without splash or first-use menus.
+                    if ( !sg_jumpStartAnalyzer.ShouldStartLocalGame() )
+                        welcome();
 
                     //std::cout << "atexit\n";
 
@@ -964,7 +975,14 @@ int main(int argc,char **argv){
                     }
 #endif
 
-                    MainMenu();
+                    if ( sg_jumpStartAnalyzer.ShouldStartLocalGame() )
+                    {
+                        gLogo::SetDisplayed(false);
+                        sg_SinglePlayerGame();
+                    }
+                    else
+                        MainMenu();
+                    gNeural::Shutdown();
 
                     // remove all players
                     for ( int i = se_PlayerNetIDs.Len()-1; i>=0; --i )
@@ -976,6 +994,7 @@ int main(int argc,char **argv){
                 }
                 catch (tException const & e)
                 {
+                    gNeural::Shutdown();
                     gLogo::SetDisplayed(true);
                     uMenu::SetIdle(NULL);
                     sr_con.autoDisplayAtSwap=false;
@@ -1000,12 +1019,14 @@ int main(int argc,char **argv){
 
 #else // DEDICATED
             sr_glOut=0;
+            NeuralWorkerCleanup neuralWorkerCleanup;
 
             //  nServerInfo::TellMasterAboutMe();
 
             while (!uMenu::quickexit)
                 sg_HostGame();
 #endif // DEDICATED
+            gNeural::Shutdown();
             nNetObject::ClearAll();
             nServerInfo::DeleteAll();
         }

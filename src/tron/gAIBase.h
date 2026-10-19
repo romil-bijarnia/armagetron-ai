@@ -183,6 +183,10 @@ struct ThinkData : public ThinkDataBase
 public:
     gAICharacter* Character() const {return character;}
 
+    //! Select an exact loaded profile before the round's cycle calls NewObject.
+    //! Missing or duplicate names are rejected instead of falling back to an IQ match.
+    bool SetCharacterProfile( tString const & name );
+
     //	virtual void AddRef();
     //	virtual void Release();
 

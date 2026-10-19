@@ -5,7 +5,6 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
-#include <limits>
 #include <thread>
 
 namespace tron
@@ -39,7 +38,22 @@ inline float Gumbel( uint64_t & s )
 inline int Hold( int a )
 {
     // inside a tree edge a turn is followed by driving straight; braking keeps braking
-    return a == ACT_BRAKE ? ACT_BRAKE : ACT_STRAIGHT;
+    return ( a == ACT_BRAKE || a == ACT_LEFT_BRAKE || a == ACT_RIGHT_BRAKE ) ? ACT_BRAKE : ACT_STRAIGHT;
+}
+
+void AppliedContext( World const & before, World const & after, int player, int action,
+                     std::array< float, kContext > & context )
+{
+    context.fill(0.f);
+    // The simulator, like gCycle::Act, drops controls while the game timer is zero.
+    // Record what was applied even when the preceding sample has no learning target.
+    if (before.cycles[player].alive && before.time > 1E-6f)
+    {
+        int applied = action >= 0 && action < kActions ? action : ACT_STRAIGHT;
+        if (!(before.ActionMask(player) >> applied & 1)) applied = Hold(applied);
+        context[applied] = 1.f;
+    }
+    context[kActions] = std::max(0.f, after.time - before.time) / .05f;
 }
 
 inline uint8_t Heading( Cycle const & c )
@@ -96,6 +110,9 @@ void SelfPlay::Start( int gi, float size, int n, int const * agents, int const *
     for ( int p = 0; p < g.n; ++p )
     {
         g.agents[p] = agents[p];
+        g.memory[p].fill(0.f);
+        g.context[p].fill(0.f);
+        g.generation[p] = 0;
         g.learn[p] = learn[p] != 0;
         g.endDecision[p] = -1;
         g.outcome[p] = 0;
@@ -105,6 +122,8 @@ void SelfPlay::Start( int gi, float size, int n, int const * agents, int const *
         g.filled[p] = 0;
         g.hunterAct[p] = ACT_STRAIGHT;
         g.hunterAt[p] = -1000;
+        g.rootUpdate[p] = -1;
+        g.lastChoice[p] = DecisionWatch();
     }
     g.rng = seed * 0x9E3779B97F4A7C15ULL + 0x632BE59BD9B4E019ULL;
     if ( g.rng == 0 )
@@ -125,29 +144,76 @@ void SelfPlay::Start( int gi, float size, int n, int const * agents, int const *
     g.waiting = false;
     g.fed = false;
     g.searches = g.sims = 0;
+    std::fill( g.sourceCounts, g.sourceCounts + 5, int64_t( 0 ) );
+}
+
+void SelfPlay::WatchDecision( Game & g, int p, int action, int selection, float const * search )
+{
+    DecisionWatch & w = g.lastChoice[p];
+    // Retain the observation buffers' capacity between decisions.
+    w.maps.clear(); w.previous.clear(); w.scalars.clear();
+    w.policyUpdate = -1;
+    w.value = 0;
+    w.hunterReplanned = false;
+    std::fill( w.policy, w.policy + kActions, 0.f );
+    std::fill( w.search, w.search + kActions, 0.f );
+    w.action = action;
+    w.decision = g.decision;
+    w.selection = selection;
+    w.observedAt = g.world.time;
+    w.context = g.context[p];
+    ++g.sourceCounts[selection];
+    if ( selection == WATCH_HUNTER )
+    {
+        w.mask = g.world.ActionMask( p );
+        w.hunterReplanned = g.hunterAt[p] == g.decision;
+        return;
+    }
+    w.mask = g.world.ActionMask( p );
+    w.policyUpdate = g.rootUpdate[p];
+    w.value = g.rootValue[p];
+    uint8_t const * current = &g.curMaps[size_t( p ) * kMapBytes];
+    uint8_t const * previous = g.havePrev[p] ? &g.prevMaps[size_t( p ) * kMapBytes] : current;
+    w.maps.assign( current, current + kMapBytes );
+    w.previous.assign( previous, previous + kMapBytes );
+    float const * scalars = &g.curScalars[size_t( p ) * World::kScalars];
+    w.scalars.assign( scalars, scalars + World::kScalars );
+    // These are the probabilities the sampler used, or the root network prior for a search
+    // or greedy move. The improved search target is a distinct distribution.
+    MaskedSoftmax( g.rootLogits[p], w.mask, w.policy,
+                   selection == WATCH_SAMPLED ? cfg.temperature : 1.f );
+    if ( search )
+        std::copy( search, search + kActions, w.search );
 }
 
 // ------------------------------------------------------------------ network requests
 void SelfPlay::Ask( Game & g, int node, int p, World const & now, World const & before )
 {
-    size_t k = g.requests.size();
-    g.requests.push_back( tron::Request{ node, p } );
-    g.reqMaps.resize( ( k + 1 ) * 2 * kMapBytes );
-    g.reqScalars.resize( ( k + 1 ) * World::kScalars );
-    g.reqMask.resize( k + 1 );
-    uint8_t * cur = &g.reqMaps[k * 2 * kMapBytes];
+    auto found = std::find_if(g.requests.begin(), g.requests.end(), [=](Request const & r) {
+        return r.node == node && r.player == p;
+    });
+    if (found == g.requests.end()) {
+        g.requests.push_back(Request{node, p});
+        found = g.requests.end() - 1;
+        found->memory = node < 0 ? g.memory[p] : g.nodes[node].memory[p];
+    }
+    Request & request = *found;
+    size_t offset = request.maps.size(), scalarOffset = request.scalars.size();
+    request.maps.resize(offset + 2 * kMapBytes);
+    request.scalars.resize(scalarOffset + World::kScalars);
+    uint8_t * cur = request.maps.data() + offset;
     uint8_t * prev = cur + kMapBytes;
     int const g2 = World::kGrid * World::kGrid;
-    float * sc = &g.reqScalars[k * World::kScalars];
-    now.Observe( p, cur, cur + g2, cur + 2 * g2, cur + 3 * g2, sc );
-    if ( &before == &now )
-        std::memcpy( prev, cur, kMapBytes );
-    else
-    {
-        static thread_local std::vector< float > dump( World::kScalars );
-        before.Observe( p, prev, prev + g2, prev + 2 * g2, prev + 3 * g2, &dump[0] );
+    now.Observe(p, cur, cur + g2, cur + 2 * g2, cur + 3 * g2, request.scalars.data() + scalarOffset);
+    if (&before == &now)
+        std::memcpy(prev, cur, kMapBytes);
+    else {
+        float dump[World::kScalars];
+        before.Observe(p, prev, prev + g2, prev + 2 * g2, prev + 3 * g2, dump);
     }
-    g.reqMask[k] = uint8_t( now.ActionMask( p ) );
+    request.masks.push_back(uint8_t(now.ActionMask(p)));
+    auto const & context = node < 0 ? g.context[p] : g.nodes[node].context[p];
+    request.contexts.insert(request.contexts.end(), context.begin(), context.end());
 }
 
 // ------------------------------------------------------------------ the real decisions
@@ -171,6 +237,12 @@ void SelfPlay::BeginDecision( Game & g )
         std::memcpy( &g.reqMaps[k * 2 * kMapBytes + kMapBytes], g.havePrev[p] ? &g.prevMaps[size_t( p ) * kMapBytes] : cur, kMapBytes );
         std::memcpy( &g.reqScalars[k * World::kScalars], sc, World::kScalars * sizeof( float ) );
         g.reqMask[k] = uint8_t( g.world.ActionMask( p ) );
+        Request & request = g.requests.back();
+        request.memory = g.memory[p];
+        request.maps.assign(g.reqMaps.begin() + k * 2 * kMapBytes, g.reqMaps.begin() + (k + 1) * 2 * kMapBytes);
+        request.scalars.assign(sc, sc + World::kScalars);
+        request.masks.push_back(g.reqMask[k]);
+        request.contexts.assign(g.context[p].begin(), g.context[p].end());
     }
     g.stage = 1;
 }
@@ -194,7 +266,8 @@ void SelfPlay::Record( Game & g, int p, bool searched, float const * policy )
         R.policy[slot * kActions + a] = searched ? policy[a] : 0.f;
     R.hasPolicy[slot] = searched ? 1 : 0;
     R.value[slot] = 0;
-    R.aux[slot * 2] = R.aux[slot * 2 + 1] = 0;
+    for ( int a = 0; a < kAux; ++a )
+        R.aux[slot * kAux + a] = 0;
     if ( R.future )
         R.future[slot] = -1;
     if ( R.heading )
@@ -203,21 +276,24 @@ void SelfPlay::Record( Game & g, int p, bool searched, float const * policy )
     if ( !g.traj[p].empty() && g.traj[p].back().decision == g.decision - 1 )
         prev = g.traj[p].back().index;
     R.prev[slot] = prev;
-    g.traj[p].push_back( Game::Entry{ idx, g.decision, TerritoryShare( cur + 3 * World::kGrid * World::kGrid ), g.rootBoot[p], !std::isnan( g.rootBoot[p] ) } );
+    if (R.generation) R.generation[slot] = g.generation[p];
+    if (R.context) std::copy(g.context[p].begin(), g.context[p].end(), R.context + slot * kContext);
+    g.traj[p].push_back( Game::Entry{ idx, g.decision, TerritoryShare( cur + 3 * World::kGrid * World::kGrid ), g.rootValue[p], g.world.cycles[p].kills } );
     statSamples++;
     Fill( g, p, R );
 }
 
 // a sample's targets, written only if its slot still holds it; another thread may be reusing the slot
 // right now, so the sample is marked ready only if it is still there after the writes
-static void WriteTargets( Ring & R, Game::Entry const & e, float value, float share, float dead, int64_t future )
+static void WriteTargets( Ring & R, Game::Entry const & e, float value, float share, float dead, float safeKill, int64_t future )
 {
     int64_t slot = e.index % R.cap;
     if ( __atomic_load_n( &R.gen[slot], __ATOMIC_ACQUIRE ) != e.index )
         return;  // overwritten already
     R.value[slot] = value;
-    R.aux[slot * 2] = share;
-    R.aux[slot * 2 + 1] = dead;
+    R.aux[slot * kAux] = share;
+    R.aux[slot * kAux + 1] = dead;
+    R.aux[slot * kAux + 2] = safeKill;
     if ( R.future )
         R.future[slot] = future;
     if ( __atomic_load_n( &R.gen[slot], __ATOMIC_ACQUIRE ) == e.index )
@@ -231,8 +307,6 @@ void SelfPlay::Fill( Game & g, int p, Ring & R )
 {
     std::vector< Game::Entry > const & tr = g.traj[p];
     Game::Entry const & now = tr.back();
-    if ( !now.hasValue )
-        return;  // targets wait for the next decision that has a value
     int const H = cfg.auxHorizon, N = std::max( cfg.valueSteps, H + 1 );
     while ( g.filled[p] < tr.size() && tr[g.filled[p]].decision + N <= now.decision )
     {
@@ -242,7 +316,8 @@ void SelfPlay::Fill( Game & g, int p, Ring & R )
         size_t j = std::min( i + size_t( H ), tr.size() - 1 );
         while ( j > i && tr[j].decision > tr[i].decision + H )
             --j;
-        WriteTargets( R, tr[i], now.value * std::pow( cfg.gamma, float( now.decision - tr[i].decision ) ), tr[j].share, 0.f, tr[j].index );
+        WriteTargets( R, tr[i], now.value * std::pow( cfg.gamma, float( now.decision - tr[i].decision ) ), tr[j].share, 0.f,
+                      tr[j].kills > tr[i].kills ? 1.f : 0.f, tr[j].index );
     }
 }
 
@@ -272,6 +347,8 @@ void SelfPlay::FinishDecision( Game & g, int const * acts )
 {
     World before = g.world;
     g.world.Step( acts );
+    for (int p = 0; p < g.n; ++p)
+        AppliedContext(before, g.world, p, acts[p], g.context[p]);
     g.decision++;
     MarkDeaths( g, before, g.world, g.decision );
     for ( int p = 0; p < g.n; ++p )
@@ -279,6 +356,11 @@ void SelfPlay::FinishDecision( Game & g, int const * acts )
         {
             std::memcpy( &g.prevMaps[size_t( p ) * kMapBytes], &g.curMaps[size_t( p ) * kMapBytes], kMapBytes );
             g.havePrev[p] = true;
+        }
+    for (int p = 0; p < g.n; ++p)
+        if (!g.world.cycles[p].alive) {
+            g.memory[p].fill(0.f);
+            g.context[p].fill(0.f);
         }
     g.searching = false;
     g.stage = 0;
@@ -305,18 +387,25 @@ void SelfPlay::FinishPlayer( Game & g, int p )
         Game::Entry const & e = tr[i];
         float share;
         int64_t future;
+        int futureKills;
         if ( i + H < tr.size() )
         {
             share = tr[i + H].share;
             future = tr[i + H].index;
+            futureKills = tr[i + H].kills;
         }
         else
         {
             share = died ? 0.f : tr.back().share;
             future = tr.back().index;
+            futureKills = g.world.cycles[p].kills;
         }
+        // A kill is useful supervision only when the player survives the whole horizon (or
+        // survives an earlier terminal round). Posthumous kills and mutual deaths are negative.
+        bool deadWithinHorizon = died && T - e.decision <= H;
         WriteTargets( R, e, u * std::pow( cfg.gamma, float( T - e.decision ) ), share,
-                      ( died && T - e.decision <= H ) ? 1.f : 0.f, future );
+                      deadWithinHorizon ? 1.f : 0.f,
+                      !deadWithinHorizon && futureKills > e.kills ? 1.f : 0.f, future );
     }
     g.filled[p] = tr.size();
 }
@@ -446,14 +535,20 @@ void SelfPlay::BeginSearch( Game & g )
     Node & r = g.nodes[0];
     r.w = g.world;
     r.depth = 0;
+    r.elapsed = 0;
     r.evaluated = true;
+    g.searchUntil = -1;
     for ( int p = 0; p < g.n; ++p )
     {
         bool alive = g.world.cycles[p].alive;
         r.done[p] = !alive;
+        r.memory[p] = g.memory[p];
+        r.context[p] = g.context[p];
         r.util[p] = g.outcome[p];
         r.value[p] = alive ? g.rootValue[p] : g.outcome[p];
         r.mask[p] = alive ? g.world.ActionMask( p ) : 0;
+        r.hunterAct[p] = g.hunterAct[p];
+        r.hunterAt[p] = g.hunterAt[p];
         for ( int a = 0; a < kActions; ++a )
         {
             r.logits[p][a] = g.rootLogits[p][a];
@@ -465,6 +560,14 @@ void SelfPlay::BeginSearch( Game & g )
         g.cands[p].clear();
         if ( !alive )
             continue;
+        if ( g.agents[p] == kAgentHunter )
+        {
+            int a = HunterAction( r.w, g.decision, p, r.hunterAct[p], r.hunterAt[p] );
+            r.mask[p] = 1u << a;
+            int next = r.hunterAt[p] + std::max( 1, cfg.hunterReplan );
+            g.searchUntil = g.searchUntil < 0 ? next : std::min( g.searchUntil, next );
+            continue;
+        }
         for ( int a = 0; a < kActions; ++a )
             if ( r.mask[p] >> a & 1 )
                 g.cands[p].push_back( a );
@@ -503,12 +606,17 @@ void SelfPlay::Expand( Game & g, int parent, uint32_t code, int & child )
     par.kids.push_back( std::make_pair( code, child ) );
     nd.w = par.w;
     nd.depth = par.depth + 1;
+    nd.elapsed = par.elapsed;
     for ( int p = 0; p < g.n; ++p )
     {
         nd.done[p] = par.done[p];
+        nd.memory[p] = par.memory[p];
+        nd.context[p] = par.context[p];
         nd.util[p] = par.util[p];
         nd.value[p] = par.util[p];
         nd.mask[p] = 0;
+        nd.hunterAct[p] = par.hunterAct[p];
+        nd.hunterAt[p] = par.hunterAt[p];
         for ( int a = 0; a < kActions; ++a )
         {
             nd.logits[p][a] = 0;
@@ -516,16 +624,28 @@ void SelfPlay::Expand( Game & g, int parent, uint32_t code, int & child )
             nd.W[p][a] = 0;
         }
     }
-    int baseDecision = g.decision + par.depth * cfg.macro;
+    int baseDecision = g.decision + par.elapsed;
+    int duration = cfg.macro;
+    if ( g.searchUntil >= 0 )
+        duration = std::min( duration, g.searchUntil - baseDecision );
     World before;
     bool over = false;
-    for ( int d = 0; d < cfg.macro && !over; ++d )
+    g.requests.clear();
+    for ( int d = 0; d < duration && !over; ++d )
     {
         int step[kMaxPlayers];
         for ( int p = 0; p < g.n; ++p )
-            step[p] = d == 0 ? acts[p] : Hold( acts[p] );
+            if ( nd.done[p] )
+                step[p] = ACT_STRAIGHT;
+            else if ( g.agents[p] == kAgentHunter )
+                step[p] = HunterAction( nd.w, baseDecision + d, p, nd.hunterAct[p], nd.hunterAt[p] );
+            else
+                step[p] = d == 0 ? acts[p] : Hold( acts[p] );
         before = nd.w;
         nd.w.Step( step );
+        for (int p = 0; p < g.n; ++p)
+            AppliedContext(before, nd.w, p, step[p], nd.context[p]);
+        ++nd.elapsed;
         int alive = nd.w.Alive();
         int dec = baseDecision + d + 1;
         for ( int p = 0; p < g.n; ++p )
@@ -544,7 +664,15 @@ void SelfPlay::Expand( Game & g, int parent, uint32_t code, int & child )
                 }
             over = true;
         }
+        for (int p = 0; p < g.n; ++p)
+            if (!nd.done[p] && g.agents[p] != kAgentHunter)
+                Ask(g, child, p, nd.w, before);
     }
+    // A player that died later along this edge has no continuation to evaluate.
+    g.requests.erase(std::remove_if(g.requests.begin(), g.requests.end(), [&](Request const & r) {
+        return nd.done[r.player];
+    }), g.requests.end());
+    nd.cutoff = g.searchUntil >= 0 && g.decision + nd.elapsed >= g.searchUntil;
     bool anyAlive = false;
     for ( int p = 0; p < g.n; ++p )
         anyAlive = anyAlive || !nd.done[p];
@@ -556,19 +684,19 @@ void SelfPlay::Expand( Game & g, int parent, uint32_t code, int & child )
         return;
     }
     // ask for the network's view of every player still in the round
-    g.requests.clear();
-    World const & prevWorld = cfg.macro == 1 ? par.w : before;
+
     for ( int p = 0; p < g.n; ++p )
         if ( !nd.done[p] )
         {
             nd.mask[p] = nd.w.ActionMask( p );
             if ( g.agents[p] == kAgentHunter )
             {
-                // the space fighter's reply inside the tree is not modelled: every move counts the same
+                // Its known control is simulated exactly up to the cutoff. The learner's
+                // value bootstraps there; no policy or value is needed for the hunter seat.
                 nd.value[p] = 0;
                 continue;
             }
-            Ask( g, child, p, nd.w, prevWorld );
+
         }
     if ( g.requests.empty() )
         nd.evaluated = true;
@@ -580,10 +708,11 @@ void SelfPlay::Backup( Game & g, int leaf )
     Node const & lf = g.nodes[leaf];
     for ( int p = 0; p < g.n; ++p )
         G[p] = lf.done[p] ? lf.util[p] : lf.value[p];
-    float disc = std::pow( cfg.gamma, float( cfg.macro ) );
+    int child = leaf;
     for ( int i = int( g.path.size() ) - 1; i >= 0; --i )
     {
         Node & nd = g.nodes[g.path[i].first];
+        float disc = std::pow( cfg.gamma, float( g.nodes[child].elapsed - nd.elapsed ) );
         uint32_t c = g.path[i].second;
         for ( int p = 0; p < g.n; ++p )
         {
@@ -596,6 +725,7 @@ void SelfPlay::Backup( Game & g, int leaf )
             nd.W[p][a] += ret;
             G[p] = ret;
         }
+        child = g.path[i].first;
     }
 }
 
@@ -611,7 +741,7 @@ void SelfPlay::RunSimulations( Game & g )
             bool anyAlive = false;
             for ( int p = 0; p < g.n; ++p )
                 anyAlive = anyAlive || !nd.done[p];
-            if ( !anyAlive )
+            if ( !anyAlive || nd.cutoff )
             {
                 Backup( g, cur );
                 g.simsDone++;
@@ -621,7 +751,16 @@ void SelfPlay::RunSimulations( Game & g )
             }
             int acts[kMaxPlayers];
             for ( int p = 0; p < g.n; ++p )
-                acts[p] = nd.done[p] ? ACT_STRAIGHT : ( cur == 0 ? SelectRoot( g, p ) : SelectInner( g, nd, p ) );
+                if ( nd.done[p] )
+                    acts[p] = ACT_STRAIGHT;
+                else if ( g.agents[p] == kAgentHunter )
+                {
+                    acts[p] = HunterAction( nd.w, g.decision + nd.elapsed, p,
+                                            nd.hunterAct[p], nd.hunterAt[p] );
+                    nd.mask[p] = 1u << acts[p];
+                }
+                else
+                    acts[p] = cur == 0 ? SelectRoot( g, p ) : SelectInner( g, nd, p );
             uint32_t code = Code( acts, g.n );
             int next = -1;
             for ( size_t k = 0; k < nd.kids.size(); ++k )
@@ -662,6 +801,7 @@ void SelfPlay::RunSimulations( Game & g )
         if ( g.agents[p] == kAgentHunter )
         {
             acts[p] = HunterAction( g, p );
+            WatchDecision( g, p, acts[p], WATCH_HUNTER );
             continue;
         }
         float pol[kActions];
@@ -673,6 +813,7 @@ void SelfPlay::RunSimulations( Game & g )
                 best = c[k];
         acts[p] = best;
         Record( g, p, true, pol );
+        WatchDecision( g, p, acts[p], WATCH_SEARCH, pol );
     }
     FinishDecision( g, acts );
 }
@@ -730,14 +871,14 @@ float SelfPlay::HunterEval( World const & w, int p, int e ) const
     return score;
 }
 
-int SelfPlay::HunterMove( Game const & g, int p ) const
+int SelfPlay::HunterMove( World const & w0, int p ) const
 {
-    World const & w0 = g.world;
+    int const n = int( w0.cycles.size() );
     unsigned mask = w0.ActionMask( p );
     // the nearest living enemy answers; everyone else drives on
     int e = -1;
     REAL bestD = 1e30f;
-    for ( int q = 0; q < g.n; ++q )
+    for ( int q = 0; q < n; ++q )
     {
         if ( q == p || !w0.cycles[q].alive || w0.cycles[q].team == w0.cycles[p].team )
             continue;
@@ -762,7 +903,7 @@ int SelfPlay::HunterMove( Game const & g, int p ) const
             if ( !( emask >> ea & 1 ) )
                 continue;
             World w1 = w0;
-            Ply( w1, g.n, p, a, e, ea, cfg.hunterPly );
+            Ply( w1, n, p, a, e, ea, cfg.hunterPly );
             float v = -1e30f;
             if ( cfg.hunterDepth >= 2 && w1.cycles[p].alive && ( e < 0 || w1.cycles[e].alive ) )
             {
@@ -772,7 +913,7 @@ int SelfPlay::HunterMove( Game const & g, int p ) const
                     if ( !( m2 >> b & 1 ) )
                         continue;
                     World w2 = w1;
-                    Ply( w2, g.n, p, b, e, ACT_STRAIGHT, cfg.hunterPly );
+                    Ply( w2, n, p, b, e, ACT_STRAIGHT, cfg.hunterPly );
                     v = std::max( v, HunterEval( w2, p, e ) );
                 }
             }
@@ -791,12 +932,17 @@ int SelfPlay::HunterMove( Game const & g, int p ) const
 
 int SelfPlay::HunterAction( Game & g, int p )
 {
+    return HunterAction( g.world, g.decision, p, g.hunterAct[p], g.hunterAt[p] );
+}
+
+int SelfPlay::HunterAction( World const & w, int decision, int p, int & action, int & plannedAt ) const
+{
     int hold = std::max( 1, cfg.hunterReplan );
-    if ( g.decision >= g.hunterAt[p] && g.decision < g.hunterAt[p] + hold )
-        return g.decision == g.hunterAt[p] ? g.hunterAct[p] : Hold( g.hunterAct[p] );
-    g.hunterAct[p] = HunterMove( g, p );
-    g.hunterAt[p] = g.decision;
-    return g.hunterAct[p];
+    if ( decision >= plannedAt && decision < plannedAt + hold )
+        return decision == plannedAt ? action : Hold( action );
+    action = HunterMove( w, p );
+    plannedAt = decision;
+    return action;
 }
 
 // the real decision, once the network has answered (or nobody needed it)
@@ -817,7 +963,6 @@ void SelfPlay::Decide( Game & g )
         for ( int b = 0; b < kActions; ++b )
             g.rootLogits[p][b] = b == a ? 8.f : -8.f;
         g.rootValue[p] = 0;
-        g.rootBoot[p] = std::numeric_limits< float >::quiet_NaN();
     }
     bool search = anyNet && g.decision > 0 && cfg.searchProb > 0 && cfg.sims > 0 && Uniform( g.rng ) < cfg.searchProb;
     if ( search )
@@ -834,6 +979,7 @@ void SelfPlay::Decide( Game & g )
         if ( g.agents[p] == kAgentHunter )
         {
             acts[p] = HunterAction( g, p );
+            WatchDecision( g, p, acts[p], WATCH_HUNTER );
             continue;
         }
         unsigned mask = g.world.ActionMask( p );
@@ -866,6 +1012,7 @@ void SelfPlay::Decide( Game & g )
             }
         }
         Record( g, p, false, 0 );
+        WatchDecision( g, p, acts[p], cfg.temperature <= 0 ? WATCH_GREEDY : WATCH_SAMPLED );
     }
     FinishDecision( g, acts );
 }
@@ -889,7 +1036,8 @@ void SelfPlay::Advance( Game & g )
                 for ( int a = 0; a < kActions; ++a )
                     g.rootLogits[p][a] = g.outLogits[k * kActions + a];
                 g.rootValue[p] = g.outValue[k];
-                g.rootBoot[p] = g.outBoot[k];
+                g.rootUpdate[p] = g.outUpdates[k];
+                std::copy_n(g.outMemory.data() + k * kMemory, kMemory, g.memory[p].begin());
             }
             g.requests.clear();
             Decide( g );
@@ -903,6 +1051,7 @@ void SelfPlay::Advance( Game & g )
                 for ( int a = 0; a < kActions; ++a )
                     nd.logits[p][a] = g.outLogits[k * kActions + a];
                 nd.value[p] = g.outValue[k];
+                std::copy_n(g.outMemory.data() + k * kMemory, kMemory, nd.memory[p].begin());
             }
             nd.evaluated = true;
             g.requests.clear();
@@ -946,7 +1095,9 @@ void SelfPlay::Advance( Game & g )
 }
 
 int SelfPlay::Collect( uint8_t * maps, float * scalars, uint8_t * masks, int * agentIds, int * gameIds, int maxBatch,
-                       uint8_t * roots )
+                       uint8_t * roots, float * memory, int * lengths,
+                       uint8_t * sequenceMaps, float * sequenceScalars, uint8_t * sequenceMasks,
+                       float * sequenceContexts )
 {
     int const nGames = int( games.size() );
     int nThreads = std::max( 1, std::min( cfg.threads, nGames ) );
@@ -976,12 +1127,22 @@ int SelfPlay::Collect( uint8_t * maps, float * scalars, uint8_t * masks, int * a
             break;
         g.outLogits.assign( g.requests.size() * kActions, 0.f );
         g.outValue.assign( g.requests.size(), 0.f );
-        g.outBoot.assign( g.requests.size(), 0.f );
+        g.outUpdates.assign( g.requests.size(), -1 );
+        g.outMemory.assign(g.requests.size() * kMemory, 0.f);
         for ( size_t k = 0; k < g.requests.size(); ++k, ++b )
         {
-            std::memcpy( maps + size_t( b ) * 2 * kMapBytes, &g.reqMaps[k * 2 * kMapBytes], 2 * kMapBytes );
-            std::memcpy( scalars + size_t( b ) * World::kScalars, &g.reqScalars[k * World::kScalars], World::kScalars * sizeof( float ) );
-            masks[b] = g.reqMask[k];
+            Request const & request = g.requests[k];
+            size_t count = request.masks.size(), last = count - 1;
+            std::memcpy(maps + size_t(b) * 2 * kMapBytes, request.maps.data() + last * 2 * kMapBytes, 2 * kMapBytes);
+            std::memcpy(scalars + size_t(b) * World::kScalars, request.scalars.data() + last * World::kScalars, World::kScalars * sizeof(float));
+            if (memory) std::copy(request.memory.begin(), request.memory.end(), memory + size_t(b) * kMemory);
+            if (lengths) lengths[b] = int(count);
+            size_t base = size_t(b) * std::max(cfg.macro, 1);
+            if (sequenceMaps) std::copy(request.maps.begin(), request.maps.end(), sequenceMaps + base * 2 * kMapBytes);
+            if (sequenceScalars) std::copy(request.scalars.begin(), request.scalars.end(), sequenceScalars + base * World::kScalars);
+            if (sequenceMasks) std::copy(request.masks.begin(), request.masks.end(), sequenceMasks + base);
+            if (sequenceContexts) std::copy(request.contexts.begin(), request.contexts.end(), sequenceContexts + base * kContext);
+            masks[b] = request.masks.back();
             agentIds[b] = g.agents[g.requests[k].player];
             gameIds[b] = i;
             if ( roots )
@@ -992,7 +1153,7 @@ int SelfPlay::Collect( uint8_t * maps, float * scalars, uint8_t * masks, int * a
     return b;
 }
 
-void SelfPlay::Feed( float const * logits, float const * values, int batch, float const * boots )
+void SelfPlay::Feed( float const * logits, float const * values, int batch, int64_t const * updates, float const * memory )
 {
     int b = 0;
     while ( b < batch && b < int( batchGames_.size() ) )
@@ -1003,7 +1164,8 @@ void SelfPlay::Feed( float const * logits, float const * values, int batch, floa
             for ( int a = 0; a < kActions; ++a )
                 g.outLogits[k * kActions + a] = logits[size_t( b ) * kActions + a];
             g.outValue[k] = values[b];
-            g.outBoot[k] = boots ? boots[b] : values[b];
+            g.outUpdates[k] = updates ? updates[b] : -1;
+            if (memory) std::copy_n(memory + size_t(b) * kMemory, kMemory, g.outMemory.data() + k * kMemory);
         }
         g.fed = true;
     }

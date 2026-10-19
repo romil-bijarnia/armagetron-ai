@@ -31,6 +31,7 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 #include <cmath>
 #include <cstring>
 #include <istream>
+#include <set>
 
 #ifdef __APPLE__
 #include <dlfcn.h>
@@ -40,18 +41,20 @@ namespace
 {
 // ------------------------------------------------------------------ file format
 // written by ai/arma_ai/export.py:
-//   char magic[8] = "ARMABRN1" (v1) or "ARMABRN2" (v2)
+//   char magic[8] = "ARMABRN4"
 //   u32 grid, localPlanes, globalPlanes, nScalars, nActions, update, dtype (16 or 32), nLayers
-//   v2 only, then: u32 nMaps, u32 planes[nMaps], u32 stackPrev, u32 nTowers, per tower u32 k, u32 mapIdx[k]
-//   per layer: u8 kind (1 conv, 2 linear), u8 nameLen, name,
+//   u32 nMaps, u32 planes[nMaps], u32 stackPrev, u32 nTowers, per tower u32 k, u32 mapIdx[k]
+//   per layer: u8 kind (1 conv, 2 linear, 3 layer norm, 4 parameter, 5 GRU), u8 nameLen, name,
 //              conv: u32 cout, cin, k, stride, pad; weights [cout*cin*k*k]; bias [cout]
 //              linear: u32 out, in; weights [out*in]; bias [out]
+//              layer norm: u32 n; weight [n]; bias [n]
+//              parameter: u32 ndim, dims[ndim]; values
+//              GRU: u32 input, hidden; weight_ih, weight_hh, bias_ih, bias_hh (r,z,n)
 //   weights are little-endian float16 (dtype 16) or float32 (dtype 32)
-// v3 adds layer kinds 3 (layer norm: u32 n, weight, bias) and 4 (parameter: u32 ndim, dims, values) and
-// names "towers.M.stem", "towers.M.res.B.c0/.gp/.c1", "towers.M.pos", "towers.M.attn.L.*", "towers.M.down0/1".
-// Layer names: v1 "local.net.N", "globl.net.N", "local.fc", "globl.fc"; v2 "towers.M.convs.N",
-// "towers.M.res.B.0" / ".1" (a residual pair), "towers.M.fc"; both: "scalars.0", "scalars.2",
-// "trunk.0", "trunk.2", "pi", "v".
+// Tower names: "towers.M.stem", "towers.M.res.B.c0/.gp/.c1", "towers.M.pos",
+// "towers.M.attn.L.*", "towers.M.down0/1", "towers.M.fc", and local "pre.c0/.c1", "reduce".
+// Other layers: "conditioning.0/.1", "opponents.0/.2", "opponent_query", "scalars.0/.2",
+// "trunk.0/.2", "pi", "v", "aux". The value head is bounded with tanh.
 
 bool ReadU32( std::istream & in, uint32_t & v )
 {
@@ -134,14 +137,9 @@ SgemmFn FindSgemm()
     return NULL;
 }
 
-void Matmul( float const * A, float const * B, float * C, int M, int N, int K )
+void MatmulPortable( float const * A, float const * B, float * C, int M, int N, int K,
+                     bool transposeA, bool transposeB )
 {
-    static SgemmFn sgemm = FindSgemm();
-    if ( sgemm )
-    {
-        sgemm( 101, 111, 111, M, N, K, 1.0f, A, K, B, N, 0.0f, C, N );
-        return;
-    }
     for ( int m = 0; m < M; ++m )
     {
         float * __restrict c = C + size_t( m ) * N;
@@ -149,12 +147,34 @@ void Matmul( float const * A, float const * B, float * C, int M, int N, int K )
             c[n] = 0;
         for ( int k = 0; k < K; ++k )
         {
-            float const a = A[size_t( m ) * K + k];
-            float const * __restrict b = B + size_t( k ) * N;
-            for ( int n = 0; n < N; ++n )
-                c[n] += a * b[n];
+            float const a = transposeA ? A[size_t( k ) * M + m] : A[size_t( m ) * K + k];
+            if ( transposeB )
+            {
+                for ( int n = 0; n < N; ++n )
+                    c[n] += a * B[size_t( n ) * K + k];
+            }
+            else
+            {
+                float const * __restrict b = B + size_t( k ) * N;
+                for ( int n = 0; n < N; ++n )
+                    c[n] += a * b[n];
+            }
         }
     }
+}
+
+// M, N and K describe op(A) * op(B); operands and output use row-major storage.
+void Matmul( float const * A, float const * B, float * C, int M, int N, int K,
+             bool transposeA = false, bool transposeB = false )
+{
+    static SgemmFn sgemm = FindSgemm();
+    if ( sgemm )
+    {
+        sgemm( 101, transposeA ? 112 : 111, transposeB ? 112 : 111, M, N, K, 1.0f,
+               A, transposeA ? M : K, B, transposeB ? K : N, 0.0f, C, N );
+        return;
+    }
+    MatmulPortable( A, B, C, M, N, K, transposeA, transposeB );
 }
 
 // ------------------------------------------------------------------ layers
@@ -256,27 +276,27 @@ void LinearCells( gNeuralNet::Linear const & L, std::vector< float > const & x, 
 void RunAttention( gNeuralNet::Attn const & A, std::vector< float > & x, int C, int N )
 {
     int const heads = 4, dh = C / heads;
-    static std::vector< float > hn, qkv, att, y, scores;
+    static std::vector< float > hn, qkv, att, y, scores, normalizers;
     LayerNormCells( A.ln1, x, C, N, hn );
     LinearCells( A.qkv, hn, N, qkv );  // rows: q (C), k (C), v (C)
     att.assign( size_t( C ) * N, 0.0f );
     scores.resize( size_t( N ) * N );
+    normalizers.resize( N );
     float const scale = 1.0f / std::sqrt( float( dh ) );
     for ( int h = 0; h < heads; ++h )
     {
         float const * q = &qkv[size_t( h * dh ) * N];
         float const * k = &qkv[size_t( C + h * dh ) * N];
         float const * v = &qkv[size_t( 2 * C + h * dh ) * N];
+        // Q and K are channel-major [dh][N]; scores = Q^T K is [N][N].
+        Matmul( q, k, &scores[0], N, N, dh, true, false );
         for ( int i = 0; i < N; ++i )
         {
             float * s = &scores[size_t( i ) * N];
             float best = -1e30f;
             for ( int j = 0; j < N; ++j )
             {
-                float dot = 0;
-                for ( int d = 0; d < dh; ++d )
-                    dot += q[size_t( d ) * N + i] * k[size_t( d ) * N + j];
-                s[j] = dot * scale;
+                s[j] *= scale;
                 best = std::max( best, s[j] );
             }
             float sum = 0;
@@ -285,16 +305,15 @@ void RunAttention( gNeuralNet::Attn const & A, std::vector< float > & x, int C, 
                 s[j] = std::exp( s[j] - best );
                 sum += s[j];
             }
-            float inv = 1.0f / sum;
-            for ( int d = 0; d < dh; ++d )
-            {
-                float const * vd = v + size_t( d ) * N;
-                float o = 0;
-                for ( int j = 0; j < N; ++j )
-                    o += s[j] * vd[j];
-                att[size_t( h * dh + d ) * N + i] = o * inv;
-            }
+            normalizers[i] = 1.0f / sum;
         }
+        // Keep the channel-major result: V scores^T is [dh][N]. Apply each
+        // softmax normalizer after the weighted sum, as in the scalar path.
+        float * output = &att[size_t( h * dh ) * N];
+        Matmul( v, &scores[0], output, dh, N, N, false, true );
+        for ( int d = 0; d < dh; ++d )
+            for ( int i = 0; i < N; ++i )
+                output[size_t( d ) * N + i] *= normalizers[i];
     }
     LinearCells( A.proj, att, N, y );
     for ( size_t i = 0; i < x.size(); ++i )
@@ -339,16 +358,60 @@ uint32_t NextRandom( uint32_t & s )
     return s;
 }
 
-bool StartsWith( std::string const & s, char const * p )
+bool ConvShape( gNeuralNet::Conv const & c, int in, int out, int k, int stride, int pad )
 {
-    return s.compare( 0, strlen( p ), p ) == 0;
+    return c.cin == in && c.cout == out && c.k == k && c.stride == stride && c.pad == pad;
+}
+
+bool LinearShape( gNeuralNet::Linear const & l, int in, int out )
+{
+    return l.in == in && l.out == out;
+}
+
+//! v4 is a fixed architecture. Reject incomplete or mismatched files before inference indexes them.
+bool ValidV4Tower( gNeuralNet::Tower const & t, bool local )
+{
+    int const width = local ? 64 : 128;
+    if ( !t.haveStem || !t.haveDown0 || !t.haveDown1 || !t.hasFc ||
+         t.blocks.size() != size_t( local ? 3 : 5 ) ||
+         !ConvShape( t.down0, width, 2 * width, 3, 2, 1 ) ||
+         !ConvShape( t.down1, 2 * width, 2 * width, 3, 2, 1 ) ||
+         !LinearShape( t.fc, 2 * width * 16, local ? 192 : 256 ) )
+        return false;
+    if ( local )
+    {
+        if ( !ConvShape( t.stem, 16, 48, 3, 2, 1 ) || !t.pre.haveC0 || !t.pre.haveC1 || !t.haveReduce ||
+             !ConvShape( t.pre.c0, 48, 48, 3, 1, 1 ) || !ConvShape( t.pre.c1, 48, 48, 3, 1, 1 ) ||
+             !ConvShape( t.reduce, 48, width, 3, 2, 1 ) || !t.attn.empty() || !t.pos.empty() )
+            return false;
+    }
+    else if ( !ConvShape( t.stem, 32, width, 4, 4, 0 ) || t.pre.haveC0 || t.pre.haveC1 || t.haveReduce ||
+              t.attn.size() != 2 || t.pos.size() != size_t( 256 * width ) )
+        return false;
+    for ( size_t i = 0; i < t.blocks.size(); ++i )
+    {
+        gNeuralNet::Block const & b = t.blocks[i];
+        bool const pooled = ( i + 1 ) % 3 == 0;
+        if ( !b.haveC0 || !b.haveC1 || !ConvShape( b.c0, width, width, 3, 1, 1 ) ||
+             !ConvShape( b.c1, width, width, 3, 1, 1 ) || b.gpool != pooled ||
+             ( pooled && ( b.gch != 32 || !LinearShape( b.gp, 64, width ) ) ) )
+            return false;
+    }
+    for ( size_t i = 0; i < t.attn.size(); ++i )
+    {
+        gNeuralNet::Attn const & a = t.attn[i];
+        if ( a.have != 63 || a.ln1.n != width || a.ln2.n != width ||
+             !LinearShape( a.qkv, width, 3 * width ) || !LinearShape( a.proj, width, width ) ||
+             !LinearShape( a.fc1, width, 2 * width ) || !LinearShape( a.fc2, 2 * width, width ) )
+            return false;
+    }
+    return true;
 }
 } // namespace
 
 // ------------------------------------------------------------------ Net
 gNeuralNet::Net::Net()
-    : loaded_( false ), version_( 0 ), grid_( 0 ), nMaps_( 0 ), nScalars_( 0 ), nActions_( 0 ), update_( 0 ),
-      stackPrev_( false ), hasAux_( false )
+    : loaded_( false ), grid_( 0 ), nMaps_( 0 ), nScalars_( 0 ), nActions_( 0 ), update_( 0 ), hasAux_( false )
 {
 }
 
@@ -359,12 +422,16 @@ bool gNeuralNet::Net::Load( std::istream & in, std::string & error )
     mapPlanes_.clear();
     hasAux_ = false;
     char magic[8];
-    if ( !in.read( magic, 8 ) || memcmp( magic, "ARMABRN", 7 ) != 0 || ( magic[7] != '1' && magic[7] != '2' && magic[7] != '3' ) )
+    if ( !in.read( magic, 8 ) || memcmp( magic, "ARMABRN", 7 ) != 0 )
     {
         error = "not a policy file (bad magic)";
         return false;
     }
-    version_ = magic[7] - '0';
+    if ( magic[7] != '4' )
+    {
+        error = "unsupported policy version; export a V4 checkpoint (ARMABRN4 required)";
+        return false;
+    }
     uint32_t grid, lp, gp, ns, na, update, dtype, nLayers;
     if ( !ReadU32( in, grid ) || !ReadU32( in, lp ) || !ReadU32( in, gp ) || !ReadU32( in, ns ) ||
          !ReadU32( in, na ) || !ReadU32( in, update ) || !ReadU32( in, dtype ) || !ReadU32( in, nLayers ) )
@@ -372,7 +439,8 @@ bool gNeuralNet::Net::Load( std::istream & in, std::string & error )
         error = "truncated header";
         return false;
     }
-    if ( ( dtype != 16 && dtype != 32 ) || grid == 0 || grid > 256 || lp > 8 || gp > 8 || na == 0 || na > 16 || nLayers > 256 )
+    if ( ( dtype != 16 && dtype != 32 ) || grid == 0 || grid > 256 || lp == 0 || lp > 8 || gp == 0 || gp > 8 ||
+         ns == 0 || ns > 4096 || na == 0 || na > 16 || nLayers > 256 )
     {
         error = "unsupported policy file";
         return false;
@@ -381,74 +449,73 @@ bool gNeuralNet::Net::Load( std::istream & in, std::string & error )
     nScalars_ = int( ns );
     nActions_ = int( na );
     update_ = int( update );
-    if ( version_ == 1 )
+    if ( nScalars_ != 108 )
     {
-        // callers always pass the game's four maps (local, close, global, territory); a v1 net
-        // reads the local one and the global one
-        nMaps_ = 4;
-        mapPlanes_.push_back( int( lp ) );
-        mapPlanes_.push_back( int( lp ) );
-        mapPlanes_.push_back( int( gp ) );
-        mapPlanes_.push_back( int( gp ) );
-        stackPrev_ = false;
-        towers_.resize( 2 );
-        towers_[0].maps.push_back( 0 );
-        towers_[1].maps.push_back( 2 );
+        error = "unsupported V4 observation layout; 108 scalars with opponent resources are required";
+        return false;
     }
-    else
+    uint32_t nMaps, stack;
+    if ( !ReadU32( in, nMaps ) || nMaps == 0 || nMaps > 8 )
     {
-        uint32_t nMaps, stack;
-        if ( !ReadU32( in, nMaps ) || nMaps == 0 || nMaps > 8 )
+        error = "bad map count";
+        return false;
+    }
+    nMaps_ = int( nMaps );
+    for ( uint32_t m = 0; m < nMaps; ++m )
+    {
+        uint32_t p;
+        if ( !ReadU32( in, p ) || p == 0 || p > 8 )
         {
-            error = "bad map count";
+            error = "bad plane count";
             return false;
         }
-        nMaps_ = int( nMaps );
-        for ( uint32_t m = 0; m < nMaps; ++m )
+        mapPlanes_.push_back( int( p ) );
+    }
+    if ( !ReadU32( in, stack ) )
+    {
+        error = "truncated header";
+        return false;
+    }
+    uint32_t nTowers;
+    if ( !ReadU32( in, nTowers ) || nTowers == 0 || nTowers > 8 )
+    {
+        error = "bad tower count";
+        return false;
+    }
+    towers_.resize( nTowers );
+    for ( uint32_t t = 0; t < nTowers; ++t )
+    {
+        uint32_t k;
+        if ( !ReadU32( in, k ) || k == 0 || k > nMaps )
         {
-            uint32_t p;
-            if ( !ReadU32( in, p ) || p == 0 || p > 8 )
-            {
-                error = "bad plane count";
-                return false;
-            }
-            mapPlanes_.push_back( int( p ) );
-        }
-        if ( !ReadU32( in, stack ) )
-        {
-            error = "truncated header";
+            error = "bad tower table";
             return false;
         }
-        stackPrev_ = stack != 0;
-        uint32_t nTowers;
-        if ( !ReadU32( in, nTowers ) || nTowers == 0 || nTowers > 8 )
+        for ( uint32_t j = 0; j < k; ++j )
         {
-            error = "bad tower count";
-            return false;
-        }
-        towers_.resize( nTowers );
-        for ( uint32_t t = 0; t < nTowers; ++t )
-        {
-            uint32_t k;
-            if ( !ReadU32( in, k ) || k == 0 || k > nMaps )
+            uint32_t m;
+            if ( !ReadU32( in, m ) || m >= nMaps )
             {
                 error = "bad tower table";
                 return false;
             }
-            for ( uint32_t j = 0; j < k; ++j )
-            {
-                uint32_t m;
-                if ( !ReadU32( in, m ) || m >= nMaps )
-                {
-                    error = "bad tower table";
-                    return false;
-                }
-                towers_[t].maps.push_back( int( m ) );
-            }
+            towers_[t].maps.push_back( int( m ) );
         }
     }
 
+    if ( grid_ != 64 || nActions_ != 6 || nMaps_ != 4 || stack != 1 ||
+         lp != 8 || gp != 8 || mapPlanes_ != std::vector< int >( 4, 8 ) || towers_.size() != 3 ||
+         towers_[0].maps != std::vector< int >( 1, 0 ) || towers_[1].maps != std::vector< int >( 1, 1 ) ||
+         towers_[2].maps != std::vector< int >{ 2, 3 } )
+    {
+        error = "unsupported v4 observation or tower layout";
+        return false;
+    }
+
     bool haveS0 = false, haveS2 = false, haveT0 = false, haveT2 = false, havePi = false, haveV = false;
+    bool haveConditioning[2] = { false, false }, haveOpponents0 = false, haveOpponents2 = false, haveOpponentQuery = false;
+    bool haveMemoryVersion = false, haveMemory = false, haveMemoryProjection = false;
+    std::set< std::string > layerNames;
     for ( uint32_t l = 0; l < nLayers; ++l )
     {
         unsigned char kind, nameLen;
@@ -461,6 +528,11 @@ bool gNeuralNet::Net::Load( std::istream & in, std::string & error )
         if ( nameLen && !in.read( &name[0], nameLen ) )
         {
             error = "truncated layer name";
+            return false;
+        }
+        if ( !layerNames.insert( name ).second )
+        {
+            error = "duplicate layer " + name;
             return false;
         }
         if ( kind == 1 )
@@ -477,58 +549,43 @@ bool gNeuralNet::Net::Load( std::istream & in, std::string & error )
             c.k = int( k );
             c.stride = int( stride );
             c.pad = int( pad );
+            if ( cout == 0 || cout > 4096 || cin == 0 || cin > 4096 || k == 0 || k > 16 || stride == 0 ||
+                 stride > 16 || pad > 16 || size_t( cout ) * cin * k * k > ( 1u << 26 ) )
+            {
+                error = "unsupported conv dimensions " + name;
+                return false;
+            }
             if ( !ReadFloats( in, dtype, size_t( cout ) * cin * k * k, c.w ) || !ReadFloats( in, dtype, cout, c.b ) )
             {
                 error = "truncated conv weights " + name;
                 return false;
             }
-            int tower = -1, res = 0;
-            std::string rest;
-            if ( version_ == 3 )
-            {
-                int b;
-                std::string leaf;
-                if ( !TowerName( name, tower, rest ) || tower < 0 || tower >= int( towers_.size() ) )
-                {
-                    error = "unexpected conv layer " + name;
-                    return false;
-                }
-                Tower & tw = towers_[tower];
-                if ( rest == "stem" ) { tw.stem = c; tw.haveStem = true; }
-                else if ( rest == "down0" ) { tw.down0 = c; tw.haveDown0 = true; }
-                else if ( rest == "down1" ) { tw.down1 = c; tw.haveDown1 = true; }
-                else if ( IndexedName( rest, "res.", b, leaf ) && b >= 0 && b < 64 && ( leaf == "c0" || leaf == "c1" ) )
-                {
-                    if ( int( tw.blocks.size() ) <= b )
-                        tw.blocks.resize( b + 1 );
-                    if ( leaf == "c0" ) { tw.blocks[b].c0 = c; tw.blocks[b].haveC0 = true; }
-                    else { tw.blocks[b].c1 = c; tw.blocks[b].haveC1 = true; }
-                }
-                else
-                {
-                    error = "unexpected conv layer " + name;
-                    return false;
-                }
-                continue;
-            }
-            if ( version_ == 1 )
-            {
-                if ( StartsWith( name, "local.net." ) ) tower = 0;
-                else if ( StartsWith( name, "globl.net." ) ) tower = 1;
-            }
-            else if ( TowerName( name, tower, rest ) )
-            {
-                // towers.M.convs.N or towers.M.res.B.0 / .1
-                if ( StartsWith( rest, "res." ) )
-                    res = rest[rest.size() - 1] == '0' ? 1 : 2;
-            }
-            if ( tower < 0 || tower >= int( towers_.size() ) )
+            int tower, b;
+            std::string rest, leaf;
+            if ( !TowerName( name, tower, rest ) || tower < 0 || tower >= int( towers_.size() ) )
             {
                 error = "unexpected conv layer " + name;
                 return false;
             }
-            towers_[tower].convs.push_back( c );
-            towers_[tower].resPair.push_back( res );
+            Tower & tw = towers_[tower];
+            if ( rest == "stem" ) { tw.stem = c; tw.haveStem = true; }
+            else if ( rest == "down0" ) { tw.down0 = c; tw.haveDown0 = true; }
+            else if ( rest == "down1" ) { tw.down1 = c; tw.haveDown1 = true; }
+            else if ( rest == "pre.c0" ) { tw.pre.c0 = c; tw.pre.haveC0 = true; }
+            else if ( rest == "pre.c1" ) { tw.pre.c1 = c; tw.pre.haveC1 = true; }
+            else if ( rest == "reduce" ) { tw.reduce = c; tw.haveReduce = true; }
+            else if ( IndexedName( rest, "res.", b, leaf ) && b >= 0 && b < 64 && ( leaf == "c0" || leaf == "c1" ) )
+            {
+                if ( int( tw.blocks.size() ) <= b )
+                    tw.blocks.resize( b + 1 );
+                if ( leaf == "c0" ) { tw.blocks[b].c0 = c; tw.blocks[b].haveC0 = true; }
+                else { tw.blocks[b].c1 = c; tw.blocks[b].haveC1 = true; }
+            }
+            else
+            {
+                error = "unexpected conv layer " + name;
+                return false;
+            }
         }
         else if ( kind == 2 )
         {
@@ -541,6 +598,11 @@ bool gNeuralNet::Net::Load( std::istream & in, std::string & error )
             }
             L.out = int( out );
             L.in = int( inN );
+            if ( out == 0 || out > 16384 || inN == 0 || inN > 65536 || size_t( out ) * inN > ( 1u << 26 ) )
+            {
+                error = "unsupported linear dimensions " + name;
+                return false;
+            }
             if ( !ReadFloats( in, dtype, size_t( out ) * inN, L.w ) || !ReadFloats( in, dtype, out, L.b ) )
             {
                 error = "truncated linear weights " + name;
@@ -548,7 +610,7 @@ bool gNeuralNet::Net::Load( std::istream & in, std::string & error )
             }
             int tower;
             std::string rest;
-            if ( version_ == 3 && TowerName( name, tower, rest ) )
+            if ( TowerName( name, tower, rest ) )
             {
                 if ( tower < 0 || tower >= int( towers_.size() ) )
                 {
@@ -589,26 +651,19 @@ bool gNeuralNet::Net::Load( std::istream & in, std::string & error )
                 }
                 continue;
             }
-            if ( name == "local.fc" ) { towers_[0].fc = L; towers_[0].hasFc = true; }
-            else if ( name == "globl.fc" ) { towers_[1].fc = L; towers_[1].hasFc = true; }
-            else if ( version_ == 2 && StartsWith( name, "towers." ) && name.find( ".fc" ) != std::string::npos )
-            {
-                int t = atoi( name.c_str() + 7 );
-                if ( t < 0 || t >= int( towers_.size() ) )
-                {
-                    error = "unexpected linear layer " + name;
-                    return false;
-                }
-                towers_[t].fc = L;
-                towers_[t].hasFc = true;
-            }
-            else if ( name == "scalars.0" ) { scalars0_ = L; haveS0 = true; }
+            if ( name == "scalars.0" ) { scalars0_ = L; haveS0 = true; }
             else if ( name == "scalars.2" ) { scalars2_ = L; haveS2 = true; }
             else if ( name == "trunk.0" ) { trunk0_ = L; haveT0 = true; }
             else if ( name == "trunk.2" ) { trunk2_ = L; haveT2 = true; }
             else if ( name == "pi" ) { pi_ = L; havePi = true; }
             else if ( name == "v" ) { v_ = L; haveV = true; }
             else if ( name == "aux" ) { aux_ = L; hasAux_ = true; }
+            else if ( name == "conditioning.0" ) { conditioning_[0] = L; haveConditioning[0] = true; }
+            else if ( name == "conditioning.1" ) { conditioning_[1] = L; haveConditioning[1] = true; }
+            else if ( name == "opponents.0" ) { opponents0_ = L; haveOpponents0 = true; }
+            else if ( name == "opponents.2" ) { opponents2_ = L; haveOpponents2 = true; }
+            else if ( name == "opponent_query" ) { opponentQuery_ = L; haveOpponentQuery = true; }
+            else if ( name == "memory_projection" ) { memoryProjection_ = L; haveMemoryProjection = true; }
             else
             {
                 error = "unexpected linear layer " + name;
@@ -632,7 +687,7 @@ bool gNeuralNet::Net::Load( std::istream & in, std::string & error )
             }
             int tower, idx;
             std::string rest, leaf;
-            if ( version_ != 3 || !TowerName( name, tower, rest ) || tower < 0 || tower >= int( towers_.size() ) ||
+            if ( !TowerName( name, tower, rest ) || tower < 0 || tower >= int( towers_.size() ) ||
                  !IndexedName( rest, "attn.", idx, leaf ) || idx < 0 || idx >= 16 || ( leaf != "ln1" && leaf != "ln2" ) )
             {
                 error = "unexpected layer norm " + name;
@@ -653,15 +708,17 @@ bool gNeuralNet::Net::Load( std::istream & in, std::string & error )
                 return false;
             }
             size_t count = 1;
+            std::vector< uint32_t > dims;
             for ( uint32_t d = 0; d < ndim; ++d )
             {
                 uint32_t dim;
-                if ( !ReadU32( in, dim ) || dim == 0 )
+                if ( !ReadU32( in, dim ) || dim == 0 || count > ( 1u << 24 ) / dim )
                 {
                     error = "truncated parameter " + name;
                     return false;
                 }
                 count *= dim;
+                dims.push_back( dim );
             }
             std::vector< float > values;
             if ( count > ( 1u << 24 ) || !ReadFloats( in, dtype, count, values ) )
@@ -669,14 +726,48 @@ bool gNeuralNet::Net::Load( std::istream & in, std::string & error )
                 error = "truncated parameter values " + name;
                 return false;
             }
+            if ( name == "memory_version" )
+            {
+                if ( dims != std::vector< uint32_t >{ 1 } || values[0] != 1.0f )
+                {
+                    error = "unsupported recurrent memory version";
+                    return false;
+                }
+                haveMemoryVersion = true;
+                continue;
+            }
             int tower;
             std::string rest;
-            if ( version_ != 3 || !TowerName( name, tower, rest ) || tower < 0 || tower >= int( towers_.size() ) || rest != "pos" )
+            if ( !TowerName( name, tower, rest ) || tower < 0 || tower >= int( towers_.size() ) || rest != "pos" ||
+                 dims != std::vector< uint32_t >{ 1, 256, 128 } )
             {
                 error = "unexpected parameter " + name;
                 return false;
             }
             towers_[tower].pos.swap( values );
+        }
+        else if ( kind == 5 )
+        {
+            uint32_t inputs, hidden;
+            if ( name != "memory_gru" || !ReadU32( in, inputs ) || !ReadU32( in, hidden ) ||
+                 inputs != 775 || hidden != 256 )
+            {
+                error = "unsupported GRU dimensions or layer name";
+                return false;
+            }
+            memoryInput_.in = int( inputs );
+            memoryInput_.out = int( 3 * hidden );
+            memoryHidden_.in = int( hidden );
+            memoryHidden_.out = int( 3 * hidden );
+            if ( !ReadFloats( in, dtype, size_t( 3 * hidden ) * inputs, memoryInput_.w ) ||
+                 !ReadFloats( in, dtype, size_t( 3 * hidden ) * hidden, memoryHidden_.w ) ||
+                 !ReadFloats( in, dtype, 3 * hidden, memoryInput_.b ) ||
+                 !ReadFloats( in, dtype, 3 * hidden, memoryHidden_.b ) )
+            {
+                error = "truncated GRU weights";
+                return false;
+            }
+            haveMemory = true;
         }
         else
         {
@@ -686,25 +777,9 @@ bool gNeuralNet::Net::Load( std::istream & in, std::string & error )
     }
     for ( size_t t = 0; t < towers_.size(); ++t )
     {
-        Tower const & tw = towers_[t];
-        if ( version_ == 3 )
+        if ( !ValidV4Tower( towers_[t], t < 2 ) )
         {
-            bool ok = tw.haveStem && tw.haveDown0 && tw.haveDown1 && tw.hasFc && !tw.blocks.empty();
-            for ( size_t b = 0; b < tw.blocks.size(); ++b )
-                ok = ok && tw.blocks[b].haveC0 && tw.blocks[b].haveC1 && ( !tw.blocks[b].gpool || tw.blocks[b].gp.out == tw.blocks[b].c0.cout );
-            for ( size_t a = 0; a < tw.attn.size(); ++a )
-                ok = ok && tw.attn[a].have == 63;
-            if ( !tw.attn.empty() )
-                ok = ok && tw.pos.size() == size_t( tw.stem.cout ) * ( size_t( grid_ ) / tw.stem.stride ) * ( size_t( grid_ ) / tw.stem.stride );
-            if ( !ok )
-            {
-                error = "policy file is missing part of a tower";
-                return false;
-            }
-        }
-        else if ( tw.convs.empty() || !tw.hasFc )
-        {
-            error = "policy file is missing a tower";
+            error = "v4 policy tower is incomplete or has incompatible dimensions";
             return false;
         }
     }
@@ -713,10 +788,28 @@ bool gNeuralNet::Net::Load( std::istream & in, std::string & error )
         error = "policy file is missing layers";
         return false;
     }
-    int fused = scalars2_.out;
+    if ( !haveMemoryVersion || !haveMemory || !haveMemoryProjection ||
+         !LinearShape( memoryInput_, 775, 768 ) || !LinearShape( memoryHidden_, 256, 768 ) ||
+         !LinearShape( memoryProjection_, 256, 768 ) )
+    {
+        error = "V4 memory schema 1 is required; recurrent layers are missing or incompatible";
+        return false;
+    }
+    if ( !haveConditioning[0] || !haveConditioning[1] || !haveOpponents0 || !haveOpponents2 || !haveOpponentQuery ||
+         !LinearShape( conditioning_[0], 256, 128 ) || !LinearShape( conditioning_[1], 256, 128 ) ||
+         !LinearShape( opponents0_, 12, 64 ) || !LinearShape( opponents2_, 64, 64 ) ||
+         !LinearShape( opponentQuery_, 896, 64 ) || !LinearShape( scalars0_, 72, 256 ) ||
+         !LinearShape( scalars2_, 256, 256 ) || !LinearShape( trunk0_, 960, 768 ) ||
+         !LinearShape( trunk2_, 768, 768 ) || !LinearShape( pi_, 768, 6 ) || !LinearShape( v_, 768, 1 ) ||
+         !hasAux_ || !LinearShape( aux_, 768, 3 ) )
+    {
+        error = "v4 policy layers are incomplete or have incompatible dimensions";
+        return false;
+    }
+    int fused = scalars2_.out + 64;
     for ( size_t t = 0; t < towers_.size(); ++t )
         fused += towers_[t].fc.out;
-    if ( pi_.out != nActions_ || scalars0_.in != nScalars_ || trunk0_.in != fused )
+    if ( pi_.out != nActions_ || scalars0_.in != 72 || trunk0_.in != fused )
     {
         error = "policy file layers do not fit together";
         return false;
@@ -738,29 +831,7 @@ void gNeuralNet::Net::Unpack( uint8_t const * packed, int planes, std::vector< f
     }
 }
 
-void gNeuralNet::Net::RunTower( Tower const & t, std::vector< float > & x, int h, int w, std::vector< float > & out ) const
-{
-    std::vector< float > y, skip;
-    for ( size_t l = 0; l < t.convs.size(); ++l )
-    {
-        int ho, wo;
-        int res = t.resPair[l];
-        if ( res == 1 )
-            skip = x;  // keep the block input for the skip connection
-        RunConvRaw( t.convs[l], x, h, w, y, ho, wo );
-        if ( res == 2 )
-            for ( size_t i = 0; i < y.size(); ++i )
-                y[i] += skip[i];
-        ReluInPlace( y );
-        x.swap( y );
-        h = ho;
-        w = wo;
-    }
-    RunLinear( t.fc, &x[0], out );
-    ReluInPlace( out );
-}
-
-void gNeuralNet::Net::RunTowerV3( Tower const & t, std::vector< float > & x, int h, int w, std::vector< float > & out ) const
+void gNeuralNet::Net::RunTowerFeatures( Tower const & t, std::vector< float > & x, int & h, int & w ) const
 {
     static std::vector< float > y, z, pooled, bias;
     int ho, wo;
@@ -769,6 +840,20 @@ void gNeuralNet::Net::RunTowerV3( Tower const & t, std::vector< float > & x, int
     x.swap( y );
     h = ho;
     w = wo;
+    if ( t.haveReduce )
+    {
+        // Keep a residual block at 32x32 before reducing the local view to 16x16.
+        RunConvRaw( t.pre.c0, x, h, w, y, ho, wo );
+        ReluInPlace( y );
+        RunConvRaw( t.pre.c1, y, ho, wo, z, h, w );
+        for ( size_t i = 0; i < z.size(); ++i )
+            z[i] = Relu( z[i] + x[i] );
+        RunConvRaw( t.reduce, z, h, w, y, ho, wo );
+        ReluInPlace( y );
+        x.swap( y );
+        h = ho;
+        w = wo;
+    }
     int const N = h * w;
     for ( size_t b = 0; b < t.blocks.size(); ++b )
     {
@@ -815,6 +900,12 @@ void gNeuralNet::Net::RunTowerV3( Tower const & t, std::vector< float > & x, int
         for ( size_t a = 0; a < t.attn.size(); ++a )
             RunAttention( t.attn[a], x, C, N );
     }
+}
+
+void gNeuralNet::Net::RunTowerHead( Tower const & t, std::vector< float > const & x, int h, int w, std::vector< float > & out ) const
+{
+    static std::vector< float > y, z;
+    int ho, wo;
     RunConvRaw( t.down0, x, h, w, y, ho, wo );
     ReluInPlace( y );
     RunConvRaw( t.down1, y, ho, wo, z, h, w );
@@ -823,75 +914,161 @@ void gNeuralNet::Net::RunTowerV3( Tower const & t, std::vector< float > & x, int
     ReluInPlace( out );
 }
 
-int gNeuralNet::Net::Decide( uint8_t const * const * maps, float const * scalars, unsigned mask,
-                             bool sample, float * probs, float * value, uint32_t & rng, Memory & memory )
+void gNeuralNet::Net::TowerInput( Tower const & t, uint8_t const * const * maps, Memory const & memory,
+                                 std::vector< float > & x ) const
 {
-    if ( stackPrev_ && memory.maps.size() != size_t( nMaps_ ) )
+    // Each tower receives its current maps' planes in order, then the same previous maps.
+    size_t cur = 0;
+    for ( size_t j = 0; j < t.maps.size(); ++j )
+        cur += mapPlanes_[t.maps[j]];
+    size_t total = 2 * cur;
+    x.clear();
+    size_t off = 0;
+    for ( size_t j = 0; j < t.maps.size(); ++j )
+    {
+        int m = t.maps[j];
+        Unpack( maps[m], mapPlanes_[m], x, off, total );
+        off += mapPlanes_[m];
+    }
+    for ( size_t j = 0; j < t.maps.size(); ++j )
+    {
+        int m = t.maps[j];
+        Unpack( memory.have ? &memory.maps[m][0] : maps[m], mapPlanes_[m], x, off, total );
+        off += mapPlanes_[m];
+    }
+}
+
+int gNeuralNet::Net::Decide( uint8_t const * const * maps, float const * scalars, unsigned mask,
+                             bool sample, float * probs, float * value, uint32_t & rng, Memory & memory,
+                             float const * memoryContext )
+{
+    if ( memory.maps.size() != size_t( nMaps_ ) )
     {
         memory.maps.assign( nMaps_, std::vector< uint8_t >( size_t( grid_ ) * grid_, 0 ) );
         memory.have = false;
     }
     std::vector< float > h, part, t, x;
-    for ( size_t ti = 0; ti < towers_.size(); ++ti )
+    std::vector< std::vector< float > > summaries( towers_.size() );
+    for ( size_t i = 0; i < towers_.size(); ++i )
     {
+        // First compute the arena summary that conditions both local views.
+        size_t ti = ( i + 2 ) % 3;
         Tower const & tw = towers_[ti];
-        // the tower's input: its maps' current planes in order, then (v2) the same maps' previous planes
-        size_t cur = 0;
-        for ( size_t j = 0; j < tw.maps.size(); ++j )
-            cur += mapPlanes_[tw.maps[j]];
-        size_t total = stackPrev_ ? 2 * cur : cur;
-        x.clear();
-        size_t off = 0;
-        for ( size_t j = 0; j < tw.maps.size(); ++j )
+        TowerInput( tw, maps, memory, x );
+        int height = grid_, width = grid_;
+        RunTowerFeatures( tw, x, height, width );
+        if ( ti < 2 )
         {
-            int m = tw.maps[j];
-            Unpack( maps[m], mapPlanes_[m], x, off, total );
-            off += mapPlanes_[m];
-        }
-        if ( stackPrev_ )
-            for ( size_t j = 0; j < tw.maps.size(); ++j )
+            RunLinear( conditioning_[ti], &summaries[2][0], part );
+            int const cells = height * width, channels = tw.reduce.cout;
+            for ( int c = 0; c < channels; ++c )
             {
-                int m = tw.maps[j];
-                Unpack( memory.have ? &memory.maps[m][0] : maps[m], mapPlanes_[m], x, off, total );
-                off += mapPlanes_[m];
+                float const gain = 1.0f + 0.1f * std::tanh( part[c] );
+                float const bias = 0.1f * std::tanh( part[channels + c] );
+                for ( int cell = 0; cell < cells; ++cell )
+                {
+                    size_t at = size_t( c ) * cells + cell;
+                    x[at] = Relu( x[at] * gain + bias );
+                }
             }
-        if ( version_ == 3 )
-            RunTowerV3( tw, x, grid_, grid_, part );
-        else
-            RunTower( tw, x, grid_, grid_, part );
-        h.insert( h.end(), part.begin(), part.end() );
+        }
+        RunTowerHead( tw, x, height, width, summaries[ti] );
     }
-    if ( stackPrev_ )
-    {
-        for ( int m = 0; m < nMaps_; ++m )
-            memcpy( &memory.maps[m][0], maps[m], size_t( grid_ ) * grid_ );
-        memory.have = true;
-    }
-    RunLinear( scalars0_, scalars, t );
+    for ( size_t i = 0; i < summaries.size(); ++i )
+        h.insert( h.end(), summaries[i].begin(), summaries[i].end() );
+    for ( int m = 0; m < nMaps_; ++m )
+        memcpy( &memory.maps[m][0], maps[m], size_t( grid_ ) * grid_ );
+    memory.have = true;
+    // Enemy slots go exclusively through the shared opponent encoder below. Keeping them
+    // out of this branch preserves slot-permutation invariance and masks absent enemies.
+    std::vector< float > ownScalars( scalars, scalars + 64 );
+    ownScalars.insert( ownScalars.end(), scalars + 88, scalars + 96 );
+    RunLinear( scalars0_, &ownScalars[0], t );
     ReluInPlace( t );
     RunLinear( scalars2_, &t[0], part );
     ReluInPlace( part );
     h.insert( h.end(), part.begin(), part.end() );
+
+    // Attention over the three observed opponents. Empty slots contribute exactly zero,
+    // including the case where no opponents are currently present.
+    std::vector< float > query, token[3], context( 64, 0.0f );
+    RunLinear( opponentQuery_, &h[0], query );
+    for ( size_t c = 0; c < query.size(); ++c )
+        query[c] = std::tanh( query[c] );
+    float scores[3], weights[3], best = -1e30f, sum = 0;
+    for ( int o = 0; o < 3; ++o )
+    {
+        float opponent[12];
+        std::copy( scalars + 64 + 8 * o, scalars + 64 + 8 * ( o + 1 ), opponent );
+        std::copy( scalars + 96 + 4 * o, scalars + 96 + 4 * ( o + 1 ), opponent + 8 );
+        RunLinear( opponents0_, opponent, t );
+        ReluInPlace( t );
+        RunLinear( opponents2_, &t[0], token[o] );
+        ReluInPlace( token[o] );
+        float dot = 0;
+        for ( int c = 0; c < 64; ++c )
+            dot += token[o][c] * query[c];
+        scores[o] = opponent[7] > 0.5f ? dot / 8.0f : -1e4f;
+        best = std::max( best, scores[o] );
+    }
+    for ( int o = 0; o < 3; ++o )
+    {
+        weights[o] = std::exp( scores[o] - best );
+        sum += weights[o];
+    }
+    float presentSum = 0;
+    for ( int o = 0; o < 3; ++o )
+    {
+        weights[o] = scalars[71 + 8 * o] > 0.5f ? weights[o] / sum : 0.0f;
+        presentSum += weights[o];
+    }
+    for ( int o = 0; o < 3; ++o )
+    {
+        float weight = weights[o] / std::max( presentSum, 1e-9f );
+        for ( int c = 0; c < 64; ++c )
+            context[c] += weight * token[o][c];
+    }
+    h.insert( h.end(), context.begin(), context.end() );
 
     RunLinear( trunk0_, &h[0], t );
     ReluInPlace( t );
     RunLinear( trunk2_, &t[0], h );
     ReluInPlace( h );
 
+    // PyTorch GRU order is reset, update, candidate. The reset gate multiplies
+    // the entire hidden candidate affine term, including its bias.
+    int const memorySize = 256;
+    if ( memory.recurrent.size() != size_t( memorySize ) )
+        memory.recurrent.assign( memorySize, 0.0f );
+    std::vector< float > inputGates, hiddenGates, memoryInputs( h );
+    for ( int c = 0; c < 7; ++c ) memoryInputs.push_back( memoryContext ? memoryContext[c] : 0.0f );
+    RunLinear( memoryInput_, &memoryInputs[0], inputGates );
+    RunLinear( memoryHidden_, &memory.recurrent[0], hiddenGates );
+    for ( int i = 0; i < memorySize; ++i )
+    {
+        float const reset = 1.0f / ( 1.0f + std::exp( -( inputGates[i] + hiddenGates[i] ) ) );
+        float const update = 1.0f / ( 1.0f + std::exp( -( inputGates[memorySize + i] + hiddenGates[memorySize + i] ) ) );
+        float const candidate = std::tanh( inputGates[2 * memorySize + i] + reset * hiddenGates[2 * memorySize + i] );
+        memory.recurrent[i] = ( 1.0f - update ) * candidate + update * memory.recurrent[i];
+    }
+    RunLinear( memoryProjection_, &memory.recurrent[0], part );
+    for ( size_t i = 0; i < h.size(); ++i )
+        h[i] += part[i];
+
     std::vector< float > logits, val;
     RunLinear( pi_, &h[0], logits );
     RunLinear( v_, &h[0], val );
     if ( value )
-        *value = val[0];
+        *value = std::tanh( val[0] );
 
-    float best = -1e30f;
+    best = -1e30f;
     for ( int a = 0; a < nActions_; ++a )
     {
         if ( !( ( mask >> a ) & 1 ) )
             logits[a] = -1e8f;
         best = std::max( best, logits[a] );
     }
-    float sum = 0;
+    sum = 0;
     for ( int a = 0; a < nActions_; ++a )
     {
         logits[a] = std::exp( logits[a] - best );

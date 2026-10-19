@@ -1082,6 +1082,9 @@ void init_game_objects(eGrid *grid){
         gAIPlayer::SetNumberOfAIs(sg_currentSettings->numAIs,
                                   sg_currentSettings->minPlayers,
                                   sg_currentSettings->AI_IQ);
+        // Character start-state and opening timers are read by NewObject during spawn.
+        // Resolve named training/evaluation roles before any cycle is created.
+        gNeural::ConfigureCharacters();
 
         if( sg_tutorial )
         {
@@ -1464,6 +1467,7 @@ void Render(eGrid *grid, REAL time, bool swap=true){
         gLogo::Display();
 
         if (swap){
+            rSysDep::GameFrameRendered( time, se_FPS() );
             rSysDep::SwapGL();
         }
     }

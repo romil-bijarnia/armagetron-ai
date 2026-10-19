@@ -37,12 +37,12 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 //!
 //! Loads the weights written by `arma-export` (ai/arma_ai/export.py) and turns one
 //! observation (the maps, and the exact numbers the neural bridge sends to the trainer) into
-//! one of the four moves. Plain C++ on purpose, so it has no dependency on the rest of the
+//! one of the policy's moves. Plain C++ on purpose, so it has no dependency on the rest of the
 //! engine and can be checked against PyTorch on its own.
 //!
-//! Three generations of network are understood: v1 (two maps, plain conv towers), v2 (four
-//! maps: local, close, global, territory; residual towers; the previous frame's maps stacked) and
-//! v3 (v2's layout with global pooling in some blocks and attention over the arena view's cells).
+//! Loads the V4 policy: separate local scales, arena-conditioned features, opponent attention
+//! and six moves. The four maps are local, close, global and territory, with the previous frame
+//! stacked beneath them. Observation layout 2 has 108 scalars and 12 values per opponent token.
 namespace gNeuralNet
 {
     struct Conv
@@ -50,6 +50,7 @@ namespace gNeuralNet
         int cout, cin, k, stride, pad;
         std::vector< float > w; //!< [cout][cin][k][k]
         std::vector< float > b;
+        Conv(): cout( 0 ), cin( 0 ), k( 0 ), stride( 0 ), pad( 0 ) {}
     };
 
     struct Linear
@@ -57,6 +58,7 @@ namespace gNeuralNet
         int out, in;
         std::vector< float > w; //!< [out][in]
         std::vector< float > b;
+        Linear(): out( 0 ), in( 0 ) {}
     };
 
     struct LayerNorm
@@ -66,7 +68,7 @@ namespace gNeuralNet
         LayerNorm(): n( 0 ) {}
     };
 
-    //! v3: one residual block; a pooling block also feeds the board-wide mean and max of its first
+    //! One residual block; a pooling block also feeds the board-wide mean and max of its first
     //! GCH channels back as a per-channel bias (KataGo's global pooling)
     struct Block
     {
@@ -78,7 +80,7 @@ namespace gNeuralNet
         Block(): gpool( false ), gch( 0 ), haveC0( false ), haveC1( false ) {}
     };
 
-    //! v3: one pre-norm attention layer over the map's cells
+    //! One pre-norm attention layer over the map's cells
     struct Attn
     {
         LayerNorm ln1, ln2;
@@ -87,22 +89,22 @@ namespace gNeuralNet
         Attn(): have( 0 ) {}
     };
 
-    //! one tower: a stem conv, residual blocks (pairs of convs with a skip), two strided convs, a linear.
-    //! v1 and v2 keep every conv in `convs`; v3 keeps its structure in `blocks`, `attn`, `down0/1`.
+    //! One tower: a stem conv, residual blocks, optional arena attention, two strided convs, a linear.
+    //! Local towers also keep a residual block and reduction between the stem and blocks.
     struct Tower
     {
-        std::vector< Conv > convs;  //!< in forward order; residual pairs are flagged by `resPair`
-        std::vector< int > resPair; //!< for each conv: 0 = plain, 1 = first of a residual pair, 2 = second
         std::vector< int > maps;    //!< which maps feed it, in the order their planes are stacked
         Linear fc;
         bool hasFc;
-        // v3
         Conv stem, down0, down1;
         bool haveStem, haveDown0, haveDown1;
         std::vector< Block > blocks;
         std::vector< float > pos;   //!< [cells][width], the attention's position embedding
         std::vector< Attn > attn;
-        Tower(): hasFc( false ), haveStem( false ), haveDown0( false ), haveDown1( false ) {}
+        Block pre;
+        Conv reduce;
+        bool haveReduce;
+        Tower(): hasFc( false ), haveStem( false ), haveDown0( false ), haveDown1( false ), haveReduce( false ) {}
     };
 
     class Net
@@ -114,26 +116,28 @@ namespace gNeuralNet
         bool Load( std::istream & in, std::string & error );
         bool Loaded() const { return loaded_; }
         int Update() const { return update_; } //!< the training update the weights come from
-        int Version() const { return version_; } //!< 1, 2 or 3
+        int Version() const { return loaded_ ? 4 : 0; }
 
-        //! what a v2 net remembers between one cycle's decisions: that cycle's previous maps
-        //! (frame stacking). Keep one per driven cycle, never share it between cycles, and
+        //! Previous maps plus the 256-value GRU state after consuming the last observation.
+        //! Keep one per driven cycle, never share it between cycles, and
         //! Reset() it when the cycle's life starts.
         struct Memory
         {
             bool have;
             std::vector< std::vector< uint8_t > > maps;
+            std::vector< float > recurrent;
             Memory(): have( false ) {}
-            void Reset() { have = false; }
+            void Reset() { have = false; maps.clear(); recurrent.clear(); }
         };
 
         //! one decision. MAPS points at NumMaps() grids of Grid()*Grid() bytes, the game's four
-        //! maps in order: local, close, global, territory (a v1 net reads only local and global). SCALARS has NumScalars() floats, MASK has
+        //! maps in order: local, close, global, territory. SCALARS has NumScalars() floats, MASK has
         //! bit a set when move a is allowed. Fills PROBS (NumActions() entries) and VALUE, and
         //! returns the move: the most likely one, or a draw from the distribution when SAMPLE is
         //! set (RNG is advanced then). MEMORY is the driven cycle's own (see Memory).
         int Decide( uint8_t const * const * maps, float const * scalars, unsigned mask,
-                    bool sample, float * probs, float * value, uint32_t & rng, Memory & memory );
+                    bool sample, float * probs, float * value, uint32_t & rng, Memory & memory,
+                    float const * context = NULL );
 
         int Grid() const { return grid_; }
         int NumMaps() const { return nMaps_; }
@@ -141,16 +145,18 @@ namespace gNeuralNet
         int NumActions() const { return nActions_; }
 
     private:
-        void RunTower( Tower const & t, std::vector< float > & x, int h, int w, std::vector< float > & out ) const;
-        void RunTowerV3( Tower const & t, std::vector< float > & x, int h, int w, std::vector< float > & out ) const;
+        void RunTowerFeatures( Tower const & t, std::vector< float > & x, int & h, int & w ) const;
+        void RunTowerHead( Tower const & t, std::vector< float > const & x, int h, int w, std::vector< float > & out ) const;
+        void TowerInput( Tower const & t, uint8_t const * const * maps, Memory const & memory, std::vector< float > & x ) const;
         void Unpack( uint8_t const * packed, int planes, std::vector< float > & out, size_t offsetPlanes, size_t totalPlanes ) const;
 
         bool loaded_;
-        int version_, grid_, nMaps_, nScalars_, nActions_, update_;
-        std::vector< int > mapPlanes_;      //!< planes per map (v1: 8, 8; v2: 8, 8, 8, 8)
-        bool stackPrev_;                    //!< v2: the previous frame's maps are stacked under the current ones
-        std::vector< Tower > towers_;       //!< v1: one per map; v2: as the file's tower table says
+        int grid_, nMaps_, nScalars_, nActions_, update_;
+        std::vector< int > mapPlanes_;      //!< eight planes per map
+        std::vector< Tower > towers_;       //!< local, close, and combined global/territory towers
         Linear scalars0_, scalars2_, trunk0_, trunk2_, pi_, v_, aux_;
+        Linear conditioning_[2], opponents0_, opponents2_, opponentQuery_;
+        Linear memoryInput_, memoryHidden_, memoryProjection_;
         bool hasAux_;
     };
 }

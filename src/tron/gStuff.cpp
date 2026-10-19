@@ -57,6 +57,9 @@ bool sg_moviepackInstalled=false; // do we have the mp on disk?
 bool sg_moviepackUse=true;       // do we use it?
 static tConfItem<bool> ump("MOVIEPACK",sg_moviepackUse);
 
+bool sg_blacklightVisuals=false;
+static tConfItem<bool> arenaVisuals("BLACKLIGHT_VISUALS",sg_blacklightVisuals);
+
 // setting item for double bind (available since version 7)
 static nSettingItemWatched<REAL> su_doubleBindTimeoutConf( "DOUBLEBIND_TIME", su_doubleBindTimeout, nConfItemVersionWatcher::Group_Cheating, 7  );
 

@@ -30,6 +30,7 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 
 #include "gWall.h"
 #include "gStuff.h"
+#include "gArenaMaterial.h"
 #include "eGrid.h"
 #include "eWall.h"
 #include "math.h"
@@ -448,6 +449,11 @@ void gWallRim::RenderReal(const eCamera *cam){
             tBeg += offset;
             tEnd += offset;
 
+            if (sg_blacklightVisuals)
+            {
+                static gArenaMaterial material(gArenaMaterial::Rim);
+                material.Select();
+            }
             gWallRim_helper(*p1,*p2,tBeg,tEnd,h,Z_SCALE,false);
         }
 

@@ -1,876 +1,104 @@
 <!doctype html>
 <html lang="en">
 <head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Armagetron Brain</title>
-<style>
-  :root {
-    --bg: #000;
-    --text: #c9c9c9;
-    --bright: #ececec;
-    --muted: #7c7c7c;
-    --faint: #4a4a4a;
-    --hair: rgba(255, 255, 255, 0.08);
-    --accent: #339cff;
-    --arena: min(calc(100vh - 200px), 50vw);
-  }
-  [hidden] { display: none !important; }
-  html, body { margin: 0; background: var(--bg); color: var(--text);
-    font: 16px/1.4 -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", sans-serif; }
-  canvas { display: block; }
-  h1 { font-size: 21px; font-weight: 500; margin: 0; letter-spacing: 0.01em; }
-  h2 { font-size: 15px; font-weight: 500; color: var(--muted); margin: 0 0 8px; }
-  #hero { position: relative; min-height: 100vh; box-sizing: border-box; padding: 22px 28px 20px;
-    display: grid; grid-template-rows: auto 1fr auto; gap: 22px; }
-  .head { display: flex; align-items: flex-start; justify-content: space-between; }
-  #status { color: var(--muted); font-size: 14px; margin-top: 4px; }
-  #status .flash { color: var(--accent); }
-  .toggles { display: flex; gap: 8px; align-items: center; }
-  .toggles button { background: transparent; color: var(--muted); border: 1px solid var(--hair);
-    border-radius: 999px; padding: 6px 15px; font: inherit; font-size: 14px; cursor: pointer;
-    font-variant-numeric: tabular-nums; white-space: nowrap; }
-  .toggles button.on { color: var(--text); border-color: rgba(255, 255, 255, 0.28); }
-  .toggles button:disabled { opacity: 0.35; cursor: default; }
-  .toggles .sep { width: 1px; height: 18px; background: rgba(255, 255, 255, 0.14); margin: 0 6px; }
-  #main { display: grid; grid-template-columns: var(--arena) minmax(300px, 400px) 1fr; gap: 44px; align-items: start; }
-  @media (max-width: 1400px) { #main { grid-template-columns: var(--arena) 1fr; } #sees { grid-column: 1 / -1; } }
-  #arena { width: var(--arena); height: var(--arena); cursor: crosshair; }
-  #caption { color: var(--muted); font-size: 13px; margin-top: 10px; min-height: 20px; display: flex;
-    align-items: center; gap: 14px; flex-wrap: wrap; }
-  #heads { display: flex; gap: 6px; align-items: center; }
-  #heads canvas { width: 40px; height: 40px; image-rendering: pixelated; border: 1px solid var(--hair); }
-  #heads span { color: var(--faint); font-size: 12px; margin: 0 4px 0 6px; }
-  #legend { color: var(--faint); font-size: 12px; margin-top: 6px; }
-  #legend i { display: inline-block; width: 7px; height: 7px; border-radius: 50%; margin: 0 5px 1px 0; }
-  #legend span { margin-right: 12px; }
-  #side { display: grid; gap: 30px; }
-  .row { display: flex; align-items: center; gap: 12px; height: 32px; color: var(--muted); font-size: 16px; }
-  .row .name { width: 76px; }
-  .row .bar { flex: 1; height: 3px; background: var(--hair); border-radius: 2px; overflow: hidden; }
-  .row .bar i { display: block; height: 100%; width: 0; opacity: 0.4; transition: width 80ms linear; }
-  .row .pct { width: 44px; text-align: right; font-variant-numeric: tabular-nums; }
-  .row.pick { color: var(--bright); }
-  .row.pick .bar i { opacity: 1; }
-  .row.off { color: #3c3c3c; }
-  .pred { display: grid; grid-template-columns: 150px 1fr; gap: 14px; align-items: center; }
-  .pred .big { font-size: 30px; font-weight: 400; color: var(--bright); font-variant-numeric: tabular-nums; line-height: 1.1; }
-  .pred .sub { color: var(--faint); font-size: 13px; margin-top: 4px; font-variant-numeric: tabular-nums; }
-  .pred canvas { width: 100%; height: 46px; }
-  #feel { color: var(--muted); font-size: 14px; line-height: 1.7; font-variant-numeric: tabular-nums; }
-  #sees { display: grid; grid-template-columns: repeat(2, max-content); gap: 22px 26px; align-content: start; }
-  #sees h2 { grid-column: 1 / -1; margin: 0; }
-  .map canvas { image-rendering: pixelated; border: 1px solid var(--hair); width: 150px; height: 150px; }
-  .map.numbers canvas { height: 56px; }
-  .map .cap { color: var(--muted); font-size: 13px; margin-top: 7px; }
-  .map .cap em { color: var(--faint); font-style: normal; }
-  #keys { color: var(--faint); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  #wait { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
-    color: var(--muted); font-size: 15px; pointer-events: none; background: var(--bg); }
-  #tip { position: fixed; display: none; pointer-events: none; background: rgba(0, 0, 0, 0.88);
-    border: 1px solid rgba(255, 255, 255, 0.14); border-radius: 8px; padding: 8px 10px; font-size: 13px;
-    line-height: 1.35; white-space: nowrap; font-variant-numeric: tabular-nums; z-index: 5; }
-  #tip .d { color: var(--muted); }
-  #tip canvas { image-rendering: pixelated; margin-top: 7px; border: 1px solid var(--hair); }
-  /* inside: every stage of the network as the picture it is */
-  #inside { padding: 50px 28px 40px; }
-  #inside h2 { font-size: 24px; font-weight: 500; color: var(--text); margin: 0 0 6px; }
-  #insideSub { color: var(--muted); font-size: 15px; margin-bottom: 10px; }
-  .tower { margin-top: 38px; }
-  .tower h3 { font-size: 16px; font-weight: 500; color: var(--muted); margin: 0 0 14px; }
-  .tower h3 b { color: var(--text); font-weight: 500; }
-  .stages { display: flex; gap: 22px; flex-wrap: wrap; align-items: flex-start; }
-  .stage { position: relative; }
-  .stage canvas { image-rendering: pixelated; border: 1px solid var(--hair); cursor: crosshair; }
-  .stage .lbl { color: var(--muted); font-size: 12px; margin-top: 7px; white-space: nowrap; }
-  .stage .lbl b { color: var(--text); font-weight: 500; }
-  .stage .learn { height: 2px; background: var(--accent); width: 0; margin-top: 5px; opacity: 0; transition: opacity 0.6s; }
-  /* the numbers: one roomy row per number, its history drawn large */
-  #stats { padding: 40px 28px 110px; max-width: 1240px; }
-  #statsHead { display: flex; align-items: baseline; gap: 22px; }
-  #stats h2 { font-size: 24px; font-weight: 500; margin: 0; color: var(--text); }
-  #statsSub { color: var(--muted); font-size: 15px; }
-  #statsUp { color: var(--muted); font-size: 15px; text-decoration: none; margin-left: auto; }
-  #statsUp:hover { color: var(--text); }
-  #stats h3 { font-size: 15px; font-weight: 500; color: var(--muted); margin: 54px 0 8px; }
-  .srow { display: grid; grid-template-columns: 260px 180px 1fr; align-items: center; gap: 24px; height: 94px;
-    border-top: 1px solid var(--hair); }
-  .srow .k { font-size: 17px; color: var(--muted); }
-  .srow .v { font-size: 30px; font-weight: 400; color: var(--bright); font-variant-numeric: tabular-nums; white-space: nowrap; }
-  .srow canvas { width: 100%; height: 62px; }
-</style>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>Blacklight · Armagetron</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Cpath fill='%2338d8e8' d='M16 3 29 28H3z'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="/brain.css">
+  <script type="importmap">{"imports":{"three":"/vendor/three.module.js"}}</script>
+  <script type="module" src="/brain.js"></script>
 </head>
 <body>
-<div id="hero">
-<div class="head">
-  <div><h1>Brain</h1><div id="status">connecting</div></div>
-  <div class="toggles">
-    <button id="bPause">Pause</button>
-    <button id="bStep" disabled>Step</button>
-    <button id="bSpeed">1×</button>
-    <span class="sep"></span>
-    <button id="tFloor">Floor · predicted</button>
-    <button id="tAttn">Attention</button>
-    <button id="tRays">Rays</button>
-    <span class="sep"></span>
-    <button id="tInside">Inside</button>
-    <button id="tStats" disabled>Numbers</button>
+  <header class="app-header">
+    <h1>Blacklight</h1>
+    <nav aria-label="Inspector views" role="tablist">
+      <button id="tab-decision" class="tab active" role="tab" aria-selected="true" aria-controls="decision-view" data-view="decision">Watch</button>
+      <button id="tab-network" class="tab" role="tab" aria-selected="false" aria-controls="network-view" data-view="network" tabindex="-1">Network</button>
+      <button id="tab-training" class="tab" role="tab" aria-selected="false" aria-controls="training-view" data-view="training" tabindex="-1">Progress</button>
+    </nav>
+    <span id="connection" class="connection" role="status">Connecting</span>
+  </header>
+  <div class="source-toolbar" aria-label="Watch source and controls">
+    <label class="source-picker" for="source">Watching <select id="source" disabled><option value="training" selected>Live training</option><option value="inspection">Policy inspection</option></select></label>
+    <label id="arena-control" for="training-arena">Arena <select id="training-arena" disabled><option value="0">1</option></select></label>
+    <label id="selection-control" for="selection" hidden>Choose moves <select id="selection" disabled><option value="sampled">Sample probabilities</option><option value="greedy">Highest probability</option></select></label>
+    <span id="trainer-pace" class="pace-label">Trainer pace</span>
+    <div class="playback">
+      <button id="pause" disabled><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M5 3v10M11 3v10"/></svg><span>Freeze view</span></button>
+      <button id="step" disabled><svg viewBox="0 0 16 16" aria-hidden="true"><path d="m4 3 7 5-7 5zM13 3v10"/></svg><span>Next sample</span></button>
+      <label id="speed-control" for="speed" hidden>Match speed <select id="speed" disabled><option value="0.1">0.1×</option><option value="0.25">0.25×</option><option value="0.5">0.5×</option><option value="1" selected>1×</option><option value="2">2×</option><option value="4">4×</option><option value="8">8×</option><option value="16">16×</option></select></label>
+    </div>
+    <p id="source-help" class="note">Actual training arena samples. Viewing, freezing and stepping do not change training.</p>
   </div>
-</div>
-<div id="main">
-  <div id="left">
-    <canvas id="arena"></canvas>
-    <div id="caption"><span id="capText"></span><div id="heads" hidden></div></div>
-    <div id="legend"><span><i style="background:#22d3ee"></i>me</span><span><i style="background:#fb923c"></i>enemy</span><span><i style="background:#9ca3af"></i>walls</span><span id="legendFloor"></span></div>
-  </div>
-  <div id="side">
-    <div><h2>Move</h2><div id="moves"></div></div>
-    <div><h2>Win chance</h2><div class="pred"><div><div class="big" id="winV">–</div><div class="sub" id="winS"></div></div><canvas id="winC"></canvas></div></div>
-    <div id="dangerB" hidden><h2>Danger in two seconds</h2><div class="pred"><div><div class="big" id="dangerV">–</div><div class="sub">how likely it is dead by then</div></div><canvas id="dangerC"></canvas></div></div>
-    <div id="shareB" hidden><h2>Territory in two seconds</h2><div class="pred"><div><div class="big" id="shareV">–</div><div class="sub" id="shareS"></div></div><canvas id="shareC"></canvas></div></div>
-    <div><h2>It feels</h2><div id="feel"></div></div>
-  </div>
-  <div id="sees"></div>
-</div>
-<div id="keys">space pause · → step · [ ] speed · f floor · a attention · r rays · 1 2 attention layer · hover the arena for a cell's attention · hover a layer for a filter · scroll down for the inside and the numbers</div>
-<div id="wait">waiting for the brain</div>
-</div>
-<div id="tip"></div>
-<section id="inside" hidden>
-  <h2>Inside</h2>
-  <div id="insideSub"></div>
-  <div id="towers"></div>
-</section>
-<section id="stats" hidden>
-  <div id="statsHead"><h2 id="statsTitle">Training</h2><div id="statsSub"></div><a id="statsUp" href="#">back to the brain ↑</a></div>
-  <h3 id="strengthHead">Strength</h3><div id="strengthRows"></div>
-  <h3 id="learnHead">Learning</h3><div id="learnRows"></div>
-</section>
-
-<script type="module">
-// ------------------------------------------------------------------ constants
-const SPEEDS = [0.25, 0.5, 1, 2, 4];
-const ME = '#22d3ee', ENEMY = '#fb923c';
-const PLANE_COLORS = {                             // input cells: colour of the most important bit
-  'walls': '#9ca3af', 'own trail': '#22d3ee', 'own head': '#a5f3fc', 'enemy trails': '#fb923c',
-  'enemy heads': '#f87171', 'enemy paths': '#a16207', 'team trails': '#4ade80', 'team heads': '#86efac',
-  'outside': '#2a2a2a', 'mine first': '#22d3ee', 'enemy first': '#fb923c',
-};
-const PRIORITY = ['enemy heads', 'own head', 'team heads', 'own trail', 'enemy trails', 'team trails',
-                  'walls', 'enemy paths', 'outside', 'mine first', 'enemy first'];
-const MOVE_COLORS = ['#4ade80', '#60a5fa', '#e879f9', '#f87171'];
-const TINT = { player: [168, 200, 224], local: [168, 200, 224], arena: [196, 184, 226], global: [196, 184, 226],
-               scalars: [226, 206, 168], trunk: [212, 212, 212] };
-const TOWER_TITLE = { player: 'Player view', local: 'Nearby', arena: 'Arena view', global: 'Arena',
-                      scalars: 'Numbers', trunk: 'Trunk' };
-const TOWER_SUB = {
-  player: 'the two views around the cycle, 2 m and 1 m cells, this decision and the last',
-  arena: 'the minimap and who gets there first, this decision and the last',
-  local: 'the 2 m view around the cycle', global: 'the minimap',
-  scalars: 'the 96 exact numbers', trunk: 'where the views and the numbers meet, before the move and the value',
-};
-const MAP_CAP = { local_in: 'nearby · 2 m cells', close_in: 'up close · 1 m cells', global_in: 'the whole arena',
-                  territory_in: 'who gets there first' };
-const RAYS = 16, RAY_RANGE = 250;
-
-const $ = id => document.getElementById(id);
-const b64 = (s, Type = Uint8Array) => { const bin = atob(s); const u = new Uint8Array(bin.length); for (let i = 0; i < bin.length; i++) u[i] = bin.charCodeAt(i); return Type === Uint8Array ? u : new Type(u.buffer); };
-const hex = h => [parseInt(h.slice(1, 3), 16), parseInt(h.slice(3, 5), 16), parseInt(h.slice(5, 7), 16)];
-const DPR = Math.min(window.devicePixelRatio || 1, 2);
-const pct = v => v == null ? '–' : `${Math.round(v * 100)}%`;
-const num = (v, d) => v == null ? '–' : (+v).toFixed(d);
-const post = body => fetch('/control', { method: 'POST', headers: { 'Content-Type': 'application/json' },
-                                         body: JSON.stringify(body) }).catch(() => {});
-const saved = (k, d) => { const v = localStorage.getItem('brain.' + k); return v == null ? d : v; };
-
-// ------------------------------------------------------------------ state
-let topo = null;          // the latest topology: layers, version, reads, learned
-let last = null;          // the latest decision
-let state = { paused: false, speed: 1 };
-let metrics = null;
-let lastFrameAt = 0, learnedAt = 0;
-const view = { floor: saved('floor', 'predicted'), attn: saved('attn', '0') === '1', rays: saved('rays', '1') === '1', layer: 2 };
-const history = { win: [], danger: [], share: [] };
-const HIST = 400;
-let hoverCell = null;     // the arena cell under the cursor (index into the 16x16 attention grid)
-
-// ------------------------------------------------------------------ the arena
-const arena = $('arena'), actx = arena.getContext('2d');
-let trails = {}, lastRound = null;
-const ownImg = document.createElement('canvas'), terrImg = document.createElement('canvas'), attImg = document.createElement('canvas');
-const headCanvases = [];
-
-// geometry of the arena drawing and of the map frame (the maps turn with the heading)
-function geometry(f) {
-  const S = arena.clientWidth;
-  const [lx, ly, hx, hy] = f.bounds, pad = 10, span = Math.max(hx - lx, hy - ly) || 1;
-  const k = (S - 2 * pad) / span, ox = pad + ((S - 2 * pad) - (hx - lx) * k) / 2, oy = pad + ((S - 2 * pad) - (hy - ly) * k) / 2;
-  const X = x => ox + (x - lx) * k, Y = y => S - (oy + (y - ly) * k);
-  const cx = (lx + hx) / 2, cy = (ly + hy) / 2, E = span / 2;
-  let [hdx, hdy] = f.heading || [0, 1];
-  const n = Math.hypot(hdx, hdy) || 1; hdx /= n; hdy /= n;
-  const r = [hdy, -hdx];                               // the right-hand side
-  // world point of map pixel (u, v) on a SIDE x SIDE map: C + (E - v cg) h + (u cg - E) r
-  const world = (u, v, side) => { const cg = 2 * E / side; const fw = E - v * cg, sd = u * cg - E;
-    return [cx + fw * hdx + sd * r[0], cy + fw * hdy + sd * r[1]]; };
-  const mapOf = (wx, wy, side) => { const cg = 2 * E / side, dx = wx - cx, dy = wy - cy;
-    const fw = dx * hdx + dy * hdy, sd = dx * r[0] + dy * r[1];
-    return [(sd + E) / cg, (E - fw) / cg]; };        // (u, v)
-  return { S, lx, ly, hx, hy, k, X, Y, cx, cy, E, h: [hdx, hdy], r, world, mapOf };
-}
-
-// draw a SIDE x SIDE image so that it covers the arena in the map's own frame
-function paintInFrame(g, img, side, smooth) {
-  const o = g.world(0, 0, side), du = g.world(1, 0, side), dv = g.world(0, 1, side);
-  const a = [(du[0] - o[0]) * g.k, -(du[1] - o[1]) * g.k], c = [(dv[0] - o[0]) * g.k, -(dv[1] - o[1]) * g.k];
-  actx.save();
-  actx.setTransform(DPR * a[0], DPR * a[1], DPR * c[0], DPR * c[1], DPR * g.X(o[0]), DPR * g.Y(o[1]));
-  actx.imageSmoothingEnabled = smooth;
-  actx.drawImage(img, 0, 0, side, side, 0, 0, side, side);
-  actx.restore();
-}
-
-function fillImage(cv, side, fill) {               // fill(i, rgba) over every pixel of a SIDE x SIDE image
-  cv.width = cv.height = side;
-  const c = cv.getContext('2d'), im = c.createImageData(side, side), d = im.data;
-  const px = [0, 0, 0, 0];
-  for (let i = 0; i < side * side; i++) { px[0] = px[1] = px[2] = px[3] = 0; fill(i, px); d.set(px, 4 * i); }
-  c.putImageData(im, 0, 0);
-  return cv;
-}
-
-function updateTrails(f) {
-  if (f.round !== lastRound) { trails = {}; lastRound = f.round; }
-  const walls = f.walls > 0 ? f.walls : Infinity;
-  for (const [pid, x, y, alive, color] of f.cycles) {
-    const t = trails[pid] || (trails[pid] = { color, pts: [], len: 0, alive: true, diedAt: null });
-    const lastPt = t.pts[t.pts.length - 1];
-    if (alive && (!lastPt || Math.hypot(lastPt[0] - x, lastPt[1] - y) > 0.4)) {
-      // positions arrive once per decision, and cycles only move along the grid: when a sample is off
-      // both axes a turn happened in between, so the corner goes in first (where the old leg met the new)
-      if (lastPt && Math.abs(lastPt[0] - x) > 0.05 && Math.abs(lastPt[1] - y) > 0.05) {
-        const before = t.pts[t.pts.length - 2];
-        const wasHorizontal = before ? Math.abs(lastPt[0] - before[0]) >= Math.abs(lastPt[1] - before[1])
-                                     : Math.abs(x - lastPt[0]) >= Math.abs(y - lastPt[1]);
-        const corner = wasHorizontal ? [x, lastPt[1]] : [lastPt[0], y];
-        t.len += Math.hypot(lastPt[0] - corner[0], lastPt[1] - corner[1]);
-        t.pts.push(corner);
-        t.len += Math.hypot(corner[0] - x, corner[1] - y);
-      } else if (lastPt) t.len += Math.hypot(lastPt[0] - x, lastPt[1] - y);
-      t.pts.push([x, y]);
-      // the engine forgets the far end of a wall past WALLS_LENGTH; so does the map
-      while (t.pts.length > 1 && t.len - Math.hypot(t.pts[1][0] - t.pts[0][0], t.pts[1][1] - t.pts[0][1]) >= walls) {
-        t.len -= Math.hypot(t.pts[1][0] - t.pts[0][0], t.pts[1][1] - t.pts[0][1]);
-        t.pts.shift();
-      }
-    }
-    if (t.alive && !alive) t.diedAt = f.time;
-    t.alive = alive;
-  }
-}
-
-const floorAvailable = () => ({ predicted: !!(last && last.own), now: !!(last && last.maps && last.maps.territory_in), none: true });
-
-function drawArena(f) {
-  const S = arena.clientWidth;
-  if (arena.width !== Math.round(S * DPR)) { arena.width = arena.height = Math.round(S * DPR); }
-  actx.setTransform(DPR, 0, 0, DPR, 0, 0);
-  actx.clearRect(0, 0, S, S);
-  const g = geometry(f);
-  updateTrails(f);
-  const me = f.cycles.find(c => c[0] === f.me), meAlive = me && me[3];
-
-  // the floor: what the network believes about every cell, or what the engine knows
-  const caps = [];
-  if (view.attn && f.attn && meAlive) {
-    const side = f.attn.side, rows = b64(f.attn.rows), L = Math.min(view.layer, f.attn.rows ? f.attn.rows.length : 2) - 1;
-    const n = side * side, heads = f.attn.heads;
-    const base = (L * heads) * n;
-    fillImage(attImg, side, (i, px) => {
-      let a = 0; for (let h = 0; h < heads; h++) a += rows[base + h * n + i];
-      a /= heads * 255;
-      px[0] = 236; px[1] = 236; px[2] = 236; px[3] = Math.round(Math.pow(a, 1.4) * 150);
-    });
-    paintInFrame(g, attImg, side, true);
-    const cr = Math.floor(f.attn.cell / side), cc = f.attn.cell % side;
-    caps.push(`attention of cell ${cr}, ${cc}${hoverCell == null ? ' (where my head is)' : ''} · layer ${L + 1} · ${heads} heads averaged`);
-    // every head of both layers, small
-    $('heads').hidden = false;
-    let k = 0;
-    for (let l = 0; l < rows.length / (heads * n); l++) for (let h = 0; h < heads; h++) {
-      const cv = headCanvases[k++]; if (!cv) continue;
-      const b0 = (l * heads + h) * n;
-      fillImage(cv, side, (i, px) => { const a = rows[b0 + i] / 255; px[0] = 236; px[1] = 236; px[2] = 236; px[3] = Math.round(Math.pow(a, 1.4) * 255); });
-      cv.title = `layer ${l + 1} · head ${h + 1}`;
-    }
-  } else {
-    $('heads').hidden = true;
-    const avail = floorAvailable();
-    const floor = avail[view.floor] ? view.floor : avail.predicted ? 'predicted' : avail.now ? 'now' : 'none';
-    if (floor === 'predicted') {
-      const side = Math.round(Math.sqrt(b64(f.own).length / 2)), own = b64(f.own), n = side * side;
-      const cMe = hex(ME), cEn = hex(ENEMY);
-      fillImage(ownImg, side, (i, px) => {
-        // the lead of the likeliest holder over the runner-up (nobody included): a sure cell is solid,
-        // a coin flip is nothing, so an untrained brain paints almost nothing
-        const pm = own[i] / 255, pe = own[n + i] / 255, pn = Math.max(0, 1 - pm - pe), mine = pm >= pe;
-        const lead = (mine ? pm : pe) - Math.max(pn, mine ? pe : pm);
-        if (lead <= 0) return;
-        const c = mine ? cMe : cEn;
-        px[0] = c[0]; px[1] = c[1]; px[2] = c[2]; px[3] = Math.round(Math.min(1, lead * 1.2) * 92);
-      });
-      paintInFrame(g, ownImg, side, true);
-      caps.push('floor: who holds each cell two seconds from now, as the network believes (solid where it is sure)');
-    } else if (floor === 'now') {
-      const terr = b64(f.maps.territory_in), side = Math.round(Math.sqrt(terr.length));
-      const cMe = hex(ME), cEn = hex(ENEMY);
-      fillImage(terrImg, side, (i, px) => {
-        const b = terr[i]; if (!(b & 3)) return;
-        const c = (b & 1) ? cMe : cEn, near = Math.max(0, 1 - (b >> 2) / 24);
-        px[0] = c[0]; px[1] = c[1]; px[2] = c[2]; px[3] = Math.round(26 + 44 * near);
-      });
-      paintInFrame(g, terrImg, side, false);
-      caps.push('floor: who gets to each cell first, as the engine computes it now');
-    } else caps.push('floor: nothing painted');
-  }
-
-  // the rim
-  actx.strokeStyle = 'rgba(255,255,255,0.16)';
-  actx.lineWidth = 1;
-  actx.strokeRect(g.X(g.lx), g.Y(g.hy), (g.hx - g.lx) * g.k, (g.hy - g.ly) * g.k);
-
-  // the rays: what the sixteen sensors feel, clockwise from straight ahead
-  if (view.rays && meAlive && f.numbers) {
-    const [mx, my] = [me[1], me[2]];
-    for (let k = 0; k < RAYS; k++) {
-      const a = k * 2 * Math.PI / RAYS, d = [g.h[0] * Math.cos(a) + g.r[0] * Math.sin(a), g.h[1] * Math.cos(a) + g.r[1] * Math.sin(a)];
-      const dist = Math.min(1, f.numbers[16 + 2 * k]) * RAY_RANGE, ex = mx + d[0] * dist, ey = my + d[1] * dist;
-      actx.strokeStyle = `rgba(255,255,255,${k % 4 === 0 ? 0.22 : 0.1})`;
-      actx.lineWidth = 1;
-      actx.beginPath(); actx.moveTo(g.X(mx), g.Y(my)); actx.lineTo(g.X(ex), g.Y(ey)); actx.stroke();
-      if (dist < RAY_RANGE - 1e-6) {
-        actx.fillStyle = 'rgba(255,255,255,0.35)';
-        actx.beginPath(); actx.arc(g.X(ex), g.Y(ey), 1.6, 0, Math.PI * 2); actx.fill();
-      }
-    }
-  }
-
-  // the walls and the heads
-  for (const [pid, t] of Object.entries(trails)) {
-    if (t.pts.length < 1) continue;
-    if (!t.alive && t.diedAt != null && f.time - t.diedAt > 8) continue;  // a dead cycle's wall is gone after 8 s
-    const mine = Number(pid) === f.me;
-    actx.strokeStyle = t.color;
-    actx.globalAlpha = t.alive ? 0.9 : 0.3;
-    actx.lineWidth = mine ? 2.2 : 1.6;
-    actx.lineJoin = 'round';
-    actx.beginPath();
-    t.pts.forEach(([x, y], i) => i ? actx.lineTo(g.X(x), g.Y(y)) : actx.moveTo(g.X(x), g.Y(y)));
-    actx.stroke();
-    if (t.alive) {
-      const [x, y] = t.pts[t.pts.length - 1];
-      actx.fillStyle = t.color;
-      actx.globalAlpha = 1;
-      actx.beginPath(); actx.arc(g.X(x), g.Y(y), mine ? 4 : 3.2, 0, Math.PI * 2); actx.fill();
-      if (mine) { actx.strokeStyle = t.color; actx.globalAlpha = 0.35; actx.lineWidth = 1; actx.beginPath(); actx.arc(g.X(x), g.Y(y), 9, 0, Math.PI * 2); actx.stroke(); }
-    }
-  }
-  actx.globalAlpha = 1;
-
-  // the cell whose attention is shown
-  if (view.attn && f.attn && meAlive) {
-    const side = f.attn.side, cr = Math.floor(f.attn.cell / side), cc = f.attn.cell % side;
-    const corners = [[cc, cr], [cc + 1, cr], [cc + 1, cr + 1], [cc, cr + 1]].map(([u, v]) => g.world(u, v, side));
-    actx.strokeStyle = 'rgba(255,255,255,0.8)';
-    actx.lineWidth = 1;
-    actx.beginPath();
-    corners.forEach(([x, y], i) => i ? actx.lineTo(g.X(x), g.Y(y)) : actx.moveTo(g.X(x), g.Y(y)));
-    actx.closePath(); actx.stroke();
-  }
-  $('capText').textContent = caps.join(' · ') + (f.result ? ` · last round: ${f.result}` : '');
-}
-
-// hovering the arena asks the server for that cell's attention
-let hoverSent = null, hoverTimer = 0;
-arena.addEventListener('pointermove', e => {
-  if (!last || !last.attn) return;
-  const g = geometry(last), rct = arena.getBoundingClientRect();
-  const px = e.clientX - rct.left, py = e.clientY - rct.top;
-  const wx = g.lx + (px - g.X(g.lx)) / g.k, wy = g.ly + (g.Y(g.ly) - py) / g.k;
-  const side = last.attn.side, [u, v] = g.mapOf(wx, wy, side);
-  const inside = u >= 0 && u < side && v >= 0 && v < side;
-  const cell = inside ? Math.floor(v) * side + Math.floor(u) : null;
-  if (cell !== hoverCell) {
-    hoverCell = cell;
-    clearTimeout(hoverTimer);
-    hoverTimer = setTimeout(() => { if (hoverSent !== hoverCell) { hoverSent = hoverCell; post({ cell: hoverCell }); } }, 40);
-  }
-});
-arena.addEventListener('pointerleave', () => { hoverCell = null; if (hoverSent !== null) { hoverSent = null; post({ cell: null }); } });
-
-// ------------------------------------------------------------------ the side: moves and predictions
-const movesBox = $('moves');
-function buildMoves(names) {
-  movesBox.innerHTML = names.map((n, i) =>
-    `<div class="row"><span class="name">${n}</span><span class="bar"><i style="background:${MOVE_COLORS[i]}"></i></span><span class="pct"></span></div>`
-  ).join('');
-}
-function showMoves(f) {
-  movesBox.querySelectorAll('.row').forEach((row, i) => {
-    const p = f.probs[i];
-    row.classList.toggle('pick', i === f.action);
-    row.classList.toggle('off', !f.mask[i]);
-    row.querySelector('i').style.width = `${(p * 100).toFixed(1)}%`;
-    row.querySelector('.pct').textContent = f.mask[i] ? `${Math.round(p * 100)}%` : '';
-  });
-}
-
-function spark(cv, vals, range, color) {
-  const W = cv.clientWidth || 240, H = cv.clientHeight || 46, pad = 4;
-  if (cv.width !== Math.round(W * DPR)) { cv.width = Math.round(W * DPR); cv.height = Math.round(H * DPR); }
-  const c = cv.getContext('2d');
-  c.setTransform(DPR, 0, 0, DPR, 0, 0);
-  c.clearRect(0, 0, W, H);
-  if (vals.length < 2) return;
-  const [lo, hi] = range, n = HIST - 1;
-  const X = i => pad + (i + (HIST - vals.length)) / n * (W - 2 * pad), Y = v => H - pad - (v - lo) / (hi - lo) * (H - 2 * pad);
-  c.strokeStyle = 'rgba(255,255,255,0.08)'; c.lineWidth = 1;
-  c.beginPath(); c.moveTo(0, Y((lo + hi) / 2)); c.lineTo(W, Y((lo + hi) / 2)); c.stroke();
-  c.strokeStyle = color; c.lineWidth = 1.5; c.lineJoin = 'round';
-  c.beginPath();
-  vals.forEach((v, i) => i ? c.lineTo(X(i), Y(v)) : c.moveTo(X(i), Y(v)));
-  c.stroke();
-  c.fillStyle = '#fff';
-  c.beginPath(); c.arc(X(vals.length - 1), Y(vals[vals.length - 1]), 2.4, 0, Math.PI * 2); c.fill();
-}
-const push = (arr, v) => { arr.push(v); if (arr.length > HIST) arr.shift(); };
-
-function showPredictions(f) {
-  const win = (f.value + 1) / 2;
-  push(history.win, Math.max(0, Math.min(1, win)));
-  $('winV').textContent = pct(win);
-  $('winS').textContent = `value ${f.value >= 0 ? '+' : ''}${f.value.toFixed(2)}`;
-  spark($('winC'), history.win, [0, 1], 'rgba(255,255,255,0.6)');
-  const hasAux = !!f.aux;
-  $('dangerB').hidden = !hasAux; $('shareB').hidden = !hasAux;
-  if (hasAux) {
-    push(history.danger, f.aux[1]); push(history.share, f.aux[0]);
-    $('dangerV').textContent = pct(f.aux[1]);
-    spark($('dangerC'), history.danger, [0, 1], 'rgba(248,113,113,0.75)');
-    $('shareV').textContent = pct(f.aux[0]);
-    spark($('shareC'), history.share, [0, 1], 'rgba(34,211,238,0.7)');
-  }
-  // what the engine says the territory is right now, for comparison
-  let nowShare = null;
-  if (f.maps && f.maps.territory_in) {
-    const t = b64(f.maps.territory_in); let mine = 0, theirs = 0;
-    for (let i = 0; i < t.length; i++) { if (t[i] & 1) mine++; else if (t[i] & 2) theirs++; }
-    if (mine + theirs) nowShare = mine / (mine + theirs);
-  }
-  if (hasAux) $('shareS').textContent = nowShare == null ? 'my share of what can still be reached' : `now ${pct(nowShare)} by the engine's count`;
-  $('legendFloor').innerHTML = nowShare == null ? '' : `<i style="background:#555"></i>my territory now ${pct(nowShare)}`;
-  const n = f.numbers || [];
-  const feel = [];
-  if (n.length) {
-    feel.push(`speed ${n[0].toFixed(2)}× base${n[3] ? ', braking' : ''}`);
-    feel.push(`rubber ${pct(n[1])} used · brake reservoir ${pct(n[2])}`);
-    feel.push(`${Math.round(n[13] * 7)} enem${Math.round(n[13] * 7) === 1 ? 'y' : 'ies'} alive · nearest ${n[66] >= 0 && n[71] ? `${Math.round(n[66] * 200)} m` : 'none'}`);
-    feel.push(`${Math.round(n[12] * 120)} s into the round · turns ${n[5] ? 'left ok' : 'left blocked'}, ${n[6] ? 'right ok' : 'right blocked'}`);
-  }
-  $('feel').innerHTML = feel.join('<br>');
-}
-
-// ------------------------------------------------------------------ what it sees: the four maps and the numbers
-const seesBox = $('sees');
-const mapCanvases = {};
-let numbersCanvas = null;
-function buildSees() {
-  seesBox.innerHTML = '<h2>What it sees</h2>';
-  for (const id of ['local_in', 'close_in', 'global_in', 'territory_in']) {
-    const d = document.createElement('div'); d.className = 'map';
-    const cv = document.createElement('canvas'); cv.width = cv.height = 64;
-    const reads = !topo || !topo.reads || topo.reads.includes(id);
-    d.append(cv); const cap = document.createElement('div'); cap.className = 'cap';
-    cap.innerHTML = MAP_CAP[id] + (reads ? '' : ' <em>· not read by this brain</em>'); d.append(cap);
-    seesBox.append(d); mapCanvases[id] = cv;
-  }
-  const d = document.createElement('div'); d.className = 'map numbers';
-  numbersCanvas = document.createElement('canvas'); numbersCanvas.width = 16; numbersCanvas.height = 6;
-  d.append(numbersCanvas); const cap = document.createElement('div'); cap.className = 'cap'; cap.textContent = '96 exact numbers'; d.append(cap);
-  seesBox.append(d);
-  numbersCanvas.addEventListener('pointermove', e => {
-    if (!last || !topo) return;
-    const r = numbersCanvas.getBoundingClientRect(), i = Math.floor((e.clientY - r.top) / r.height * 6) * 16 + Math.floor((e.clientX - r.left) / r.width * 16);
-    const names = (topo.layers.find(L => L.id === 'scalars_in') || {}).names || [];
-    showTip(e, names[i] || '', last.numbers ? (+last.numbers[i]).toFixed(3) : '', null);
-  });
-  numbersCanvas.addEventListener('pointerleave', hideTip);
-  for (const [id, cv] of Object.entries(mapCanvases)) {
-    cv.addEventListener('pointermove', e => {
-      if (!last || !last.maps[id]) return;
-      const r = cv.getBoundingClientRect(), col = Math.floor((e.clientX - r.left) / r.width * 64), row = Math.floor((e.clientY - r.top) / r.height * 64);
-      const b = b64(last.maps[id])[row * 64 + col], planes = planesOf(id);
-      let what;
-      if (id === 'territory_in') what = ((b & 1) ? 'I get here first' : (b & 2) ? 'the enemy gets here first' : 'unreachable') + ((b & 1) ? ` · ${(b >> 2) * 4} cells away` : '');
-      else what = planes.filter((p, i) => b & (1 << i)).join(', ') || 'empty';
-      showTip(e, MAP_CAP[id], `cell ${row}, ${col} · ${what}`, null);
-    });
-    cv.addEventListener('pointerleave', hideTip);
-  }
-}
-const LOCAL_PLANES = ['walls', 'own trail', 'enemy trails', 'team trails', 'enemy heads', 'enemy paths', 'outside', 'team heads'];
-const GLOBAL_PLANES = ['walls', 'own trail', 'enemy trails', 'own head', 'enemy heads', 'outside', 'team trails', 'team heads'];
-const planesOf = id => id === 'global_in' ? GLOBAL_PLANES : id === 'territory_in' ? ['mine first', 'enemy first'] : LOCAL_PLANES;
-
-function drawMap(id, bytes) {
-  const cv = mapCanvases[id]; if (!cv) return;
-  const planes = planesOf(id), colors = planes.map(p => hex(PLANE_COLORS[p] || '#ffffff'));
-  const order = PRIORITY.map(p => planes.indexOf(p)).filter(i => i >= 0);
-  const territory = id === 'territory_in', outside = planes.indexOf('outside');
-  const c = cv.getContext('2d'), im = c.createImageData(64, 64), d = im.data;
-  for (let i = 0; i < 4096; i++) {
-    let b = bytes[i]; if (territory) b &= 3;
-    const o = 4 * i;
-    if (!b) { d[o] = d[o + 1] = d[o + 2] = 14; d[o + 3] = 255; continue; }
-    const bit = order.find(k => b & (1 << k)), col = colors[bit];
-    let lit = 1;
-    if (territory) lit = 0.35 + 0.65 * Math.max(0, 1 - (bytes[i] >> 2) / 24);
-    else if (bit === outside) lit = 0.5; else if (planes[bit] === 'walls') lit = 0.55;
-    d[o] = Math.round(col[0] * lit); d[o + 1] = Math.round(col[1] * lit); d[o + 2] = Math.round(col[2] * lit); d[o + 3] = 255;
-  }
-  c.putImageData(im, 0, 0);
-}
-function drawNumbers(f) {
-  if (!numbersCanvas || !f.scalars) return;
-  const s = b64(f.scalars), c = numbersCanvas.getContext('2d'), im = c.createImageData(16, 6), d = im.data, t = TINT.scalars;
-  for (let i = 0; i < 96; i++) { const v = 0.1 + 0.9 * s[i] / 255; d[4 * i] = t[0] * v; d[4 * i + 1] = t[1] * v; d[4 * i + 2] = t[2] * v; d[4 * i + 3] = 255; }
-  c.putImageData(im, 0, 0);
-}
-
-// ------------------------------------------------------------------ inside: every stage as a picture
-const towersBox = $('towers');
-let stages = [];          // {L, canvas, offset, n, tiles, cols, tw, th, learn}
-function buildInside(layers) {
-  towersBox.innerHTML = '';
-  stages = [];
-  let offset = 0;
-  const groups = [];
-  for (const L of layers) {
-    if (L.kind !== 'conv' && L.kind !== 'dense') continue;
-    const n = L.shape.reduce((a, b) => a * b, 1);
-    let g = groups.find(x => x.group === L.group);
-    if (!g) { g = { group: L.group, stages: [] }; groups.push(g); }
-    const st = { L, offset, n };
-    if (L.kind === 'conv') {
-      const [C, H, W] = L.shape;
-      st.tiles = C; st.th = H; st.tw = W; st.cols = Math.ceil(Math.sqrt(C)); st.scale = H >= 8 ? 1 : 2;
-    } else {
-      st.tiles = n; st.th = 1; st.tw = 1; st.cols = 32; st.scale = 4;
-    }
-    st.rows = Math.ceil(st.tiles / st.cols);
-    st.iw = st.cols * (st.tw + 1) - 1; st.ih = st.rows * (st.th + 1) - 1;
-    g.stages.push(st); stages.push(st);
-    offset += n;
-  }
-  for (const g of groups) {
-    const t = document.createElement('div'); t.className = 'tower';
-    t.innerHTML = `<h3><b>${TOWER_TITLE[g.group] || g.group}</b> · ${TOWER_SUB[g.group] || ''}</h3><div class="stages"></div>`;
-    const box = t.querySelector('.stages');
-    for (const st of g.stages) {
-      const d = document.createElement('div'); d.className = 'stage';
-      const cv = document.createElement('canvas'); cv.width = st.iw; cv.height = st.ih;
-      cv.style.width = `${st.iw * st.scale}px`; cv.style.height = `${st.ih * st.scale}px`;
-      const stage = st.L.name.split(' · ').slice(1).join(' · ') || st.L.name;
-      d.innerHTML = `<div class="lbl"><b>${stage}</b> · ${st.L.label}</div><div class="learn"></div>`;
-      d.prepend(cv);
-      st.canvas = cv; st.learn = d.querySelector('.learn');
-      cv.addEventListener('pointermove', e => tipStage(e, st));
-      cv.addEventListener('pointerleave', hideTip);
-      box.append(d);
-    }
-    towersBox.append(t);
-  }
-  $('inside').hidden = false;
-  const v = topo ? topo.version : '?';
-  $('insideSub').textContent = `v${v} · ${stages.length} stages · every tile is one filter's map, lit by how strongly it fires; the bar under a stage shows how much the last update changed it`;
-}
-
-function drawStages(acts) {
-  for (const st of stages) {
-    const cv = st.canvas, c = cv.getContext('2d'), im = c.createImageData(st.iw, st.ih), d = im.data;
-    const t = TINT[st.L.group] || TINT.trunk;
-    // the gaps between tiles stay black; a tile's pixels follow the filter's map
-    for (let f = 0; f < st.tiles; f++) {
-      const tx = (f % st.cols) * (st.tw + 1), ty = Math.floor(f / st.cols) * (st.th + 1), base = st.offset + f * st.th * st.tw;
-      for (let y = 0; y < st.th; y++) for (let x = 0; x < st.tw; x++) {
-        const v = 0.07 + 0.93 * acts[base + y * st.tw + x] / 255, o = 4 * ((ty + y) * st.iw + tx + x);
-        d[o] = t[0] * v; d[o + 1] = t[1] * v; d[o + 2] = t[2] * v; d[o + 3] = 255;
-      }
-    }
-    c.putImageData(im, 0, 0);
-  }
-}
-function showLearned() {
-  if (!topo || !topo.learned) return;
-  const age = (performance.now() - learnedAt) / 1000;
-  for (const st of stages) {
-    const v = topo.learned[st.L.id] || 0;
-    st.learn.style.width = `${Math.round(v * 100)}%`;
-    st.learn.style.opacity = v > 0 && age < 6 ? String(Math.max(0.2, 1 - age / 6)) : '0';
-  }
-}
-
-// ------------------------------------------------------------------ tooltips
-const tip = $('tip');
-function showTip(e, name, detail, canvas) {
-  tip.innerHTML = `${name}<br><span class="d">${detail}</span>`;
-  if (canvas) tip.append(canvas);
-  tip.style.display = 'block';
-  const w = tip.offsetWidth, h = tip.offsetHeight;
-  tip.style.left = `${Math.min(e.clientX + 16, window.innerWidth - w - 12)}px`;
-  tip.style.top = `${Math.min(e.clientY + 16, window.innerHeight - h - 12)}px`;
-}
-function hideTip() { tip.style.display = 'none'; }
-let lastActs = null;
-function tipStage(e, st) {
-  if (!lastActs) return;
-  const r = st.canvas.getBoundingClientRect();
-  const ix = (e.clientX - r.left) / r.width * st.iw, iy = (e.clientY - r.top) / r.height * st.ih;
-  const col = Math.floor(ix / (st.tw + 1)), row = Math.floor(iy / (st.th + 1)), f = row * st.cols + col;
-  if (f < 0 || f >= st.tiles) { hideTip(); return; }
-  const base = st.offset + f * st.th * st.tw;
-  let sum = 0; for (let i = 0; i < st.th * st.tw; i++) sum += lastActs[base + i];
-  const mean = sum / (st.th * st.tw * 255);
-  let big = null;
-  if (st.L.kind === 'conv') {
-    big = document.createElement('canvas'); big.width = st.tw; big.height = st.th; big.style.width = big.style.height = '112px';
-    const c = big.getContext('2d'), im = c.createImageData(st.tw, st.th), d = im.data, t = TINT[st.L.group] || TINT.trunk;
-    for (let i = 0; i < st.th * st.tw; i++) { const v = 0.07 + 0.93 * lastActs[base + i] / 255; d[4 * i] = t[0] * v; d[4 * i + 1] = t[1] * v; d[4 * i + 2] = t[2] * v; d[4 * i + 3] = 255; }
-    c.putImageData(im, 0, 0);
-  }
-  const what = st.L.kind === 'conv' ? `filter ${f + 1} of ${st.tiles} · mean ${mean.toFixed(2)}` : `neuron ${f + 1} of ${st.tiles} · ${mean.toFixed(2)}`;
-  showTip(e, st.L.name, what, big);
-}
-
-// ------------------------------------------------------------------ data
-const statusEl = $('status');
-function onTopology(t) {
-  const first = !topo;
-  topo = t;
-  if (t.learned && Object.keys(t.learned).length) learnedAt = performance.now();
-  if (first) {
-    buildMoves(t.layers.find(L => L.id === 'policy').names);
-    buildSees();
-    buildInside(t.layers);
-    if (!floorAvailable().predicted && t.version === 1 && view.floor === 'predicted') view.floor = 'now';
-    syncToggles();
-  }
-  showLearned();
-  $('wait').style.display = 'none';
-}
-function onFrame(f) {
-  if (!topo) return;
-  last = f;
-  lastFrameAt = performance.now();
-  lastActs = b64(f.acts);
-  drawArena(f);
-  showMoves(f);
-  showPredictions(f);
-  for (const [id, s] of Object.entries(f.maps || {})) drawMap(id, b64(s));
-  drawNumbers(f);
-  if (!$('inside').hidden) drawStages(lastActs);
-  syncToggles();
-  showStatus();
-}
-function showStatus() {
-  if (!last) return;
-  const f = last, training = isTraining(f);
-  const head = state.paused ? 'paused' : 'live';
-  const where = `round ${f.round} · ${Math.round(f.time)} s`;
-  statusEl.innerHTML = training
-    ? `${head} · ${where} · training · update ${f.update} · <span class="${f.trained_ago < 3 ? 'flash' : ''}">new weights ${Math.round(f.trained_ago)} s ago</span>`
-    : `${head} · ${where} · update ${f.update}`;
-}
-
-// ------------------------------------------------------------------ the numbers (the page below)
-const statsEl = $('stats'), statsTitle = $('statsTitle'), statsSub = $('statsSub'), statsUp = $('statsUp'),
-      strengthRows = $('strengthRows'), learnRows = $('learnRows'), strengthHead = $('strengthHead'), learnHead = $('learnHead');
-// rows hide themselves when the running trainer does not report that number
-const STRENGTH = [  // does it win: the only numbers that matter in the end
-  { key: 'win_vs_hunter', label: 'wins against the space fighter', range: [0, 1], value: m => pct(m.win_vs_hunter) },
-  { key: 'win_exploiter', label: 'wins against the exploiter', range: [0, 1], value: m => pct(m.win_exploiter) },
-  { key: 'win_vs_past', label: 'wins against past selves', range: [0, 1], value: m => pct(m.win_vs_past) },
-  { key: 'win_vs_ai_small', label: "wins against the game's bot", range: [0, 1],
-    value: m => m.win_vs_ai_std == null ? pct(m.win_vs_ai_small) : `${pct(m.win_vs_ai_small)} · ${pct(m.win_vs_ai_std)}` },
-];
-const LEARNING = [  // how the lessons are going
-  { key: 'ep_len', label: 'round length', value: m => `${(m.ep_len / 20).toFixed(1)} s` },
-  { key: 'sps', label: 'decisions per second', value: m => Math.round(m.sps).toLocaleString() },
-  { key: 'evals_s', label: 'network evaluations per second', value: m => Math.round(m.evals_s).toLocaleString() },
-  { key: 'search_kl', label: 'search gain', value: m => num(m.search_kl, 3) },
-  { key: 'ent', label: 'entropy', value: m => num(m.ent, 3) },
-  { key: 'kl', label: 'KL', value: m => num(m.kl, 4) },
-  { key: 'clipfrac', label: 'clipped', value: m => pct(m.clipfrac) },
-  { key: 'pg', label: 'policy loss', value: m => num(m.pg, 4) },
-  { key: 'vf', label: 'value loss', value: m => num(m.vf, 4) },
-  { key: 'aux', label: 'aux loss', value: m => num(m.aux, 4) },
-  { key: 'own', label: 'ownership loss', value: m => num(m.own, 4) },
-  { key: 'value_explained', label: 'value explains', range: [0, 1], value: m => pct(m.value_explained) },
-  { key: 'grad_norm', label: 'grad norm', value: m => num(m.grad_norm, 3) },
-  { key: 'lr', label: 'learning rate', value: m => (+m.lr).toExponential(1) },
-  { key: 'replay', label: 'replay', value: m => num(m.replay, 2) },
-];
-
-function chart(cv, vals, range) {
-  const W = cv.clientWidth || 600, H = 62, pad = 5;
-  if (cv.width !== Math.round(W * DPR)) { cv.width = Math.round(W * DPR); cv.height = H * DPR; }
-  const c = cv.getContext('2d');
-  c.setTransform(DPR, 0, 0, DPR, 0, 0);
-  c.clearRect(0, 0, W, H);
-  const pts = vals.map((v, i) => [i, v]).filter(p => p[1] != null && isFinite(p[1]));
-  if (pts.length < 2) return;
-  let lo = range ? range[0] : Math.min(...pts.map(p => p[1])), hi = range ? range[1] : Math.max(...pts.map(p => p[1]));
-  if (hi - lo < 1e-9) hi = lo + 1;
-  const n = Math.max(vals.length - 1, 1);
-  const X = i => pad + i / n * (W - 2 * pad), Y = v => H - pad - (v - lo) / (hi - lo) * (H - 2 * pad);
-  c.strokeStyle = 'rgba(255,255,255,0.08)';   // the floor of the chart
-  c.lineWidth = 1;
-  c.beginPath(); c.moveTo(0, Y(lo)); c.lineTo(W, Y(lo)); c.stroke();
-  c.strokeStyle = 'rgba(255,255,255,0.55)';
-  c.lineWidth = 1.5;
-  c.lineJoin = 'round';
-  c.beginPath();
-  pts.forEach(([i, v], j) => j ? c.lineTo(X(i), Y(v)) : c.moveTo(X(i), Y(v)));
-  c.stroke();
-  const [i, v] = pts[pts.length - 1];
-  c.fillStyle = '#fff';
-  c.beginPath(); c.arc(X(i), Y(v), 2.6, 0, Math.PI * 2); c.fill();
-}
-
-// training counts as running while updates keep arriving at the run's own pace
-function isTraining(f) {
-  if (metrics && metrics.last.time) {
-    const age = Date.now() / 1000 - metrics.last.time;
-    return age < Math.max(180, 3 * (metrics.interval || 60));
-  }
-  return !!f && f.trained_ago != null && f.trained_ago < 120;
-}
-function makeRows(box, defs) {
-  if (box.children.length) return;
-  box.innerHTML = defs.map(r =>
-    `<div class="srow" data-key="${r.key}"><span class="k">${r.label}</span><span class="v"></span><canvas></canvas></div>`).join('');
-}
-function onMetrics(m) {
-  metrics = m;
-  makeRows(strengthRows, STRENGTH);
-  makeRows(learnRows, LEARNING);
-  statsEl.hidden = false;
-  tStats.disabled = false;
-  showMetrics();
-  if (location.hash === '#stats' && !showMetrics.scrolled) { showMetrics.scrolled = true; statsEl.scrollIntoView(); }
-}
-function showMetrics() {
-  if (!metrics) return;
-  const { last: m, series } = metrics;
-  const training = isTraining();
-  const steps = m.steps >= 1e6 ? `${(m.steps / 1e6).toFixed(1)}M` : `${Math.round(m.steps / 1e3)}k`;
-  const hist = series.update ? series.update.length : 0;
-  statsTitle.textContent = training ? 'Training' : 'Last run';
-  statsSub.textContent = `update ${m.update} · ${steps} ${m.evals_s == null ? 'steps' : 'decisions'} · the last ${hist} updates`;
-  for (const [box, head, defs] of [[strengthRows, strengthHead, STRENGTH], [learnRows, learnHead, LEARNING]]) {
-    let any = false;
-    defs.forEach((r, i) => {
-      const row = box.children[i];
-      row.hidden = m[r.key] == null;
-      if (row.hidden) return;
-      any = true;
-      row.querySelector('.v').textContent = r.value(m);
-      chart(row.querySelector('canvas'), series[r.key] || [], r.range);
-    });
-    head.hidden = !any;
-  }
-}
-
-function onState(s) {
-  state = s;
-  bPause.textContent = s.paused ? 'Play' : 'Pause';
-  bPause.classList.toggle('on', s.paused);
-  bStep.disabled = !s.paused;
-  bSpeed.textContent = `${+s.speed.toFixed(2)}×`;
-  showStatus();
-}
-
-function connect() {
-  const es = new EventSource('/events');
-  es.addEventListener('topology', e => onTopology(JSON.parse(e.data)));
-  es.addEventListener('frame', e => onFrame(JSON.parse(e.data)));
-  es.addEventListener('state', e => onState(JSON.parse(e.data)));
-  es.addEventListener('metrics', e => onMetrics(JSON.parse(e.data)));
-  es.onerror = () => { statusEl.textContent = 'reconnecting'; };
-}
-connect();
-
-// ------------------------------------------------------------------ controls
-const bPause = $('bPause'), bStep = $('bStep'), bSpeed = $('bSpeed'),
-      tFloor = $('tFloor'), tAttn = $('tAttn'), tRays = $('tRays'), tInside = $('tInside'), tStats = $('tStats');
-const FLOORS = ['predicted', 'now', 'none'];
-const FLOOR_WORD = { predicted: 'predicted', now: 'now', none: 'none' };
-function syncToggles() {
-  const avail = floorAvailable();
-  const floor = avail[view.floor] ? view.floor : avail.predicted ? 'predicted' : avail.now ? 'now' : 'none';
-  tFloor.textContent = `Floor · ${FLOOR_WORD[floor]}`;
-  tFloor.classList.toggle('on', floor !== 'none' && !view.attn);
-  tFloor.title = 'predicted: who holds each cell two seconds on, as the network believes · now: who gets there first, as the engine computes it';
-  tAttn.classList.toggle('on', view.attn);
-  tAttn.disabled = !(last && last.attn);
-  tAttn.title = last && last.attn ? `where the hovered cell (or my head's cell) looks, layer ${view.layer}; keys 1 and 2 pick the layer` : 'this brain has no attention layers';
-  tRays.classList.toggle('on', view.rays);
-}
-tFloor.onclick = () => {
-  const avail = floorAvailable();
-  let i = FLOORS.indexOf(view.floor);
-  for (let k = 0; k < FLOORS.length; k++) { i = (i + 1) % FLOORS.length; if (avail[FLOORS[i]]) break; }
-  view.floor = FLOORS[i]; localStorage.setItem('brain.floor', view.floor);
-  if (view.attn) { view.attn = false; localStorage.setItem('brain.attn', '0'); }
-  redraw();
-};
-tAttn.onclick = () => { view.attn = !view.attn; localStorage.setItem('brain.attn', view.attn ? '1' : '0'); redraw(); };
-tRays.onclick = () => { view.rays = !view.rays; localStorage.setItem('brain.rays', view.rays ? '1' : '0'); redraw(); };
-tInside.onclick = () => { if (!$('inside').hidden) { if (lastActs) drawStages(lastActs); $('inside').scrollIntoView({ behavior: 'smooth' }); } };
-tStats.onclick = () => { if (!statsEl.hidden) statsEl.scrollIntoView({ behavior: 'smooth' }); };
-statsUp.onclick = e => { e.preventDefault(); window.scrollTo({ top: 0, behavior: 'smooth' }); };
-function redraw() { syncToggles(); if (last) drawArena(last); }
-function speedStep(dir) {
-  let i = 0;
-  for (let j = 1; j < SPEEDS.length; j++)
-    if (Math.abs(Math.log(SPEEDS[j] / state.speed)) < Math.abs(Math.log(SPEEDS[i] / state.speed))) i = j;
-  return SPEEDS[Math.max(0, Math.min(SPEEDS.length - 1, i + dir))];
-}
-bPause.onclick = () => post({ paused: !state.paused });
-bStep.onclick = () => post({ step: 1 });
-bSpeed.onclick = () => post({ speed: SPEEDS[(SPEEDS.indexOf(speedStep(0)) + 1) % SPEEDS.length] });
-window.addEventListener('keydown', e => {
-  if (e.metaKey || e.ctrlKey || e.altKey) return;
-  if (e.code === 'Space') { e.preventDefault(); post({ paused: !state.paused }); }
-  else if (e.code === 'ArrowRight') { e.preventDefault(); post({ step: 1 }); }
-  else if (e.key === '[') post({ speed: speedStep(-1) });
-  else if (e.key === ']') post({ speed: speedStep(1) });
-  else if (e.key === 'f') tFloor.onclick();
-  else if (e.key === 'a' && !tAttn.disabled) tAttn.onclick();
-  else if (e.key === 'r') tRays.onclick();
-  else if (e.key === '1' || e.key === '2') { view.layer = +e.key; redraw(); }
-});
-document.querySelectorAll('.toggles button').forEach(b => b.addEventListener('click', e => e.currentTarget.blur()));
-for (let i = 0; i < 8; i++) { const cv = document.createElement('canvas'); cv.width = cv.height = 16; headCanvases.push(cv); }
-(() => { const box = $('heads'); for (let l = 0; l < 2; l++) { const s = document.createElement('span'); s.textContent = `layer ${l + 1}`; box.append(s); for (let h = 0; h < 4; h++) box.append(headCanvases[l * 4 + h]); } })();
-
-// the picture follows the window, and the page says when the match has gone quiet
-window.addEventListener('resize', () => { showMetrics(); if (last) { drawArena(last); showPredictions(last); } });
-setInterval(() => {
-  if (last && !state.paused && lastFrameAt && performance.now() - lastFrameAt > 3000) statusEl.textContent = 'waiting · no new decisions';
-  if (metrics) showMetrics();
-  showLearned();
-}, 2500);
-</script>
+  <div class="model-line" aria-label="Checkpoint information"><span id="model-context">Blacklight checkpoint</span><span id="version">Awaiting architecture</span><span id="parameters"></span><code id="checkpoint"></code><span id="update"></span></div>
+  <main>
+    <section id="decision-view" class="workspace" role="tabpanel" aria-labelledby="tab-decision">
+      <section class="panel arena-panel" aria-labelledby="arena-title">
+        <div class="panel-title"><h2 id="arena-title">Training arena</h2><span id="round-time" class="mono muted">Waiting for an actor sample</span></div>
+        <div id="feed-status" class="feed-status" role="status">Connecting to the training actor.</div>
+        <div class="arena-wrap"><canvas id="arena" aria-label="Arena with cycle positions and trails"></canvas><div id="arena-empty" class="empty">Waiting for the training actor’s first sample.</div></div>
+        <div id="arena-legend" class="arena-legend" aria-label="Players in this arena"></div>
+        <div class="history">
+          <div class="history-heading"><label id="history-title" for="history">Sample history</label><span id="history-label" class="muted">No samples yet</span><button id="live" class="text-button" disabled>Latest</button></div>
+          <input id="history" type="range" min="0" max="0" value="0" disabled aria-label="Inspect a recent sample">
+          <p id="history-help" class="note">Periodic actor snapshots; intermediate decisions are not recorded in this view.</p>
+        </div>
+        <button id="watch-benchmark" class="benchmark-summary" type="button">Fixed-opponent check: no result yet. Open Progress.</button>
+      </section>
+      <aside class="panel decision-rail">
+        <section id="training-match" class="rail-section">
+          <h2>Training matchup</h2><p id="matchup-label" class="matchup-label">Waiting for the actor</p>
+          <div id="players" class="players"></div><p id="source-counts" class="note"></p>
+        </section>
+        <section class="rail-section decision-section">
+          <div class="panel-title"><h2 id="decision-title">Last executed move</h2><select id="training-player" aria-label="Player to inspect" disabled></select></div>
+          <div id="action" class="action">Waiting for a sample</div>
+          <p id="action-source" class="action-source"></p>
+          <h3 id="policy-title">Network policy</h3><div id="probabilities" class="probabilities" aria-label="Network action probabilities"></div>
+          <p id="probabilities-help" class="note"></p>
+          <div id="search-policy" hidden><h3>Search target</h3><div id="search-probabilities" class="probabilities" aria-label="Search target probabilities"></div><p class="note">Improved policy used as the learning target. The highlighted move was selected by search.</p></div>
+        </section>
+        <section id="prediction-section" class="rail-section" hidden><h2>Model predictions</h2><dl id="predictions" class="readings"></dl><p class="note">Predictions from this inspection match. Value is a learned score, not a calibrated win probability.</p></section>
+        <section class="rail-section input-test">
+          <div class="panel-title"><h2>Input test</h2><button id="probe" disabled>Test inputs</button></div>
+          <p id="probe-help" class="note">Input tests are available in Policy inspection.</p>
+          <div id="probe-result" aria-live="polite"></div>
+        </section>
+        <section id="observation-section" class="rail-section observations" hidden><h2>Observations</h2><div id="observation-maps" class="observation-maps"></div></section>
+        <p id="match-result" class="note match-result"></p>
+      </aside>
+    </section>
+    <section id="network-view" class="workspace" role="tabpanel" aria-labelledby="tab-network" hidden>
+      <p id="network-source" class="network-source note">Architecture of the loaded checkpoint. Actor activations are not recorded; select Policy inspection to inspect a separate match.</p>
+      <section class="panel signal-panel">
+        <div class="panel-title network-heading"><h2>Architecture</h2><div class="network-modes" role="group" aria-label="Architecture view"><button id="mode-3d" aria-pressed="true">3D</button><button id="mode-2d" aria-pressed="false">2D</button></div></div>
+        <div id="scene-toolbar" class="scene-toolbar">
+          <label class="sr-only" for="scene-stage">Network stage</label><select id="scene-stage" disabled><option>Waiting for model</option></select>
+          <button id="scene-fit" disabled>Fit model</button><button id="scene-focus" disabled>Focus stage</button>
+        </div>
+        <p id="scene-help" class="note">Drag to rotate · Scroll to zoom · Right-drag to pan · Click a stage to inspect</p>
+        <div id="architecture-3d" role="region" aria-label="Interactive 3D network architecture"><p id="scene-status" class="scene-status" role="status">Waiting for model architecture…</p></div>
+        <p id="scene-caption" class="note scene-caption">One block per measured stage. Block sizes are normalized; labels show actual tensor shapes.</p>
+        <p class="note signal-help" hidden>Select a stage to inspect its output.</p><div id="signal-path" class="signal-path" hidden></div>
+      </section>
+      <aside class="panel inspector" aria-label="Selected network stage">
+        <h2 id="stage-title">Select a stage</h2><p id="stage-shape" class="mono muted"></p>
+        <section class="rail-section"><h3 id="activation-title">Output activations</h3><div id="activation-content"></div></section>
+        <section class="rail-section"><h3>What this stage does</h3><p id="stage-explanation" class="explanation"></p><p id="stage-operation" class="note"></p></section>
+        <section id="attention-section" class="rail-section" hidden><h3>Attention routing</h3><p id="attention-query" class="note"></p><div id="attention-heads" class="attention-heads"></div><p class="note">Brightness is relative to each head’s strongest weight. Routing alone does not explain the action.</p><button id="follow-head" class="text-button">Follow the cycle’s cell</button></section>
+      </aside>
+    </section>
+    <section id="training-view" class="training-workspace" role="tabpanel" aria-labelledby="tab-training" hidden>
+      <section class="panel benchmark-panel" aria-labelledby="benchmark-title">
+        <div class="panel-title"><h2 id="benchmark-title">Fixed-opponent check</h2><div class="benchmark-actions"><button id="benchmark-run" disabled>Run 20-game check</button><button id="benchmark-cancel" hidden disabled>Cancel check</button></div></div>
+        <p class="note">Real engine · fixed built-in opponents · highest-probability policy · no search · size −3. Each check uses one checkpoint, with a 60-second time budget.</p>
+        <p id="benchmark-status" class="benchmark-status" role="status">No benchmark result received.</p><div id="benchmark-results" class="benchmark-results"></div>
+      </section>
+      <section class="panel training-panel"><div class="panel-title"><h2>Training progress</h2><span id="training-state" class="mono muted">Awaiting metrics</span></div><p id="training-summary" class="note">Metrics come from the loaded checkpoint’s run folder.</p><div id="training-empty" class="empty">No training metrics have arrived for this checkpoint.</div><div id="training-metrics"></div><p class="note training-note">Training scores include the actor’s search and exploration. Losses measure learning objectives; fixed-opponent results above measure observed playing performance.</p></section>
+    </section>
+  </main>
+  <footer><span class="keyboard-hints">Space freeze view · Right arrow next sample</span><span id="message" role="status" aria-live="polite"></span><span id="decision-rate">Viewing does not change training</span></footer>
 </body>
 </html>

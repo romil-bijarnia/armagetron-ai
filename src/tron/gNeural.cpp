@@ -27,13 +27,16 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 
 #include "gNeural.h"
 #include "gNeuralNet.h"
+#include "gNeuralAsync.h"
 #include "tConsole.h"
 #include "tDirectories.h"
 
 #include <chrono>
 #include <fstream>
+#include <memory>
 
 #include "gAIBase.h"
+#include "gAICharacter.h"
 #include "gCycle.h"
 #include "gWall.h"
 #include "gSensor.h"
@@ -56,6 +59,7 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 #include <map>
 #include <set>
 #include <string>
+#include <sstream>
 #include <vector>
 
 extern REAL sg_rubberCycle;
@@ -64,10 +68,10 @@ namespace
 {
 // wire protocol; keep in sync with arma_ai/protocol.py
 const uint32_t kMagic = 0x414D5241;
-const uint32_t kProtocol = 2;
+const uint32_t kProtocol = 4;
 const uint32_t kMsgHello = 1, kMsgStep = 2, kMsgActions = 3, kMsgWorld = 4;
 const int kGrid = 64;
-const int kLocalPlanes = 8, kGlobalPlanes = 8, kScalars = 96;
+const int kLocalPlanes = 8, kGlobalPlanes = 8, kScalars = 108;
 const int kMaps = 4;  // local (2 m), close (1 m), global (arena), territory (arena); one byte per cell each
 const REAL kCloseCell = 1;  // the sharp player view: 1 m cells, 64 m across, 40 m ahead
 enum { T_MINE = 0, T_ENEMY = 1 };  // territory bits; bits 2..7 hold my BFS distance / 4 cells, capped
@@ -76,7 +80,7 @@ const int kRays = 16;
 const int kEnemies = 3;
 
 enum { FLAG_ALIVE = 1, FLAG_NEEDS_ACTION = 2, FLAG_DIED = 4, FLAG_WON = 8 };
-enum { ACT_STRAIGHT = 0, ACT_LEFT = 1, ACT_RIGHT = 2, ACT_BRAKE = 3 };
+enum { ACT_STRAIGHT = 0, ACT_LEFT = 1, ACT_RIGHT = 2, ACT_BRAKE = 3, ACT_LEFT_BRAKE = 4, ACT_RIGHT_BRAKE = 5 };
 enum { L_WALL = 0, L_OWN, L_ENEMY, L_TEAM, L_ENEMY_HEAD, L_ENEMY_PATH, L_OUTSIDE, L_TEAM_HEAD };
 enum { G_WALL = 0, G_OWN, G_ENEMY, G_OWN_HEAD, G_ENEMY_HEAD, G_OUTSIDE, G_TEAM, G_TEAM_HEAD };
 
@@ -100,6 +104,11 @@ bool sg_controlAfterRound = false;
 tSettingItem<bool> sg_controlAfterRoundConf( "NEURAL_CONTROL_AFTER_ROUND", sg_controlAfterRound );
 bool sg_spectate = false; // also send every cycle's position each tick, for a match viewer
 tSettingItem<bool> sg_spectateConf( "NEURAL_SPECTATE", sg_spectate );
+bool sg_teacher = false; // the built-in AI acts; the socket receives its exact pre-action labels
+tSettingItem<bool> sg_teacherConf( "NEURAL_TEACHER", sg_teacher );
+gAIPlayer const * sg_teacherPlayer = NULL;
+int sg_teacherTurns = 0, sg_teacherDirection = 0;
+bool sg_teacherValid = true;
 REAL sg_roundTimeLimit = 0; // seconds; 0 = none. The tools set it: two cycles circling forever end in a draw
 tSettingItem<REAL> sg_roundTimeLimitConf( "NEURAL_ROUND_TIME_LIMIT", sg_roundTimeLimit );
 // the brain inside the game, used when no trainer is attached
@@ -109,6 +118,10 @@ bool sg_sample = false; // draw moves from the policy instead of always taking t
 tSettingItem<bool> sg_sampleConf( "NEURAL_SAMPLE", sg_sample );
 tString sg_name("Brain"); // what the network-driven players are called
 tSettingItemLine sg_nameConf( "NEURAL_NAME", sg_name );
+tString sg_characterProfile( "" );
+tSettingItemLine sg_characterProfileConf( "NEURAL_CHARACTER_PROFILE", sg_characterProfile );
+tString sg_builtinProfiles( "" );
+tSettingItemLine sg_builtinProfilesConf( "BUILTIN_CHARACTER_PROFILES", sg_builtinProfiles );
 
 // ------------------------------------------------------------------ socket
 int sg_fd = -1;
@@ -606,6 +619,14 @@ void BuildObservation( World const & w, gCycle * self, REAL time, int aliveEnemi
         x[5] = o->Speed() / baseSpeed;
         x[6] = o->GetBraking() ? 1 : 0;
         x[7] = 1;
+        // Preserve the original 96 scalars and append four resources/timers per enemy in
+        // exactly the same nearest-enemy order. Slots 88..95 remain reserved and zero.
+        float * extra = s + 96 + 4 * e;
+        extra[0] = o->GetBrakingReservoir();
+        extra[1] = sg_rubberCycle > 0 ? o->GetRubber() / sg_rubberCycle : 0;
+        REAL const turnDelay = std::max( o->GetTurnDelay(), REAL( 1e-6 ) );
+        extra[2] = Clamp( ( o->GetNextTurn( -1 ) - o->LastTime() ) / turnDelay, 0, 1 );
+        extra[3] = Clamp( ( o->GetNextTurn( 1 ) - o->LastTime() ) / turnDelay, 0, 1 );
         ++e;
     }
 }
@@ -615,28 +636,66 @@ uint8_t ActionMask( gCycle * c )
     uint8_t mask = ( 1 << ACT_STRAIGHT ) | ( 1 << ACT_BRAKE );
     bool idle = c->PendingTurnCount() == 0;
     if ( idle && c->CanMakeTurn( -1 ) )
-        mask |= 1 << ACT_LEFT;
+        mask |= ( 1 << ACT_LEFT ) | ( 1 << ACT_LEFT_BRAKE );
     if ( idle && c->CanMakeTurn( 1 ) )
-        mask |= 1 << ACT_RIGHT;
+        mask |= ( 1 << ACT_RIGHT ) | ( 1 << ACT_RIGHT_BRAKE );
     return mask;
 }
 
-void Apply( gCycle * c, int action )
+int Apply( gCycle * c, int action )
 {
-    bool brake = action == ACT_BRAKE;
+    unsigned short const beforeTurns = c->GetTurns();
+    bool brake = action == ACT_BRAKE || action == ACT_LEFT_BRAKE || action == ACT_RIGHT_BRAKE;
     if ( ( c->GetBraking() != 0 ) != brake )
         c->Act( &gCycle::s_brake, brake ? 1 : -1 );
-    if ( action == ACT_LEFT )
+    if ( action == ACT_LEFT || action == ACT_LEFT_BRAKE )
         c->Act( &gCycle::se_turnLeft, 1 );
-    else if ( action == ACT_RIGHT )
+    else if ( action == ACT_RIGHT || action == ACT_RIGHT_BRAKE )
         c->Act( &gCycle::se_turnRight, 1 );
+    // At the initial object-creation decision the game has not started accepting
+    // controls. Report the executed result, never merely the requested turn.
+    if ( c->LastTime() <= 0 ) return -1;
+    bool const executedBrake = c->GetBraking() != 0;
+    if ( c->GetTurns() != beforeTurns )
+        return action == ACT_LEFT || action == ACT_LEFT_BRAKE ?
+               ( executedBrake ? ACT_LEFT_BRAKE : ACT_LEFT ) :
+               ( executedBrake ? ACT_RIGHT_BRAKE : ACT_RIGHT );
+    return executedBrake ? ACT_BRAKE : ACT_STRAIGHT;
 }
 
 // ------------------------------------------------------------------ the brain in the game
 gNeuralNet::Net sg_net;
 std::string sg_netPath; // the NEURAL_MODEL the last load attempt was for
-double sg_decideMs = 0;
-int sg_decisions = 0;
+using LocalWorker = gNeuralAsync::Worker< gNeuralNet::Net::Memory >;
+std::unique_ptr< LocalWorker > sg_localWorker;
+uint64_t sg_weightGeneration = 0, sg_lifeGeneration = 0;
+uint64_t sg_localApplied = 0, sg_localDiscarded = 0, sg_lastWorkerReport = 0;
+double sg_localApplyLatencyMs = 0;
+bool sg_shuttingDown = false;
+
+void StopLocalWorker()
+{
+    // Joins only for explicit configuration/model transitions or application shutdown.
+    // The ordinary frame loop never waits for inference.
+    sg_localWorker.reset();
+    sg_localApplied = sg_localDiscarded = sg_lastWorkerReport = 0;
+    sg_localApplyLatencyMs = 0;
+}
+
+int RunLocalInference( gNeuralAsync::Observation const & observation, gNeuralNet::Net::Memory & memory,
+                       uint32_t & rng )
+{
+    // Worker thread: sg_net's weights stay immutable until this worker is joined. Everything
+    // else comes from the copied job; no game objects, SDL, OpenGL or mutable settings here.
+    size_t cells = size_t( sg_net.Grid() ) * sg_net.Grid();
+    if ( observation.maps.size() != 4 * cells || observation.scalars.size() != size_t( sg_net.NumScalars() ) )
+        throw std::runtime_error( "local inference observation dimensions do not match the loaded policy" );
+    uint8_t const * maps[4];
+    for ( size_t m = 0; m < 4; ++m ) maps[m] = observation.maps.data() + m * cells;
+    float probs[6], value;
+    return sg_net.Decide( maps, observation.scalars.data(), observation.mask, observation.sample,
+                         probs, &value, rng, memory, observation.context.data() );
+}
 
 bool SocketMode()
 {
@@ -650,10 +709,16 @@ bool LocalBrain()
         return false;
     std::string path = Trimmed( sg_modelPath );
     if ( path.empty() )
+    {
+        StopLocalWorker();
         return false;
+    }
     if ( path != sg_netPath )
     {
+        StopLocalWorker(); // never mutate model weights while an inference can still read them
+        ++sg_weightGeneration;
         sg_netPath = path;
+        sg_net = gNeuralNet::Net();
         std::ifstream f;
         std::string error;
         if ( !tDirectories::Data().Open( f, path.c_str() ) )
@@ -663,25 +728,12 @@ bool LocalBrain()
         else
             con << "Neural brain: " << path << " loaded (training update " << sg_net.Update() << ").\n";
     }
-    return sg_net.Loaded();
-}
-
-int LocalDecide( uint8_t const * local, uint8_t const * close, uint8_t const * global, uint8_t const * territory,
-                 float const * scalars, uint8_t mask, gNeuralNet::Net::Memory & memory )
-{
-    static uint32_t rng = 2463534242u;
-    float probs[16], value = 0;
-    std::chrono::steady_clock::time_point t0 = std::chrono::steady_clock::now();
-    uint8_t const * maps[4] = { local, close, global, territory };
-    int a = sg_net.Decide( maps, scalars, mask, sg_sample, probs, &value, rng, memory );
-    sg_decideMs += std::chrono::duration< double, std::milli >( std::chrono::steady_clock::now() - t0 ).count();
-    if ( ++sg_decisions % 400 == 0 && sg_debug > 0 )
+    if ( sg_net.Loaded() && ( !sg_localWorker || sg_localWorker->Capacity() != size_t( sg_numSlots ) ) )
     {
-        std::cerr << "neural brain: " << sg_decideMs / sg_decisions << " ms per decision\n";
-        sg_decideMs = 0;
-        sg_decisions = 0;
+        StopLocalWorker();
+        sg_localWorker.reset( new LocalWorker( size_t( sg_numSlots ), RunLocalInference ) );
     }
-    return a;
+    return sg_net.Loaded();
 }
 
 void Rename( ePlayerNetID * ai, size_t slot )
@@ -706,7 +758,13 @@ struct Slot
 {
     ePlayerNetID * player;
     bool wasAlive;
-    gNeuralNet::Net::Memory memory; // the in-game brain's previous frame of this slot's cycle
+    // Main-thread observers invalidate even if a destroyed object's address gets reused.
+    nObserverPtr< ePlayerNetID > localPlayer;
+    nObserverPtr< gCycle > localCycle;
+    bool localAlive = false;
+    uint64_t life = 0, lastApplied = 0;
+    gNeuralAsync::ControlContext context;
+    gNeuralAsync::Ticket latest;
     Slot(): player( NULL ), wasAlive( false ) {}
 };
 
@@ -765,11 +823,142 @@ gCycle * SlotCycle( size_t k )
     ePlayerNetID * p = sg_slots[k].player;
     return p ? dynamic_cast< gCycle * >( p->Object() ) : NULL;
 }
+
+void RefreshLocalLives()
+{
+    for ( size_t k = 0; k < sg_slots.size(); ++k )
+    {
+        Slot & slot = sg_slots[k];
+        gCycle * cycle = SlotCycle( k );
+        bool alive = cycle && cycle->Alive();
+        if ( slot.localPlayer.get() != slot.player || slot.localCycle.get() != cycle || slot.localAlive != alive )
+        {
+            slot.life = ++sg_lifeGeneration;
+            slot.lastApplied = 0;
+            slot.context.Reset();
+            slot.latest = gNeuralAsync::Ticket();
+            slot.localPlayer = slot.player;
+            slot.localCycle = cycle;
+            slot.localAlive = alive;
+            if ( sg_localWorker ) sg_localWorker->Invalidate( k );
+        }
+    }
+}
+
+void ApplyLocalResults( REAL time )
+{
+    if ( !sg_localWorker ) return;
+    for ( gNeuralAsync::Result const & result : sg_localWorker->Poll() )
+    {
+        size_t k = result.ticket.slot;
+        if ( k >= sg_slots.size() ) { ++sg_localDiscarded; continue; }
+        Slot & slot = sg_slots[k];
+        gCycle * cycle = SlotCycle( k );
+        bool alive = cycle && cycle->Alive() && slot.localCycle.get() == cycle;
+        unsigned legal = alive ? ActionMask( cycle ) : 0;
+        if ( result.ticket.round != sg_roundID || result.ticket.life != slot.life ||
+             result.ticket.weights != sg_weightGeneration ||
+             !gNeuralAsync::Fresh( result, time, sg_interval ) ||
+             !gNeuralAsync::CanApply( result, slot.latest, slot.lastApplied, alive, legal ) )
+        {
+            ++sg_localDiscarded;
+            if ( !result.error.empty() ) std::cerr << "neural worker: " << result.error << '\n';
+            continue;
+        }
+        int const executed = Apply( cycle, result.action );
+        slot.context.Applied( executed );
+        slot.lastApplied = result.ticket.decision;
+        if ( executed < 0 ) { ++sg_localDiscarded; continue; }
+        ++sg_localApplied;
+        sg_localApplyLatencyMs += std::chrono::duration< double, std::milli >(
+            std::chrono::steady_clock::now() - result.submitted ).count();
+    }
+    gNeuralAsync::Statistics stats = sg_localWorker->Stats();
+    if ( sg_debug > 0 && stats.processed >= sg_lastWorkerReport + 400 )
+    {
+        std::cerr << "neural worker: " << stats.computeMs / stats.processed << " ms inference, "
+                  << stats.latencyMs / stats.processed << " ms queued+inference; applied=" << sg_localApplied
+                  << " apply_latency_ms=" << ( sg_localApplied ? sg_localApplyLatencyMs / sg_localApplied : 0 )
+                  << " replaced=" << stats.replaced << " stale=" << stats.stale + sg_localDiscarded
+                  << " life_resets=" << stats.lifeResets << " gap_resets=" << stats.gapResets
+                  << " skipped_decisions=" << stats.skippedDecisions << '\n';
+        sg_lastWorkerReport = stats.processed;
+    }
+}
+
+class TeacherScope
+{
+public:
+    explicit TeacherScope( gAIPlayer const * player )
+    {
+        sg_teacherPlayer = player;
+        sg_teacherTurns = sg_teacherDirection = 0;
+        sg_teacherValid = true;
+    }
+    ~TeacherScope() { sg_teacherPlayer = NULL; }
+};
+
+//! Called only after every slot's observation and mask have been serialized. The label comes
+//! from the successful native turn call, never from a later position or the requested action.
+uint8_t TeacherAction( size_t k, REAL time, uint8_t mask )
+{
+    gAIPlayer * teacher = dynamic_cast< gAIPlayer * >( sg_slots[k].player );
+    gCycle * c = SlotCycle( k );
+    if ( !teacher || !teacher->Character() || !c || !c->Alive() || c->PendingTurnCount() ||
+         gSimpleAIFactory::Get() )
+        Fail( "teacher requires a live built-in AI with no pending turns or custom AI factory" );
+    unsigned short const beforeTurns = c->GetTurns();
+    {
+        // Normal world timesteps keep this AI suppressed. Its own reaction-time schedule and
+        // tactical controller run here once at the policy boundary; emergency help stays off
+        // between boundaries, so the recorded controls alone reproduce the trajectory.
+        TeacherScope scope( teacher );
+        teacher->Timestep( time );
+    }
+    unsigned short expectedTurns = beforeTurns;
+    if ( sg_teacherTurns == 1 )
+        expectedTurns = static_cast< unsigned short >( ( beforeTurns ? beforeTurns : 1 ) + 1 );
+    if ( !sg_teacherValid || sg_teacherTurns > 1 || teacher->Object() != c || !c->Alive() ||
+         c->PendingTurnCount() || c->GetTurns() != expectedTurns )
+    {
+        std::cerr << "teacher rejected slot=" << k << " time=" << time << " valid=" << sg_teacherValid
+                  << " native_turns=" << sg_teacherTurns << " direction=" << sg_teacherDirection
+                  << " before_turns=" << beforeTurns << " after_turns=" << c->GetTurns()
+                  << " expected_turns=" << expectedTurns << " pending=" << c->PendingTurnCount()
+                  << " alive=" << c->Alive() << "\n";
+        Fail( "teacher action is ambiguous or could not execute at the policy boundary" );
+    }
+    bool const brake = c->GetBraking() != 0;
+    int action = brake ? ACT_BRAKE : ACT_STRAIGHT;
+    if ( sg_teacherDirection < 0 )
+        action = brake ? ACT_LEFT_BRAKE : ACT_LEFT;
+    else if ( sg_teacherDirection > 0 )
+        action = brake ? ACT_RIGHT_BRAKE : ACT_RIGHT;
+    if ( !( mask & ( 1 << action ) ) )
+        Fail( "teacher executed an action outside the pre-action legal mask" );
+    return uint8_t( action );
+}
 } // namespace
 
 bool gNeural::Active()
 {
-    return sg_numSlots > 0 && ( SocketMode() || LocalBrain() );
+    if ( sg_shuttingDown || sg_numSlots <= 0 )
+    {
+        if ( sg_localWorker ) StopLocalWorker();
+        return false;
+    }
+    if ( SocketMode() )
+    {
+        if ( sg_localWorker ) StopLocalWorker();
+        return true;
+    }
+    return LocalBrain();
+}
+
+void gNeural::Shutdown()
+{
+    sg_shuttingDown = true;
+    StopLocalWorker();
 }
 
 int & gNeural::Slots()
@@ -784,6 +973,8 @@ REAL gNeural::LockstepDT()
 
 bool gNeural::Controls( gAIPlayer const * player )
 {
+    if ( player == sg_teacherPlayer )
+        return false;
     if ( !Active() )
         return false;
     if ( int( sg_slots.size() ) != sg_numSlots )
@@ -792,6 +983,65 @@ bool gNeural::Controls( gAIPlayer const * player )
         if ( sg_slots[k].player == player )
             return true;
     return false;
+}
+
+void gNeural::TeacherTurn( gAIPlayer const * player, int direction, bool executed )
+{
+    if ( player != sg_teacherPlayer )
+        return;
+    if ( !executed || direction == 0 )
+        sg_teacherValid = false;
+    else
+    {
+        ++sg_teacherTurns;
+        // gCycle::DoTurn clamps the controller's signed direction to one left/right turn.
+        sg_teacherDirection = direction < 0 ? -1 : 1;
+    }
+}
+
+void gNeural::ConfigureCharacters()
+{
+    if (sn_GetNetState() == nCLIENT) return;
+    std::string const controlledName = Trimmed(sg_characterProfile);
+    std::istringstream roster(Trimmed(sg_builtinProfiles));
+    std::vector<std::string> names;
+    for (std::string name; roster >> name;) names.push_back(name);
+    if (controlledName.empty() && names.empty()) return;
+    if (controlledName.find_first_of(" \t\r\n") != std::string::npos)
+        Fail("NEURAL_CHARACTER_PROFILE requires one exact profile name");
+    if ((!controlledName.empty() || sg_numSlots > 0) && !Active())
+        Fail("named AI rosters require active neural control for their controlled slots");
+    AssignSlots();
+    std::set<gAIPlayer *> controlled;
+    for (size_t k = 0; k < sg_slots.size(); ++k)
+    {
+        gAIPlayer * player = dynamic_cast<gAIPlayer *>(sg_slots[k].player);
+        if (!player || !player->CurrentTeam())
+            Fail("named AI roster is missing a configured neural player slot");
+        controlled.insert(player);
+        if (!controlledName.empty())
+        {
+            if (!player->SetCharacterProfile(tString(controlledName.c_str())))
+                Fail("NEURAL_CHARACTER_PROFILE is missing or duplicated in AI_CHARACTER_FILE");
+            std::cerr << "AI roster: role=controlled slot=" << k << " profile=" << controlledName << '\n';
+        }
+    }
+    if (!controlledName.empty() && controlled.empty())
+        Fail("NEURAL_CHARACTER_PROFILE requires at least one controlled player slot");
+    std::vector<gAIPlayer *> builtin;
+    for (int i = 0; i < se_PlayerNetIDs.Len(); ++i)
+    {
+        gAIPlayer * player = dynamic_cast<gAIPlayer *>(se_PlayerNetIDs(i));
+        if (player && player->CurrentTeam() && !controlled.count(player)) builtin.push_back(player);
+    }
+    if (!names.empty() && names.size() != builtin.size())
+        Fail("BUILTIN_CHARACTER_PROFILES must name every ordinary AI player exactly once");
+    for (size_t i = 0; i < names.size(); ++i)
+    {
+        if (!builtin[i]->SetCharacterProfile(tString(names[i].c_str())))
+            Fail("a BUILTIN_CHARACTER_PROFILES name is missing or duplicated in AI_CHARACTER_FILE");
+        std::cerr << "AI roster: role=builtin slot=" << i << " profile=" << names[i] << '\n';
+    }
 }
 
 void gNeural::NewRound()
@@ -805,23 +1055,44 @@ void gNeural::NewRound()
     sg_roundTotal = 0;
     sg_nextDecision = 0;
     sg_wasAlive.clear();
+    if ( sg_localWorker ) sg_localWorker->InvalidateAll();
     AssignSlots();
     for ( size_t k = 0; k < sg_slots.size(); ++k )
     {
         sg_slots[k].wasAlive = false;
-        sg_slots[k].memory.Reset();
+        sg_slots[k].localAlive = false;
+        sg_slots[k].localCycle = NULL;
+        sg_slots[k].life = ++sg_lifeGeneration;
+        sg_slots[k].lastApplied = 0;
+        sg_slots[k].context.Reset();
+        sg_slots[k].latest = gNeuralAsync::Ticket();
     }
 }
 
 void gNeural::Timestep( REAL time )
 {
-    if ( !Active() || sn_GetNetState() == nCLIENT )
+    if ( sn_GetNetState() == nCLIENT )
+    {
+        if ( sg_localWorker ) StopLocalWorker();
         return;
+    }
+    if ( !Active() )
+        return;
+    bool const socketMode = SocketMode();
+    if ( !socketMode )
+    {
+        AssignSlots();
+        RefreshLocalLives();
+        // Results are polled on every world/main-loop tick, before the 20 Hz observation gate.
+        if ( time >= 0 && ( !sg_roundOver || sg_controlAfterRound ) ) ApplyLocalResults( time );
+    }
     if ( time < 0 || ( sg_roundOver && !sg_controlAfterRound ) || time + 1E-5 < sg_nextDecision )
         return;
     sg_nextDecision = ( floor( time / sg_interval + 1E-3 ) + 1 ) * sg_interval;
 
-    bool const socketMode = SocketMode();
+    bool const teacherMode = socketMode && sg_teacher;
+    if ( teacherMode && sg_numSlots != 1 )
+        Fail( "teacher capture requires one selected slot to avoid sequential-action information leakage" );
     if ( socketMode )
         Connect();
     AssignSlots();
@@ -977,6 +1248,8 @@ void gNeural::Timestep( REAL time )
         msg.U8( uint8_t( sg_slots.size() ) );
 
         std::vector< bool > asked( sg_slots.size(), false );
+        std::vector< uint8_t > masks( sg_slots.size(), 0 );
+        std::vector< size_t > labelOffsets( sg_slots.size(), 0 );
         std::vector< uint8_t > local( kGrid * kGrid ), close( kGrid * kGrid ), global( kGrid * kGrid ), territory( kGrid * kGrid );
         std::vector< float > scalars( kScalars );
         for ( size_t k = 0; k < sg_slots.size(); ++k )
@@ -995,7 +1268,9 @@ void gNeural::Timestep( REAL time )
                 flags |= FLAG_NEEDS_ACTION;
             msg.U8( flags );
             msg.U8( uint8_t( std::min( kills[k], 255 ) ) );
-            msg.U8( asked[k] ? ActionMask( c ) : 0 );
+            masks[k] = asked[k] ? ActionMask( c ) : 0;
+            msg.U8( masks[k] );
+            labelOffsets[k] = msg.data.size();
             msg.U8( 0 );
             if ( asked[k] )
             {
@@ -1021,17 +1296,35 @@ void gNeural::Timestep( REAL time )
                 }
                 else
                 {
-                    // the brain is in the game: decide right here, with this cycle's own memory
-                    if ( !sg_slots[k].wasAlive )
-                        sg_slots[k].memory.Reset(); // a new life: nothing to stack yet
-                    Apply( c, LocalDecide( &local[0], &close[0], &global[0], &territory[0], &scalars[0], ActionMask( c ),
-                                           sg_slots[k].memory ) );
+                    // Copy only plain data. Inference/memory/RNG run on the worker; its result
+                    // is applied on a later main-loop tick after life and legality checks.
+                    gNeuralAsync::Observation observation;
+                    observation.ticket = { sg_weightGeneration, sg_slots[k].life, sg_tick,
+                                           sg_roundID, uint32_t( sg_slots[k].player->ID() ), k };
+                    observation.mask = masks[k];
+                    observation.sample = sg_sample;
+                    observation.gameTime = time;
+                    observation.context = sg_slots[k].context.Observe( time );
+                    observation.maps.reserve( 4 * local.size() );
+                    observation.maps.insert( observation.maps.end(), local.begin(), local.end() );
+                    observation.maps.insert( observation.maps.end(), close.begin(), close.end() );
+                    observation.maps.insert( observation.maps.end(), global.begin(), global.end() );
+                    observation.maps.insert( observation.maps.end(), territory.begin(), territory.end() );
+                    observation.scalars = scalars;
+                    sg_slots[k].latest = observation.ticket;
+                    sg_localWorker->Submit( std::move( observation ) );
                 }
             }
             sg_slots[k].wasAlive = alive;
         }
         if ( socketMode )
         {
+            // Finish all observations first: earlier teachers must not alter a later slot's
+            // observation. The reserved byte is action+1; zero retains normal-mode semantics.
+            if ( teacherMode )
+                for ( size_t k = 0; k < sg_slots.size(); ++k )
+                    if ( asked[k] )
+                        msg.data[labelOffsets[k]] = TeacherAction( k, time, masks[k] ) + 1;
             SendMessage( kMsgStep, msg );
 
             // wait for the decisions
@@ -1044,7 +1337,7 @@ void gNeural::Timestep( REAL time )
                 ReadAll( &reply[0], header[2] );
             size_t n = reply.empty() ? 0 : reply[0];
             for ( size_t k = 0; k < sg_slots.size() && k < n && k + 1 < reply.size(); ++k )
-                if ( asked[k] )
+                if ( asked[k] && !teacherMode ) // teachers already acted; the reply only acknowledges
                     Apply( SlotCycle( k ), reply[ k + 1 ] );
         }
     }
@@ -1052,6 +1345,7 @@ void gNeural::Timestep( REAL time )
     if ( over )
     {
         sg_roundOver = true;
+        if ( sg_localWorker && !sg_controlAfterRound ) sg_localWorker->InvalidateAll();
     }
     else if ( sg_endRound && !slotAlive )
     {

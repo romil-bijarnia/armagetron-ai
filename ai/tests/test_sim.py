@@ -1,5 +1,9 @@
 """The teacher's simulator moves cycles, kills them and draws the network's view the way the engine does."""
 
+import shutil
+import subprocess
+from pathlib import Path
+
 import numpy as np
 import pytest
 import torch
@@ -29,9 +33,9 @@ def test_clones_are_independent_and_deterministic():
     a.reset(size=-1.5, n=4)
     rng = np.random.default_rng(0)
     for _ in range(40):
-        a.step(rng.integers(0, 4, 4))
+        a.step(rng.integers(0, P.N_ACTIONS, 4))
     b = a.clone()
-    acts = rng.integers(0, 4, (60, 4))
+    acts = rng.integers(0, P.N_ACTIONS, (60, 4))
     for x in acts:
         a.step(x)
         b.step(x)
@@ -43,15 +47,88 @@ def test_clones_are_independent_and_deterministic():
     assert np.array_equal(ma, mb)
 
 
+@pytest.mark.parametrize("action, heading", [(P.ACTION_LEFT_BRAKE, (-1, 0)), (P.ACTION_RIGHT_BRAKE, (1, 0))])
+def test_combined_turns_brake_and_obey_turn_delay(action, heading):
+    s = Sim()
+    s.reset(size=-3, n=2)
+    s.step([P.ACTION_STRAIGHT, P.ACTION_STRAIGHT])
+    assert s.mask(0) == (1 << P.N_ACTIONS) - 1
+    unbraked = s.clone()
+    unbraked.step([P.ACTION_LEFT if action == P.ACTION_LEFT_BRAKE else P.ACTION_RIGHT, P.ACTION_STRAIGHT])
+    s.step([action, P.ACTION_STRAIGHT])
+    st = s.state()
+    assert (st["dx"][0], st["dy"][0]) == heading
+    assert st["braking"][0] == 1 and st["brake_reservoir"][0] < 1
+    assert st["speed"][0] < unbraked.state()["speed"][0]
+    assert s.mask(0) == (1 << P.ACTION_STRAIGHT) | (1 << P.ACTION_BRAKE)
+    s.step([P.ACTION_BRAKE, P.ACTION_STRAIGHT])
+    assert s.mask(0) == (1 << P.N_ACTIONS) - 1
+    assert (s.state()["dx"][0], s.state()["dy"][0]) == heading
+    s.step([P.ACTION_STRAIGHT, P.ACTION_STRAIGHT])
+    assert s.state()["braking"][0] == 0
+
+
+def test_self_play_requires_six_action_finite_batches():
+    sp = SelfPlay(1, sims=0, search_prob=0, temperature=0, threads=1)
+    sp.start(0, -3, [0, 0], [False, False])
+    n = sp.collect()
+    assert n == 2
+    with pytest.raises(ValueError, match=r"logits must have shape \(2, 6\)"):
+        sp.feed(np.zeros((n, 4)), np.zeros(n))
+    for logits, values, updates in (
+        (np.zeros((n, 5)), np.zeros(n), None),
+        (np.zeros((n - 1, P.N_ACTIONS)), np.zeros(n - 1), None),
+        (np.zeros((n, P.N_ACTIONS)), np.zeros((n, 1)), None),
+        (np.zeros((n, P.N_ACTIONS)), np.zeros(n), np.zeros(n - 1)),
+        (np.zeros((n, P.N_ACTIONS)), np.full(n, np.nan), None),
+        (np.full((n, P.N_ACTIONS), np.inf), np.zeros(n), None),
+    ):
+        with pytest.raises(ValueError):
+            sp.feed(logits, values, policy_updates=updates)
+    # Rejected inputs leave the pending batch intact for a valid six-action response.
+    sp.feed(np.zeros((n, P.N_ACTIONS)), np.zeros(n))
+    assert sp.collect() == n
+    sp.feed(np.zeros((n, P.N_ACTIONS)), np.zeros(n))
+
+@pytest.mark.skipif(shutil.which("clang++") is None and shutil.which("g++") is None, reason="no C++ compiler")
+def test_self_play_macro_brakes_and_safe_kill_targets(tmp_path):
+    here = Path(__file__).resolve().parent
+    sim = here.parent / "sim"
+    exe = tmp_path / "selfplay_check"
+    cxx = shutil.which("clang++") or shutil.which("g++")
+    subprocess.run([cxx, "-O2", "-std=c++17", "-o", str(exe), str(here / "cpp/selfplay_check.cpp"),
+                    str(sim / "tron.cpp"), str(sim / "observe.cpp"), str(sim / "selfplay.cpp")], check=True)
+    subprocess.run([str(exe)], check=True)
+
+
 @pytest.mark.skipif(not ENGINE_BIN.exists(), reason="the engine is not built (build-dedicated)")
-def test_simulator_matches_the_engine(tmp_path):
+@pytest.mark.parametrize("compound", [False, True])
+def test_simulator_matches_the_engine(tmp_path, monkeypatch, compound, record_property):
     """Replay rounds recorded from the real engine: every death at the same decision, positions
     within centimetres, maps nearly identical."""
-    from arma_ai.record import record
+    from arma_ai import record as recording
 
-    rounds = record(rounds=3, slots=2, size=-3, seed=5, workdir=tmp_path / "rec", base_port=47960)
+    if compound:
+        class CompoundDriver(recording.Scripted):
+            def __init__(self, seed):
+                super().__init__(seed)
+                # The first decision at time zero ignores actions; then exercise both combinations.
+                self.first = [P.ACTION_STRAIGHT, P.ACTION_LEFT_BRAKE, P.ACTION_BRAKE,
+                              P.ACTION_RIGHT_BRAKE, P.ACTION_BRAKE]
+
+            def __call__(self, mask):
+                if self.first and (mask >> self.first[0]) & 1:
+                    return self.first.pop(0)
+                return super().__call__(mask)
+
+        monkeypatch.setattr(recording, "Scripted", CompoundDriver)
+
+    rounds = recording.record(rounds=3, slots=2, size=-3, seed=5, workdir=tmp_path / "rec", base_port=47960)
+    seen_actions = set()
+    max_opponent_state_error = np.zeros(4)
     for r in rounds:
         a = r.arrays()
+        seen_actions.update(int(x) for x in a["actions"].ravel() if x >= 0)
         n = len(a["slot_of"])
         s = Sim()
         s.reset(-3, n)
@@ -65,12 +142,52 @@ def test_simulator_matches_the_engine(tmp_path):
                 assert bool(st["alive"][i]) == bool(a["alive"][t][i]), (t, i)
                 if a["alive"][t][i]:
                     assert np.hypot(st["x"][i] - a["pos"][t][i][0], st["y"][i] - a["pos"][t][i][1]) < 0.05, (t, i)
+                    assert np.allclose([st["dx"][i], st["dy"][i]], a["dirs"][t][i], atol=1e-6), (t, i)
                 k = a["slot_of"][i]
                 if k >= 0 and a["actions"][t][k] >= 0:
-                    maps, _ = s.observe(i)
+                    assert s.mask(i) == a["masks"][t][k], (t, i)
+                    assert bool(st["braking"][i]) == bool(a["scalars"][t][k][3]), (t, i)
+                    maps, scalars = s.observe(i)
                     cells.append((maps != a["maps"][t][k]).sum(axis=(1, 2)))
+                    # Resources and turn waits refer to each enemy's actual cycle time, in
+                    # the same sorted slots as its original position/heading token.
+                    simulated = scalars[96:108].reshape(3, 4)
+                    recorded = a["scalars"][t][k][96:108].reshape(3, 4)
+                    opponent_error = np.abs(simulated - recorded)
+                    max_opponent_state_error = np.maximum(max_opponent_state_error, opponent_error.max(axis=0))
+                    np.testing.assert_allclose(simulated[:, [0, 2, 3]], recorded[:, [0, 2, 3]], atol=3e-4)
+                    # The existing contact-physics approximation already differs by up to
+                    # 0.0079 in original own-rubber scalar 1 on these replays (~9 mm position
+                    # drift). Keep a specific 1%-of-budget bound for that physical quantity.
+                    np.testing.assert_allclose(simulated[:, 1], recorded[:, 1], atol=0.01)
+                    enemies = sorted((j for j in range(n) if j != i and a["alive"][t][j]),
+                                     key=lambda j: np.linalg.norm(a["pos"][t][j] - a["pos"][t][i]))
+                    for enemy_slot, j in enumerate(enemies[:3]):
+                        other = a["slot_of"][j]
+                        if other >= 0 and a["actions"][t][other] >= 0:
+                            # Extraction itself must be exact: these are the same live cycle's
+                            # already-existing own brake/rubber values, before any control.
+                            np.testing.assert_array_equal(recorded[enemy_slot, :2],
+                                                          a["scalars"][t][other][[2, 1]])
             s.step([max(int(a["actions"][t][a["slot_of"][i]]), 0) for i in range(n)])
         assert np.mean(cells, axis=0).max() < 2.0  # cells differing per map and observation, out of 4096
+    if compound:
+        assert {P.ACTION_LEFT_BRAKE, P.ACTION_RIGHT_BRAKE} <= seen_actions
+    else:
+        assert not ({P.ACTION_LEFT_BRAKE, P.ACTION_RIGHT_BRAKE} & seen_actions)
+    record_property("max_opponent_state_error", " ".join(f"{value:.8g}" for value in max_opponent_state_error))
+
+
+@pytest.mark.skipif(shutil.which("clang++") is None and shutil.which("g++") is None, reason="no C++ compiler")
+def test_opponent_resources_break_aliasing_and_preserve_original_inputs(tmp_path):
+    here = Path(__file__).resolve().parent
+    sim = here.parent / "sim"
+    executable = tmp_path / "opponent_observation_check"
+    cxx = shutil.which("clang++") or shutil.which("g++")
+    subprocess.run([cxx, "-O2", "-std=c++17", "-o", str(executable),
+                    str(here / "cpp/opponent_observation_check.cpp"),
+                    str(sim / "tron.cpp"), str(sim / "observe.cpp")], check=True)
+    subprocess.run([str(executable)], check=True)
 
 
 def test_self_play_writes_complete_samples():
@@ -87,7 +204,7 @@ def test_self_play_writes_complete_samples():
     for _ in range(3000):
         n = sp.collect()
         if n:
-            mask = torch.from_numpy(((sp.masks[:n, None] >> np.arange(4)) & 1).astype(bool))
+            mask = torch.from_numpy(((sp.masks[:n, None] >> np.arange(net.pi.out_features)) & 1).astype(bool))
             with torch.no_grad():
                 lg, v = net(torch.from_numpy(sp.maps[:n]), torch.from_numpy(sp.scalars[:n]), mask)
             sp.feed(lg.numpy(), v.numpy())
@@ -107,7 +224,7 @@ def test_self_play_writes_complete_samples():
     assert len(searched) > 0
     assert np.allclose(ring.policy[searched].sum(1), 1, atol=1e-4)
     # the search's policy never puts weight on a forbidden move
-    allowed = (ring.mask[searched, None] >> np.arange(4)) & 1
+    allowed = (ring.mask[searched, None] >> np.arange(P.N_ACTIONS)) & 1
     assert np.all(ring.policy[searched][allowed == 0] < 1e-6)
     assert np.all((ring.aux[ready] >= 0) & (ring.aux[ready] <= 1))
     prev = ring.prev_maps(ready[:50])
@@ -123,7 +240,7 @@ def test_samples_get_targets_long_before_their_round_ends():
     sp.set_ring(0, ring)
     for g in range(4):
         sp.start(g, -1.0, [0, 0], [True, True], seed=g + 1)  # a big arena: driving straight takes a while
-    logits = np.array([4.0, 0.0, 0.0, 0.0], np.float32)  # mostly straight on
+    logits = np.array([8.0] + [0.0] * (P.N_ACTIONS - 1), np.float32)  # long straight runs for n-step bootstrapping
     ready_before_any_end = 0
     finished = set()
     for _ in range(20_000):
@@ -148,16 +265,15 @@ def test_samples_get_targets_long_before_their_round_ends():
     assert np.all((ring.aux[:total] >= 0) & (ring.aux[:total] <= 1))
 
 
-def test_requests_say_which_are_real_decisions_and_boots_feed_the_targets():
-    """During the warm start the old network steers and the new one's values build the targets:
-    collect() marks real decisions, and feed()'s BOOTS (not VALUES) end up in the n-step targets."""
+def test_real_decision_values_feed_targets_without_search_node_values():
+    """Search leaves have different values; n-step replay must use only real-decision values."""
     steps, gamma = 60, 0.999
     sp = SelfPlay(4, sims=4, search_prob=0.5, threads=2, value_steps=steps, gamma=gamma)
     ring = Ring(50_000)
     sp.set_ring(0, ring)
     for g in range(4):
         sp.start(g, -1.0, [0, 0], [True, True], seed=g + 1)
-    logits = np.array([4.0, 0.0, 0.0, 0.0], np.float32)
+    logits = np.array([4.0] + [0.0] * (P.N_ACTIONS - 1), np.float32)
     seen_root = seen_search = False
     for _ in range(3000):
         n = sp.collect()
@@ -165,7 +281,8 @@ def test_requests_say_which_are_real_decisions_and_boots_feed_the_targets():
             roots = sp.roots[:n].copy()
             seen_root |= bool(roots.any())
             seen_search |= bool((roots == 0).any())
-            sp.feed(np.tile(logits, (n, 1)), np.full(n, 0.9, np.float32), np.full(n, 0.25, np.float32))
+            values = np.where(roots, 0.25, 0.9).astype(np.float32)
+            sp.feed(np.tile(logits, (n, 1)), values)
         if len(ring.window()) > 200:
             break
     assert seen_root and seen_search
@@ -174,40 +291,10 @@ def test_requests_say_which_are_real_decisions_and_boots_feed_the_targets():
     assert not np.any(np.isclose(vals, 0.9 * gamma**steps, atol=1e-5))
 
 
-def test_decisions_without_a_value_make_targets_reach_to_the_next_one():
-    """Warm start: only some decisions get the new network's value (NaN for the rest). A sample's
-    target then comes from the next decision that has one, a few decisions further on, and every
-    sample still gets a target."""
-    steps, gamma, v = 60, 0.999, 0.5
-    sp = SelfPlay(4, sims=4, search_prob=0.25, threads=2, value_steps=steps, gamma=gamma)
-    ring = Ring(50_000)
-    sp.set_ring(0, ring)
-    for g in range(4):
-        sp.start(g, -1.0, [0, 0], [True, True], seed=g + 11)
-    logits = np.array([4.0, 0.0, 0.0, 0.0], np.float32)
-    rng = np.random.default_rng(0)
-    finished = set()
-    for _ in range(20_000):
-        n = sp.collect()
-        if n:
-            boots = np.where(rng.random(n) < 1 / 8, v, np.nan).astype(np.float32)
-            sp.feed(np.tile(logits, (n, 1)), np.full(n, 0.9, np.float32), boots)
-        finished |= {g for g in range(4) if sp.info(g) is not None}
-        if len(finished) == 4:
-            break
-    total = ring.written()
-    assert len(finished) == 4 and np.all(ring.ready[:total] == 1)
-    vals = ring.value[:total]
-    from_value = vals[(vals > 0.1) & (vals <= v + 1e-6)]  # (outcomes score +1, -1 or 0, discounted a little)
-    gaps = np.log(from_value / v) / np.log(gamma)  # targets built from a value: v * gamma^gap
-    assert len(gaps) > 0 and gaps.min() > steps - 0.5 and np.median(gaps) < steps + 20
-    assert not np.any(np.isclose(vals, 0.9 * gamma**steps, atol=1e-4))
-
-
 def test_the_space_fighter_plays_without_a_network_and_does_not_crash_into_walls():
     from arma_ai.sim import AGENT_HUNTER
 
-    sp = SelfPlay(2, sims=0, search_prob=0.0, threads=1, hunter_depth=2)
+    sp = SelfPlay(2, sims=0, search_prob=0.0, threads=1, hunter_depth=2, max_decisions=220)
     for g in range(2):
         sp.start(g, -3.0, [AGENT_HUNTER, AGENT_HUNTER], [False, False], rotate=g, seed=g + 1)
     for _ in range(50):
@@ -238,7 +325,7 @@ def test_rounds_against_the_space_fighter_record_the_learner_only():
         n = sp.collect()
         if n:
             assert np.all(sp.agents[:n] == 0)
-            mask = torch.from_numpy(((sp.masks[:n, None] >> np.arange(4)) & 1).astype(bool))
+            mask = torch.from_numpy(((sp.masks[:n, None] >> np.arange(net.pi.out_features)) & 1).astype(bool))
             with torch.no_grad():
                 lg, v = net(torch.from_numpy(sp.maps[:n]), torch.from_numpy(sp.scalars[:n]), mask)
             sp.feed(lg.numpy(), v.numpy())
@@ -293,7 +380,7 @@ def test_the_network_predicts_an_ownership_map_the_game_never_loads():
     net = PolicyNet().eval()
     maps = torch.zeros((2, 2 * P.N_MAPS, P.GRID, P.GRID), dtype=torch.uint8)
     scalars = torch.zeros((2, P.N_SCALARS))
-    mask = torch.ones((2, P.N_ACTIONS), dtype=torch.bool)
+    mask = torch.ones((2, net.pi.out_features), dtype=torch.bool)
     with torch.no_grad():
         logits, v, aux, own = net.heads(maps, scalars, mask)
         l2, v2 = net(maps, scalars, mask)

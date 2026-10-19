@@ -14,7 +14,12 @@ dependencies = [
 ]
 
 [project.scripts]
-arma-train = "arma_ai.train:main"
+arma-background = "arma_ai.control:background"
+arma-full = "arma_ai.control:full"
+arma-stop = "arma_ai.control:stop"
+arma-status = "arma_ai.control:status"
+arma-watch = "arma_ai.control:watch"
+arma-log = "arma_ai.control:log"
 arma-eval = "arma_ai.evaluate:main"
 arma-play = "arma_ai.play:main"
 arma-league = "arma_ai.league:main"
@@ -26,6 +31,7 @@ arma-brain = "arma_ai.brain:main"
 arma-export = "arma_ai.export:main"
 arma-teach = "arma_ai.teach:main"
 arma-record = "arma_ai.record:main"
+arma-imitate = "arma_ai.imitate:main"
 
 [dependency-groups]
 dev = ["pytest>=8,<10"]
@@ -34,4 +40,4 @@ dev = ["pytest>=8,<10"]
 include = ["arma_ai*"]
 
 [tool.setuptools.package-data]
-arma_ai = ["web/*.html"]
+arma_ai = ["web/*.html", "web/*.css", "web/*.js", "web/vendor/*.js", "web/vendor/*.txt"]

@@ -2,7 +2,7 @@
 
 The teacher trains in the simulator; this plays real engine duels (the network alone, no search,
 exactly as it plays inside the game) between the current network and a roster of fixed
-opponents: the game's strongest built-in AI, the old brain (runs/main), and frozen snapshots and
+opponents: the game's strongest built-in AI and frozen V4 snapshots and
 exploiters from the league pool. Every result is kept in <run>/ladder.jsonl and all of them are
 fitted together into Elo ratings (Bradley-Terry), anchored at 1000 for the built-in AI.
 
@@ -26,7 +26,6 @@ from .evaluate import evaluate
 
 PROJECT = Path(__file__).resolve().parent.parent
 BUILTIN = "builtin"
-V1 = "v1"
 ANCHOR = 1000.0
 
 
@@ -34,8 +33,6 @@ def player_name(path: Path | None) -> str:
     """A stable name for a checkpoint: pool files keep their own name, others are named by update."""
     if path is None:
         return BUILTIN
-    if path.resolve() == (PROJECT / "runs/main/latest.pt").resolve():
-        return V1
     if path.parent.name == "pool":
         return path.stem
     try:
@@ -76,7 +73,7 @@ def fit(rows: list[dict]) -> dict[str, float]:
         g = math.exp(sum(math.log(max(v, 1e-12)) for v in new.values()) / len(new))
         gamma = {p: v / g for p, v in new.items()}
     elo = {p: 400 * math.log10(max(v, 1e-12)) for p, v in gamma.items()}
-    anchor = elo.get(BUILTIN, elo.get(V1, 0.0) - 500 if V1 in elo else 0.0)
+    anchor = elo.get(BUILTIN, 0.0)
     return {p: round(v - anchor + ANCHOR, 1) for p, v in sorted(elo.items(), key=lambda kv: -kv[1])}
 
 
@@ -94,12 +91,9 @@ def load_rows(run: Path) -> list[dict]:
 
 
 def roster(run: Path, n: int) -> list[Path | None]:
-    """Who the current network plays: the built-in AI, the old brain, and a spread of the pool
+    """Who the current network plays: the built-in AI and a spread of the V4 pool
     (newest snapshot, newest exploiter, and older snapshots)."""
     out: list[Path | None] = [None]
-    v1 = PROJECT / "runs/main/latest.pt"
-    if v1.exists():
-        out.append(v1)
     pool = run / "pool"
     snaps = sorted(pool.glob("u*.pt"))
     exploiters = sorted(pool.glob("x*.pt"))
@@ -128,11 +122,12 @@ def table(ratings: dict[str, float], rows: list[dict]) -> str:
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--run", default="runs/v3")
+    ap.add_argument("--run", default="runs/blacklight")
     ap.add_argument("--checkpoint", type=Path, default=None, help="the network to rate (default: <run>/latest.pt)")
     ap.add_argument("--opponents", type=int, default=5)
     ap.add_argument("--games", type=int, default=40)
-    ap.add_argument("--engines", type=int, default=4)
+    ap.add_argument("--engines", type=int, default=1,
+                    help="default 1; parallel deterministic engines can repeat the same trajectories")
     ap.add_argument("--size", type=float, default=-3)
     ap.add_argument("--table", action="store_true", help="only print the ratings so far")
     args = ap.parse_args()

@@ -1,0 +1,28 @@
+{
+  "source_recreated_exactly_from_original_tool_command": true,
+  "original_temporary_directory_removed_on_successful_exit": true,
+  "experiment_rerun_during_recreation": false,
+  "observed_original_exit_code": 0,
+  "compile_command": [
+    "clang++",
+    "-O2",
+    "-std=c++17",
+    "-I",
+    "/Users/romilbijarnia/Documents/armagetronad/ai/sim",
+    "/tmp/blacklight-aliasing-evidence-qz5k6xey/probe.cpp",
+    "/Users/romilbijarnia/Documents/armagetronad/ai/sim/tron.cpp",
+    "/Users/romilbijarnia/Documents/armagetronad/ai/sim/observe.cpp",
+    "-o",
+    "/tmp/blacklight-aliasing-evidence-qz5k6xey/probe"
+  ],
+  "run_command": [
+    "/tmp/blacklight-aliasing-evidence-qz5k6xey/probe"
+  ],
+  "source_sha256": "f91f32253034db9cbc0dcf08f6bf2bf783763e6b771f7bfe3f16dffdc49b1600",
+  "dependency_sha256_at_recreation": {
+    "ai/sim/tron.h": "0077064cda790fc360f220f991cbf5fdca9ac1727fba07f1a99c2ec7e9409b79",
+    "ai/sim/tron.cpp": "ce389ae8356df3134d8a4afa062bd9c15aa0f33b56e57bffcbca1bf24d130019",
+    "ai/sim/observe.cpp": "e988a44d9c2e0f311fe1f828593dd168534b397e6abae176a4f73e844516031e"
+  },
+  "scope": "Constructed simulator-state comparison; current observation aliasing, not a full-history or optimal-policy proof. No checkpoint or running engine was used."
+}

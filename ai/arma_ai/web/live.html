@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>Armagetron AI · Live training</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Cpath fill='%2338d8e8' d='M16 3 29 28H3z'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="/live.css">
+  <script type="importmap">{"imports":{"three":"/vendor/three.module.js"}}</script>
+  <script type="module" src="/live.js"></script>
+</head>
+<body>
+  <header class="live-header">
+    <a class="brand" href="#live"><span>Armagetron <small>AI TRAINING</small></span></a>
+    <nav role="tablist" aria-label="Training views">
+      <button data-view="live" id="tab-live" role="tab" aria-controls="view-live" aria-selected="true">Live game</button>
+      <button data-view="network" id="tab-network" role="tab" aria-controls="view-network" aria-selected="false" tabindex="-1">Network</button>
+      <button data-view="training" id="tab-training" role="tab" aria-controls="view-training" aria-selected="false" tabindex="-1">Training</button>
+    </nav>
+    <span id="connection-state" class="status-pill" role="status">Connecting</span>
+  </header>
+  <div class="run-strip" aria-label="Current training state">
+    <div><span>Mode</span><strong id="mode-value">—</strong></div>
+    <div><span>Parallel games</span><strong id="arenas-value">—</strong></div>
+    <div><span>Learning update</span><strong id="update-value">—</strong></div>
+    <div><span>Decisions / second</span><strong id="pace-value">—</strong></div>
+    <div><span>Completed games</span><strong id="games-value">—</strong></div>
+    <div class="run-state"><span id="phase-value">Waiting for trainer</span><small id="sample-age">No live sample</small></div>
+  </div>
+  <main class="live-main">
+    <section id="view-live" role="tabpanel" aria-labelledby="tab-live">
+      <div class="live-grid">
+        <section class="card game-card">
+          <div class="card-head"><div><span class="eyebrow">ACTUAL TRAINING ARENA</span><h1 id="match-title">Waiting for training</h1></div><div class="camera-buttons" role="group" aria-label="Camera view"><button id="camera-follow" aria-pressed="true">Follow bot</button><button id="camera-arena" aria-pressed="false">Whole arena</button></div></div>
+          <div class="game-selectors"><label>Arena <select id="arena-select" disabled><option value="0">1</option></select></label><label>Follow <select id="player-select" disabled><option>Waiting for a bot</option></select></label><span id="round-info"></span></div>
+          <div class="game-stage"><div id="live-scene" aria-label="Live training arena, following the selected bot"></div><canvas id="arena-fallback" aria-label="Live arena overview" hidden></canvas><div id="game-empty" class="game-empty"><h2 id="empty-title">Training is stopped</h2><p id="empty-help">Start a training mode to watch what the bot is doing.</p><div class="mode-commands"><div><strong>Background</strong><span>Leave room for your other work</span><code>./trainctl background</code></div><div><strong>Full performance</strong><span>Uncapped parallel training</span><code>./trainctl full</code></div></div></div></div>
+          <div class="game-foot"><div id="player-legend" class="player-legend"></div><span id="feed-detail">Waiting for a fresh actor sample</span></div>
+        </section>
+        <aside class="bot-column">
+          <section class="card bot-card"><span class="eyebrow">SELECTED BOT</span><h2 id="bot-name">—</h2><div class="move-line"><span id="bot-action">Waiting for a move</span><span id="bot-alive" class="mini-pill">—</span></div><p id="action-detail" class="subtle">Actions come directly from the training actor.</p><dl class="bot-readings"><div><dt>Speed</dt><dd id="bot-speed">—</dd></div><div><dt>Braking</dt><dd id="bot-brake">—</dd></div><div><dt>Kills this round</dt><dd id="bot-kills">—</dd></div><div><dt>Weights used</dt><dd id="bot-update">—</dd></div></dl></section>
+          <section class="card sensor-card"><div class="card-head"><h2>What the bot sees</h2><select id="sensor-select" aria-label="Bot observation"><option value="close_in">Close view</option><option value="local_in">Nearby view</option><option value="global_in">Arena map</option><option value="territory_in">Territory map</option></select></div><div class="sensor-wrap"><canvas id="sensor-map" aria-label="Selected bot’s actual input map"></canvas><p id="sensor-empty">Available when a neural bot makes a move</p></div><p id="sensor-explanation" class="subtle">The selected bot’s input, captured when it chose its last executed move.</p><div class="sensor-legend"><span>Own trail</span><span>Opponent</span><span>Wall</span></div></section>
+          <section class="card compact-progress"><div class="card-head"><h2>Learning now</h2><button id="show-training" class="link-button">All statistics →</button></div><dl><div><dt>Policy loss</dt><dd id="mini-policy">—</dd></div><div><dt>Value loss</dt><dd id="mini-value">—</dd></div><div><dt>Learning rate</dt><dd id="mini-lr">—</dd></div></dl><p id="mini-report-age" class="subtle">Waiting for a learning report</p></section>
+        </aside>
+      </div>
+    </section>
+    <section id="view-network" role="tabpanel" aria-labelledby="tab-network" hidden>
+      <div class="section-intro"><div><span class="eyebrow">MODEL STRUCTURE</span><h1>Inside the network</h1><p id="network-summary" class="subtle">Loading the architecture from your checkpoint.</p></div><span class="mini-pill">Architecture · live inputs</span></div>
+      <div class="network-grid"><section class="card network-card"><div class="network-tools"><label>Stage <select id="network-stage" disabled><option>Loading model</option></select></label><button id="network-fit">Fit model</button><button id="network-focus">Focus stage</button></div><div id="network-scene" aria-label="Interactive network architecture"></div><div id="network-list" class="network-list" hidden></div><p id="network-help" class="subtle">Drag to rotate · Scroll to zoom · Select a stage to see its role</p></section><aside class="card stage-card"><span class="eyebrow">NETWORK STAGE</span><h2 id="stage-title">Loading model</h2><p id="stage-shape" class="mono subtle"></p><p id="stage-explanation"></p><p id="stage-operation" class="subtle"></p><dl id="stage-facts" class="stage-facts"></dl><div id="stage-live-input"></div><div class="network-note"><strong>Same architecture as the training bot</strong><p>Inputs and the last move come from the live actor. Internal activation tensors are not streamed; the blocks show the model’s structure.</p></div></aside></div>
+    </section>
+    <section id="view-training" role="tabpanel" aria-labelledby="tab-training" hidden>
+      <div class="section-intro"><div><span class="eyebrow">TRAINING RUN</span><h1>Learning, explained</h1><p id="metrics-freshness" class="subtle">Waiting for training statistics.</p></div><span id="config-source" class="mini-pill">Configuration</span></div>
+      <section class="card"><div class="card-head"><h2>Learning signals</h2><span class="subtle">Each chart has its own scale</span></div><div id="learning-metrics" class="metric-grid"></div></section>
+      <section class="card stats-section"><div class="card-head"><h2>Training pace</h2></div><div id="throughput-metrics" class="metric-grid"></div></section>
+      <section class="card stats-section"><div class="card-head"><h2>Training match results</h2></div><p class="subtle">These games include search and exploration. Counts describe training matches, not an independent skill rating.</p><div id="match-results" class="match-results"></div></section>
+      <section class="card stats-section"><div class="card-head"><h2>Hyperparameters & resources</h2></div><p id="configuration-help" class="subtle">Values are read from the running trainer or its saved checkpoint.</p><div class="table-scroll"><table class="config-table"><thead><tr><th>Setting</th><th>Value</th><th>What it controls</th></tr></thead><tbody id="hyperparameters"></tbody></table></div></section>
+    </section>
+  </main>
+  <footer class="live-footer"><span id="footer-state">Live actor feed · latest sample only</span><span id="ui-message" role="status"></span></footer>
+</body>
+</html>

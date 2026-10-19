@@ -29,6 +29,10 @@
 #include "gGame.h"
 #include "gCommandLineJumpStart.h"
 #include "gLogo.h"
+#include <iostream>
+#ifndef DEDICATED
+#include "rScreen.h"
+#endif
 
 // *****************************************************************************
 // *
@@ -42,23 +46,41 @@ bool gCommandLineJumpStartAnalyzer::DoAnalyze( tCommandLineParser & parser, int 
     if(pass > 0)
         return false;
 
+#ifndef DEDICATED
+    if ( parser.GetSwitch( "--local-game" ) )
+    {
+        _localGame = true;
+        return true;
+    }
+#endif
+
     if ( parser.GetOption( _raw, "--connect" ) )
     {
         _shouldConnect = true;
 
         return true;
     }
-    else
-    {
-        _shouldConnect = false;
-    }
-
     return false;
 }
 
 void gCommandLineJumpStartAnalyzer::DoHelp( std::ostream & s )
 {
     s << "--connect <server>[:<port>]  : connect directly to SERVER, skipping all menus. default PORT=4534\n";
+#ifndef DEDICATED
+    s << "--local-game                : start a local bot game directly; requires --hidden-window, excludes --connect\n";
+#endif
+}
+
+bool gCommandLineJumpStartAnalyzer::DoExecute()
+{
+#ifndef DEDICATED
+    if ( _localGame && ( !sr_hiddenWindow || _shouldConnect ) )
+    {
+        std::cerr << "--local-game requires --hidden-window and cannot be combined with --connect\n";
+        return false;
+    }
+#endif
+    return true;
 }
 
 void gCommandLineJumpStartAnalyzer::Connect()

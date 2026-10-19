@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import ctypes
 import hashlib
+import json
 import os
 import shutil
 import subprocess
@@ -80,10 +81,15 @@ def lib() -> ctypes.CDLL:
         sig.update({
             "sp_new": ([i32], vp), "sp_free": ([vp], None),
             "sp_config": ([vp, i32, i32, f32, f32, f32, f32, f32, f32, i32, i32, i32, i32, i32, i32, i32, i32], None),
-            "sp_set_ring": ([vp, i32, u8p, fp, u8p, fp, u8p, fp, fp, i64p, i64p, u8p, i64p, ctypes.c_int64, i64p, u8p], None),
+            "sp_set_ring": ([vp, i32, u8p, fp, u8p, fp, u8p, fp, fp, i64p, i64p, u8p, i64p, ctypes.c_int64, i64p, u8p, i64p, fp], None),
+            "sp_set_generations": ([vp, i32, i64p], None),
+            "sp_collect_recurrent": ([vp, u8p, fp, u8p, ip, ip, i32, u8p, fp, ip, u8p, fp, u8p, fp], i32),
+            "sp_feed_recurrent": ([vp, fp, fp, i32, i64p, fp], None),
             "sp_start": ([vp, i32, f32, i32, ip, ip, i32, ctypes.c_ulonglong], None),
+            "sp_place_start": ([vp, i32, i32, fp], i32),
             "sp_collect": ([vp, u8p, fp, u8p, ip, ip, i32, u8p], i32),
-            "sp_feed": ([vp, fp, fp, i32, fp], None),
+            "sp_feed": ([vp, fp, fp, i32, i64p], None),
+            "sp_watch": ([vp, i32], ctypes.c_char_p),
             "sp_game_info": ([vp, i32, fp], i32),
             "sp_stats": ([vp, ctypes.POINTER(ctypes.c_longlong)], None),
         })
@@ -170,11 +176,13 @@ RING_FIELDS = (
     ("policy", np.float32, (P.N_ACTIONS,)),
     ("has_policy", np.uint8, ()),
     ("value", np.float32, ()),
-    ("aux", np.float32, (2,)),
+    ("aux", np.float32, (3,)),  # future territory, death within horizon, credited kill and survive horizon
     ("prev", np.int64, ()),
     ("gen", np.int64, ()),
     ("ready", np.uint8, ()),
     ("future", np.int64, ()),  # ring index of the sample whose territory map is the ownership target
+    ("generation", np.int64, ()),
+    ("context", np.float32, (P.N_ACTIONS + 1,)),  # previous executed action and elapsed seconds / .05
     ("heading", np.uint8, ()),  # heading quadrant the sample's minimap and territory are drawn in
 )
 
@@ -207,6 +215,8 @@ class Ring:
         if create or self.shm is None:
             self.gen[:] = -1
             self.ready[:] = 0
+            self.generation[:] = 0
+            self.context[:] = 0
             self.counter[0] = 0
 
     @property
@@ -262,6 +272,99 @@ class Ring:
         slot = np.where(valid, slot, idx)
         return self.maps[slot]
 
+    def sequences(self, n: int, rng, burn_in: int, unroll: int, *, boundary: int = 0,
+                  generation: int | None = None):
+        """Copy current raw-observation chains; never substitute stale actor hidden states.
+
+        Missing overwritten predecessors reject a window. Only a real life boundary permits
+        left padding. Burn-in may truncate older history, while every learned step remains
+        contiguous with the prefix and has completed targets.
+        """
+        if n < 1 or burn_in < 0 or unroll < 1:
+            raise ValueError("sequence batch and unroll must be positive; burn-in cannot be negative")
+        ready = self.window()
+        ready = ready[self.gen[ready] >= boundary]
+        if generation is not None:
+            ready = ready[self.generation[ready] == generation]
+        searched = ready[self.has_policy[ready] == 1]
+        if not len(ready) or not len(searched):
+            return None
+        length = min(unroll, n)
+        windows = max(1, n // length)
+        width = burn_in + length
+        selected = []
+        for w in range(windows):
+            pool = searched if w < max(1, windows // 2) else ready
+            found = None
+            for _ in range(64):
+                end = int(self.gen[int(rng.choice(pool))])
+                chain_generation = int(self.generation[end % self.cap])
+                chain, current, born = [], end, False
+                low = max(0, self.written() - self.cap + 4096)
+                for _ in range(width + 1):
+                    slot = current % self.cap
+                    if current < low or self.gen[slot] != current:
+                        break
+                    if self.generation[slot] != chain_generation:
+                        break
+                    chain.append(current)
+                    previous = int(self.prev[slot])
+                    if previous == -1:
+                        born = True
+                        break
+                    if not 0 <= previous < current:
+                        break
+                    current = previous
+                if not born and len(chain) < width + 1:
+                    continue
+                actual = list(reversed(chain[:width]))
+                slots = np.asarray(actual, np.int64) % self.cap
+                offset = width - len(slots)
+                learn = np.arange(offset, width) >= burn_in
+                if not self.ready[slots[learn]].all() or np.any(self.gen[slots[learn]] < boundary):
+                    continue
+                if not self.has_policy[slots[learn]].any() and w < max(1, windows // 2):
+                    continue
+                predecessors = self.prev[slots].copy()
+                previous_slots = np.where(predecessors >= 0, predecessors % self.cap, slots)
+                if np.any((predecessors >= 0) & (self.gen[previous_slots] != predecessors)):
+                    continue
+                expected = self.gen[slots].copy()
+                old_expected = self.gen[previous_slots].copy()
+                maps = np.concatenate([self.maps[slots].copy(), self.maps[previous_slots].copy()], 1)
+                scalars = self.scalars[slots].copy()
+                context = self.context[slots].copy()
+                mask = self.mask[slots].copy()
+                policy, has_policy = self.policy[slots].copy(), self.has_policy[slots].copy()
+                value, aux = self.value[slots].copy(), self.aux[slots].copy()
+                own, own_ok = self.ownership(slots)
+                if not (np.array_equal(self.gen[slots], expected) and
+                        np.array_equal(self.gen[previous_slots], old_expected) and self.ready[slots[learn]].all()):
+                    continue
+                found = (offset, maps, scalars, context, mask, policy, has_policy, value, aux, own, own_ok,
+                         bool(predecessors[0] == -1))
+                break
+            if found is None:
+                return None
+            selected.append(found)
+        shape = (windows, width)
+        out = dict(maps=np.zeros((*shape, 2 * P.N_MAPS, P.GRID, P.GRID), np.uint8),
+                   scalars=np.zeros((*shape, P.N_SCALARS), np.float32), mask=np.ones((*shape, P.N_ACTIONS), bool),
+                   context=np.zeros((*shape, P.N_ACTIONS + 1), np.float32),
+                   policy=np.zeros((*shape, P.N_ACTIONS), np.float32), has_policy=np.zeros(shape, bool),
+                   value=np.zeros(shape, np.float32), aux=np.zeros((*shape, 3), np.float32),
+                   own=np.zeros((*shape, P.GRID, P.GRID), np.int64), own_ok=np.zeros(shape, bool),
+                   learn=np.zeros(shape, bool), reset=np.zeros(shape, bool))
+        for i, (offset, maps, scalars, context, masks, policy, has_policy, value, aux, own, own_ok, born) in enumerate(selected):
+            where = (i, slice(offset, None))
+            for key, data in (("maps", maps), ("scalars", scalars), ("context", context), ("policy", policy),
+                              ("has_policy", has_policy), ("value", value), ("aux", aux), ("own", own), ("own_ok", own_ok)):
+                out[key][where] = data
+            out["mask"][where] = (masks[:, None] >> np.arange(P.N_ACTIONS) & 1).astype(bool)
+            out["learn"][i, max(offset, burn_in):] = True
+            out["reset"][i, offset] = born or offset > 0
+        return out
+
     def close(self, unlink: bool = False) -> None:
         if self.shm is not None:
             for name, _, _ in RING_FIELDS:
@@ -281,8 +384,10 @@ class SelfPlay:
                  c_scale: float = 0.1, search_prob: float = 0.25, temperature: float = 1.0, gumbel: float = 1.0,
                  max_decisions: int = 6000, aux_horizon: int = 40, threads: int = 8, max_players: int = 4,
                  value_steps: int = 60, hunter_depth: int = 2, hunter_replan: int = 2, hunter_ply: int = 4,
-                 hunter_probe: int = 6):
+                 hunter_probe: int = 6, recurrent: bool = False):
         self.L = lib()
+        self.recurrent = recurrent
+        self.macro = max(1, macro)
         self.games = games
         self.h = self.L.sp_new(games)
         self.L.sp_config(self.h, sims, macro, gamma, c_visit, c_scale, search_prob, temperature, gumbel,
@@ -295,8 +400,15 @@ class SelfPlay:
         self.agents = np.zeros(cap, np.int32)
         self.game_ids = np.zeros(cap, np.int32)
         self.roots = np.zeros(cap, np.uint8)  # 1: a real decision, 0: a position inside a search
+        self.states = np.zeros((cap, 256), np.float32)
+        self.lengths = np.ones(cap, np.int32)
+        self.sequence_maps = np.zeros((cap, self.macro, 2 * P.N_MAPS, P.GRID, P.GRID), np.uint8)
+        self.sequence_scalars = np.zeros((cap, self.macro, P.N_SCALARS), np.float32)
+        self.sequence_masks = np.zeros((cap, self.macro), np.uint8)
+        self.sequence_contexts = np.zeros((cap, self.macro, P.N_ACTIONS + 1), np.float32)
         self._info = np.zeros(self.INFO, np.float32)
         self._rings = {}
+        self._pending = 0
 
     def __del__(self):
         h, self.h = getattr(self, "h", None), None
@@ -309,27 +421,73 @@ class SelfPlay:
         self.L.sp_set_ring(self.h, agent, _ptr(ring.maps, u8), _ptr(ring.scalars, f), _ptr(ring.mask, u8),
                            _ptr(ring.policy, f), _ptr(ring.has_policy, u8), _ptr(ring.value, f), _ptr(ring.aux, f),
                            _ptr(ring.prev, i64), _ptr(ring.gen, i64), _ptr(ring.ready, u8), _ptr(ring.counter, i64),
-                           ring.cap, _ptr(ring.future, i64), _ptr(ring.heading, u8))
+                           ring.cap, _ptr(ring.future, i64), _ptr(ring.heading, u8), _ptr(ring.generation, i64),
+                           _ptr(ring.context, f))
 
-    def start(self, g: int, size: float, agents, learn, rotate: int = 0, seed: int = 0) -> None:
+    def start(self, g: int, size: float, agents, learn, rotate: int = 0, seed: int = 0,
+              placements=None, generations=None) -> None:
+        poses = None
+        if placements is not None:
+            poses = np.ascontiguousarray(placements, np.float32)
+            if poses.shape != (len(agents), 4) or not np.isfinite(poses).all():
+                raise ValueError("placements must contain a finite (x, y, dx, dy) for every player")
         a = np.ascontiguousarray(agents, np.int32)
         lr = np.ascontiguousarray([1 if x else 0 for x in learn], np.int32)
         self.L.sp_start(self.h, g, size, len(a), _ptr(a, ctypes.c_int), _ptr(lr, ctypes.c_int), rotate, seed)
+        versions = np.asarray(generations if generations is not None else [0] * len(a), dtype=np.int64)
+        if versions.shape != (len(a),):
+            raise ValueError("one generation is required per player")
+        self.L.sp_set_generations(self.h, g, _ptr(np.ascontiguousarray(versions), ctypes.c_int64))
+        if poses is not None and not self.L.sp_place_start(self.h, g, len(a), _ptr(poses, ctypes.c_float)):
+            raise ValueError("spawn positions must be inside the arena, separated, and face a cardinal direction")
 
     def collect(self) -> int:
-        return int(self.L.sp_collect(self.h, _ptr(self.maps, ctypes.c_uint8), _ptr(self.scalars, ctypes.c_float),
-                                     _ptr(self.masks, ctypes.c_uint8), _ptr(self.agents, ctypes.c_int),
-                                     _ptr(self.game_ids, ctypes.c_int), len(self.masks), _ptr(self.roots, ctypes.c_uint8)))
+        self._pending = int(self.L.sp_collect_recurrent(
+            self.h, _ptr(self.maps, ctypes.c_uint8), _ptr(self.scalars, ctypes.c_float),
+            _ptr(self.masks, ctypes.c_uint8), _ptr(self.agents, ctypes.c_int), _ptr(self.game_ids, ctypes.c_int),
+            len(self.masks), _ptr(self.roots, ctypes.c_uint8), _ptr(self.states, ctypes.c_float),
+            _ptr(self.lengths, ctypes.c_int), _ptr(self.sequence_maps, ctypes.c_uint8),
+            _ptr(self.sequence_scalars, ctypes.c_float), _ptr(self.sequence_masks, ctypes.c_uint8),
+            _ptr(self.sequence_contexts, ctypes.c_float)))
+        return self._pending
 
-    def feed(self, logits: np.ndarray, values: np.ndarray, boots: np.ndarray | None = None) -> None:
-        """The network's answers to the last collect(). BOOTS: the values the samples' n-step targets
-        are built from, if not VALUES (during the warm start the old network steers, the new one values);
-        NaN where a decision has none (targets then reach a little further, to the next one that has)."""
+    def feed(self, logits: np.ndarray, values: np.ndarray, *, policy_updates: np.ndarray | None = None,
+             next_states: np.ndarray | None = None) -> None:
+        """Supply six-action policies and values for the last collect().
+
+        Values guide search and form the ordinary n-step replay targets. Legal moves come from
+        the simulator's action mask; logits do not change the policy's action capabilities.
+        """
         lg = np.ascontiguousarray(logits, np.float32)
         v = np.ascontiguousarray(values, np.float32)
-        b = None if boots is None else np.ascontiguousarray(boots, np.float32)
-        self.L.sp_feed(self.h, _ptr(lg, ctypes.c_float), _ptr(v, ctypes.c_float), len(v),
-                       None if b is None else _ptr(b, ctypes.c_float))
+        updates = None if policy_updates is None else np.ascontiguousarray(policy_updates, np.int64)
+        if v.shape != (self._pending,):
+            raise ValueError(f"values must have shape ({self._pending},), got {v.shape}")
+        if lg.shape != (self._pending, P.N_ACTIONS):
+            raise ValueError(f"logits must have shape ({self._pending}, {P.N_ACTIONS}), got {lg.shape}")
+        if not np.isfinite(lg).all() or not np.isfinite(v).all():
+            raise ValueError("logits and values must be finite")
+        if updates is not None and updates.shape != v.shape:
+            raise ValueError(f"policy_updates must have shape {v.shape}, got {updates.shape}")
+        if self.recurrent and next_states is None:
+            raise ValueError("recurrent self-play requires returned hidden states")
+        states = None if next_states is None else np.ascontiguousarray(next_states, np.float32)
+        if states is not None and (states.shape != (self._pending, 256) or not np.isfinite(states).all()):
+            raise ValueError("next_states must be finite [requests, 256] values")
+        self.L.sp_feed_recurrent(self.h, _ptr(lg, ctypes.c_float), _ptr(v, ctypes.c_float), len(v),
+                                None if updates is None else _ptr(updates, ctypes.c_int64),
+                                None if states is None else _ptr(states, ctypes.c_float))
+        self._pending = 0
+
+    def watch(self, g: int) -> dict:
+        """A read-only snapshot of arena G, including the last moves actually executed.
+
+        Call from the actor's thread between collect/feed calls. No physics, search, replay
+        or RNG is advanced. In-progress lookahead never replaces the actual world shown.
+        """
+        if not 0 <= g < self.games:
+            raise ValueError(f"arena must be between 0 and {self.games - 1}")
+        return json.loads(self.L.sp_watch(self.h, g))
 
     def info(self, g: int) -> dict | None:
         """The result of round G if it is over, else None."""

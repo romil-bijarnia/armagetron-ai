@@ -1,9 +1,8 @@
-"""Live btop-style terminal dashboard for a training run.
+"""Live training activity and recorded learning results in a full-screen terminal view.
 
-    ./trainctl watch            (or: uv run arma-dash)
+    uv run arma-dash
 
-Everything shown comes from the run itself (runs/<run>/metrics.jsonl, its checkpoints and its saved
-past versions) and redraws every two seconds. Ctrl-C closes the dashboard; training keeps running.
+Reads progress.json, metrics.jsonl and V4 checkpoints. Ctrl-C closes the view; training continues.
 """
 
 from __future__ import annotations
@@ -11,9 +10,10 @@ from __future__ import annotations
 import argparse
 import json
 import math
-import os
+import shlex
 import subprocess
 import time
+from dataclasses import dataclass
 from pathlib import Path
 
 from rich import box
@@ -24,34 +24,28 @@ from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
 
+from .progress_state import process_started, warmup_state
+
 PROJECT = Path(__file__).resolve().parent.parent
 DECISIONS_PER_SECOND = 20  # the engine asks for a move every 0.05 s of game time
-TRAINCTL = str(PROJECT / "trainctl").replace(str(Path.home()), "~", 1)
+HEARTBEAT_TIMEOUT = 30
 
 # braille cells are 2 dots wide and 4 high; bit for (row, column) inside a cell
 _DOT = ((0x01, 0x08), (0x02, 0x10), (0x04, 0x20), (0x40, 0x80))
 
-# btop-like palette: each gradient runs from near the axis to far from it
-GRAD = {
-    "teal": ["#0d3b45", "#137a85", "#22b5b0", "#7fe8d8", "#d5fff6"],
-    "green": ["#16351a", "#246b2c", "#3aa64a", "#86dd78", "#e0ffd0"],
-    "pink": ["#3a1530", "#7a2766", "#c2449e", "#ef8fd0", "#ffd9f2"],
-    "blue": ["#14254a", "#21468c", "#3b78d4", "#86b4ff", "#dbe9ff"],
-    "purple": ["#24183f", "#4b3290", "#7d5bd6", "#b9a1ff", "#ece4ff"],
-}
-BORDER = {"head": "#5f87af", "survival": "#2fb9b0", "bot": "#d1589f", "self": "#5fbf5f",
-          "learn": "#6f9de8", "speed": "#9b7be6", "arenas": "#b0b0b0", "updates": "#8a8a8a"}
-SUPER = "⁰¹²³⁴⁵⁶⁷⁸⁹"
+ACCENT = "#8aa8c7"
+DIM = "#8b949e"
+BORDER = "#414b57"
+WARNING = "#d3b775"
+BLUE = ["#526b83", ACCENT]
+NEUTRAL = ["#555e68", "#a0a9b2"]
 
-ARENAS = {  # key in metrics -> (name, opponents, even-share baseline)
-    "vs_ai_small": ("best bot · small", "1 built-in bot", 0.5),
-    "vs_ai_std": ("best bot · full-size", "1 built-in bot", 0.5),
-    "mixed_ffa": ("4-player with bots", "2 bots, 1 self", 0.25),
-    "vs_ai_ffa": ("4-player vs 3 bots", "3 built-in bots", 0.25),
-    "duel_small": ("duel · small", "self / past self", 0.5),
-    "duel_mid": ("duel · medium", "self / past self", 0.5),
-    "duel_std": ("duel · full-size", "self / past self", 0.5),
-    "ffa4": ("4-player", "self / past selves", 0.25),
+ARENAS = {
+    "duel_-3": "duel · size -3",
+    "duel_-1.5": "duel · size -1.5",
+    "duel_0": "duel · size 0",
+    "ffa4_-1": "4-player · size -1",
+    "ffa4_0": "4-player · size 0",
 }
 
 
@@ -86,16 +80,17 @@ def resample(values: list[float | None], n: int) -> list[float | None]:
 
 
 class AreaGraph:
-    """Filled braille area graph. With a second series it mirrors btop's network panel: the first
-    series grows up from the middle line, the second grows down from it."""
+    """Recorded values on a shared time axis; paired series use separate upper/lower scales."""
 
     def __init__(self, up: list[float | None], up_grad: list[str], down: list[float | None] | None = None,
                  down_grad: list[str] | None = None, hi: float | None = None, down_hi: float | None = None,
-                 baseline: float | None = None, down_baseline: float | None = None, fmt: str = "{:.0f}"):
+                 baseline: float | None = None, down_baseline: float | None = None, fmt: str = "{:.0f}",
+                 lo: float = 0):
         self.up, self.up_grad, self.down, self.down_grad = up, up_grad, down, down_grad
         self.hi, self.down_hi = hi, down_hi
         self.baseline, self.down_baseline = baseline, down_baseline
         self.fmt = fmt
+        self.lo = lo
 
     def __rich_console__(self, console: Console, options: ConsoleOptions) -> RenderResult:
         yield from self.render(options.max_width, options.height or 6)
@@ -145,13 +140,39 @@ class AreaGraph:
         return lines
 
     def render(self, width: int, height: int) -> list[Text]:
+        if width <= 0 or height <= 0:
+            return []
+        if not any(v is not None and math.isfinite(v) for v in self.up + (self.down or [])):
+            return [Text("No data yet" if r == height // 2 else "", style="#6c6c6c") for r in range(height)]
         mirrored = self.down is not None
         hi_up = self._top(self.up, self.hi)
         hi_dn = self._top(self.down, self.down_hi) if mirrored else 0.0
         labels = [self.fmt.format(hi_up), self.fmt.format(0)] + ([self.fmt.format(hi_dn)] if mirrored else [])
         gutter = max(len(s) for s in labels) + 1
-        cols = max(width - gutter, 4)
-        if not mirrored:
+        cols = max(width - gutter, 1)
+        if not mirrored and self.lo < 0:
+            # Signed learning statistics need an actual zero axis: a negative explained
+            # variance must remain visible, rather than becoming a misleading zero.
+            labels = [self.fmt.format(hi_up), self.fmt.format(0), self.fmt.format(self.lo)]
+            gutter = max(len(s) for s in labels) + 1
+            cols = max(width - gutter, 1)
+            W, H = cols * 2, max(height * 4, 1)
+            scale = max(hi_up - self.lo, 1e-9)
+            dot = lambda v: min(max(round((hi_up - v) / scale * (H - 1)), 0), H - 1)
+            zero = dot(0)
+            cells = [[0] * cols for _ in range(height)]
+            for x in range(0, W, 4):
+                cells[zero // 4][x // 2] |= _DOT[zero % 4][x % 2]
+            for x, v in enumerate(resample(self.up, W)):
+                if v is None:
+                    continue
+                y = dot(v)
+                for d in range(min(y, zero), max(y, zero) + 1):
+                    cells[d // 4][x // 2] |= _DOT[d % 4][x % 2]
+            body = [Text("".join(chr(0x2800 + bits) if bits else " " for bits in row),
+                         style=lerp_hex(self.up_grad, 0.65), no_wrap=True) for row in cells]
+            marks = {zero // 4: labels[1], 0: labels[0], height - 1: labels[2]}
+        elif not mirrored:
             body = self._half(self.up, self.up_grad, hi_up, self.baseline, height, cols, True)
             marks = {0: labels[0], height - 1: labels[1]}
         else:
@@ -164,55 +185,9 @@ class AreaGraph:
         for r, line in enumerate(body[:height]):
             row = Text(marks.get(r, "").rjust(gutter - 1) + " ", style="#6c6c6c", no_wrap=True)
             row.append_text(line)
+            row.truncate(width)
             out.append(row)
         return out
-
-
-def meter(value: float | None, width: int, grad: list[str], baseline: float | None = None) -> Text:
-    """btop-style bar of ■ cells; ▪ marks the even-share point."""
-    t = Text(no_wrap=True)
-    n = 0 if value is None else round(min(max(value, 0.0), 1.0) * width)
-    mark = None if baseline is None else min(round(baseline * width), width - 1)
-    for i in range(width):
-        if i < n:
-            t.append("■", style=lerp_hex(grad, (i + 0.5) / width))
-        elif i == mark:
-            t.append("▪", style="#8a8a8a")
-        else:
-            t.append("■", style="#3a3a3a")
-    return t
-
-
-def pct(v: float | None) -> str:
-    return "–" if v is None else f"{100 * v:.0f}%"
-
-
-def ago(seconds: float) -> str:
-    if seconds < 90:
-        return f"{seconds:.0f} s ago"
-    if seconds < 5400:
-        return f"{seconds / 60:.0f} min ago"
-    if seconds < 172800:
-        return f"{seconds / 3600:.1f} h ago"
-    return f"{seconds / 86400:.0f} days ago"
-
-
-def trend(values: list[float | None], window: int = 10) -> float | None:
-    vals = [v for v in values if v is not None]
-    window = min(window, len(vals) // 2)
-    if window < 2:
-        return None
-    return sum(vals[-window:]) / window - sum(vals[-2 * window:-window]) / window
-
-
-def arrow(delta: float | None, scale: float) -> Text:
-    if delta is None:
-        return Text(" ")
-    if delta > scale:
-        return Text("▲", style="#5fd75f")
-    if delta < -scale:
-        return Text("▼", style="#ff5f5f")
-    return Text("•", style="#8a8a8a")
 
 
 def read_metrics(path: Path, state: dict) -> list[dict]:
@@ -234,235 +209,409 @@ def read_metrics(path: Path, state: dict) -> list[dict]:
     return [by_update[u] for u in sorted(by_update)]
 
 
+def read_progress(path: Path) -> dict:
+    """A trainer atomically replaces this heartbeat, including before its first update."""
+    try:
+        progress = json.loads(path.read_text())
+        return progress if isinstance(progress, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def _processes() -> dict[int, str]:
+    """One process snapshot per frame; zombie/reused PID files are not training evidence."""
+    try:
+        result = subprocess.run(["ps", "-axww", "-o", "pid=,stat=,command="], capture_output=True,
+                                text=True, timeout=2, check=False)
+    except (OSError, subprocess.TimeoutExpired):
+        return {}
+    found = {}
+    for line in result.stdout.splitlines():
+        parts = line.strip().split(None, 2)
+        if len(parts) == 3 and parts[0].isdigit() and not parts[1].startswith("Z"):
+            found[int(parts[0])] = parts[2]
+    return found
+
+
+def _process_role(command: str, run_dir: Path, *, heartbeat_pid: bool = False) -> str | None:
+    try:
+        args = shlex.split(command)
+    except ValueError:
+        return None
+    names = {Path(a).name for a in args}
+    teacher = "arma-teach" in names or "arma_ai.teach" in args
+    imitation = bool({"imitate", "arma-imitate"} & names) or "arma_ai.imitate" in args
+    supervised = "trainctl" in names and "_supervise" in args
+    if not (teacher or imitation or supervised):
+        return None
+    # A fresh heartbeat is written by this run's trainer and identifies its exact PID.
+    # Other processes must also name this run, not merely be trainers somewhere else.
+    if not heartbeat_pid:
+        run = "runs/blacklight"
+        for i, arg in enumerate(args):
+            if arg == "--run" and i + 1 < len(args):
+                run = args[i + 1]
+            elif arg.startswith("--run="):
+                run = arg.split("=", 1)[1]
+        if (PROJECT / run).resolve() != run_dir.resolve():
+            return None
+    return "trainer" if (teacher or imitation) and Path(args[0]).name != "uv" else "supervisor"
+
+
+def _imitation_process(command: str) -> bool:
+    try:
+        args = shlex.split(command)
+    except ValueError:
+        return False
+    return bool({"imitate", "arma-imitate"} & {Path(a).name for a in args}) or "arma_ai.imitate" in args
+
+
+@dataclass(frozen=True)
+class TrainingStatus:
+    label: str
+    detail: str
+    running: bool = False
+    fresh: bool = False
+    method: str | None = None
+
+
+def training_status(run_dir: Path, progress: dict, recs: list[dict]) -> TrainingStatus:
+    processes = _processes()
+    pid = progress.get("pid")
+    heartbeat_command = processes.get(pid, "") if isinstance(pid, int) else ""
+    recorded_run = progress.get("run")
+    same_run = not recorded_run or Path(recorded_run).resolve() == run_dir.resolve()
+    heartbeat_live = same_run and _process_role(heartbeat_command, run_dir, heartbeat_pid=True) == "trainer"
+    heartbeat_time = progress.get("time", 0)
+    age = time.time() - heartbeat_time if isinstance(heartbeat_time, (int, float)) else math.inf
+    fresh = heartbeat_live and -5 <= age <= HEARTBEAT_TIMEOUT
+    phase = progress.get("phase")
+    method = "imitate" if heartbeat_live and _imitation_process(heartbeat_command) else progress.get("trainer")
+    if heartbeat_live:
+        if phase in ("stopped", "failed"):
+            return TrainingStatus(phase.upper(), "Trainer has finished; showing its last recorded progress.", method=method)
+        if not fresh:
+            return TrainingStatus("STALE", f"Trainer process exists; heartbeat {ago(max(age, 0))}.", method=method)
+        if method == "imitate":
+            labels = {"collecting": "COLLECTING", "learning": "IMITATING", "validating": "VALIDATING",
+                      "starting": "STARTING", "stopping": "SAVING"}
+            detail = {"collecting": "Recording native teacher decisions.", "learning": "Learning the teacher's actions.",
+                      "validating": "Checking held-out teacher lives.", "stopping": "Saving the current V4 checkpoint."}
+            return TrainingStatus(labels.get(phase, "IMITATING"), detail.get(phase, "Imitation heartbeat is live."),
+                                  True, True, method)
+        labels = {"starting": "STARTING", "warming_up": "WARMING UP", "learning": "TRAINING",
+                  "stopping": "SAVING"}
+        detail = {"starting": "Loading the trainer and preparing self-play.",
+                  "warming_up": "Collecting replay and completed search targets before learning.",
+                  "learning": "Learning from self-play and search targets.",
+                  "stopping": "Finishing training and saving the checkpoint."}.get(phase, "Trainer heartbeat is live.")
+        return TrainingStatus(labels.get(phase, "TRAINING"), detail, True, True, method)
+    roles = {_process_role(command, run_dir) for command in processes.values()}
+    trainers = [command for command in processes.values() if _process_role(command, run_dir) == "trainer"]
+    if trainers:
+        method = "imitate" if any(_imitation_process(command) for command in trainers) else "teach"
+    if "trainer" in roles:
+        if progress:
+            return TrainingStatus("STARTING", "Trainer process is live; waiting for its current heartbeat.", True, method=method)
+        if method == "imitate":
+            return TrainingStatus("STARTING", "Imitation is starting; waiting for its first heartbeat.", True, method=method)
+        return TrainingStatus("TRAINING", "Waiting for first metrics." if not recs else
+                              "Trainer process is live; showing its logged updates.", True, method=method)
+    if "supervisor" in roles:
+        return TrainingStatus("STARTING", "Supervisor is live; waiting for the trainer.", method=method)
+    if phase == "failed":
+        return TrainingStatus("FAILED", "Trainer stopped after an error; see train.log.", method=method)
+    return TrainingStatus("STOPPED", "No live trainer for this run." +
+                          (" Showing recorded results." if recs or progress else " No training data yet."), method=method)
+
+
 def is_training(run_dir: Path) -> bool:
-    pidfile = run_dir / "trainctl.pid"
-    if pidfile.exists():
-        try:
-            os.kill(int(pidfile.read_text().strip()), 0)
-            return True
-        except (ValueError, OSError):
-            pass
-    return bool(subprocess.run(["pgrep", "-f", "bin/arma-train"], capture_output=True, text=True).stdout.strip())
+    return training_status(run_dir, read_progress(run_dir / "progress.json"), []).running
 
 
-def trained_hours(recs: list[dict]) -> float:
-    total = 0.0
-    for a, b in zip(recs, recs[1:]):
-        gap = b.get("time", 0) - a.get("time", 0)
-        if 0 < gap < 600:  # longer gaps are pauses between sessions
-            total += gap
-    return total / 3600
+def policy_focus(rec: dict, run_dir: Path, progress: dict | None = None) -> float | None:
+    """Entropy normalized over the six controls; this is not a strength score."""
+    if "ent" not in rec:
+        return None
+    return min(max(1 - rec["ent"] / math.log(6), 0.0), 1.0)
 
 
-def duel(rec: dict) -> float | None:
-    vals = [rec[k] for k in ("win_duel_small", "win_duel_mid", "win_duel_std") if k in rec]
-    return sum(vals) / len(vals) if vals else None
+def _line(value: str, style: str = DIM) -> Text:
+    return Text(value, style=style, no_wrap=True, overflow="ellipsis")
 
 
-def box_panel(num: int, title: str, body, color: str, note: str = "", extra: str = "") -> Panel:
-    t = Text()
-    t.append(SUPER[num], style="bold #ffffff")
-    t.append(title, style=f"bold {color}")
-    if extra:
-        t.append(f"  {extra}", style="bold #e4e4e4")
-    sub = Text(note, style="#9e9e9e") if note else None
-    return Panel(body, title=t, title_align="left", subtitle=sub, subtitle_align="right",
-                 box=box.ROUNDED, border_style=color, padding=(0, 1))
+def _finite(value) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
 
 
-def side(rows: list[tuple[str, Text | str]], note: str = "") -> Group:
-    """Stats column beside a graph: label/value rows, then a dim one-line note."""
-    g = Table.grid(padding=(0, 1))
-    g.add_column(style="#9e9e9e", no_wrap=True)
-    g.add_column(no_wrap=True, justify="right")
-    for k, v in rows:
-        g.add_row(k, v if isinstance(v, Text) else Text(v, style="bold #e4e4e4"))
-    return Group(g, Text(note, style="#6c6c6c", no_wrap=True, overflow="ellipsis")) if note else Group(g)
+def _number(value, fmt: str = ",.0f") -> str:
+    return format(value, fmt) if _finite(value) else "not reported"
 
 
-def labelled_meter(value: float | None, grad: list[str], baseline: float | None = None, width: int = 10) -> Text:
-    return Text.assemble(meter(value, width, grad, baseline), " ", Text(f"{pct(value):>4}", style="bold #e4e4e4"))
+def _duration(seconds: float) -> str:
+    seconds = max(0, int(seconds))
+    hours, remaining = divmod(seconds, 3600)
+    minutes, seconds = divmod(remaining, 60)
+    return f"{hours}:{minutes:02}:{seconds:02}" if hours else f"{minutes}:{seconds:02}"
 
 
-def graph_with_side(graph: AreaGraph, stats: Group, side_width: int, show_side: bool) -> Layout:
-    lay = Layout()
-    if show_side:
-        lay.split_row(Layout(graph, ratio=1), Layout(stats, size=side_width))
+def ago(seconds: float) -> str:
+    seconds = max(0, seconds)
+    if seconds < 60:
+        return f"{seconds:.0f}s ago"
+    if seconds < 3600:
+        return f"{int(seconds // 60)}m {int(seconds % 60):02}s ago"
+    return f"{int(seconds // 3600)}h {int(seconds % 3600 // 60):02}m ago"
+
+
+def _percent(fraction: float | None) -> str:
+    if fraction is None:
+        return "unavailable"
+    # Rounding an incomplete gate to 100% hides the last requirement.
+    return "99%" if .995 <= fraction < 1 else f"{min(max(fraction, 0), 1):.0%}"
+
+
+def _bar(label: str, fraction: float | None, detail: str, width: int, *, due: bool = False) -> Text:
+    prefix = f"{label:<18} "
+    suffix = f" {_percent(fraction):>5}  {detail}" + (" due" if due else "")
+    size = min(28, max(3, width - len(prefix) - len(suffix)))
+    if fraction is None:
+        return _line(f"{label}: {detail or 'counts unavailable'}")
+    filled = round(min(max(fraction, 0), 1) * size)
+    row = Text.assemble((prefix, ACCENT), ("━" * filled, WARNING if due else ACCENT),
+                        ("━" * (size - filled), BORDER), (suffix, DIM))
+    row.no_wrap, row.overflow = True, "ellipsis"
+    return row
+
+
+def _panel(title: str, body, note: str = "") -> Panel:
+    return Panel(body, title=_line(title, ACCENT), title_align="left", box=box.ROUNDED,
+                 border_style=BORDER, padding=(0, 1),
+                 subtitle=_line(note) if note else None, subtitle_align="left")
+
+
+def _eligible(records: list[dict], progress: dict) -> list[dict]:
+    if "update" not in progress:
+        return records
+    return [row for row in records if row.get("update", 0) <= progress["update"]
+            and row.get("time", 0) <= progress.get("time", math.inf) + 1]
+
+
+def _activity(progress: dict, current: dict, status: TrainingStatus, width: int,
+              now: float, started: float | None, saved_at: float | None) -> tuple[Panel, int]:
+    cfg = progress.get("config", {})
+    live = status.running and status.fresh
+    update = current.get("update")
+    title = "Live activity" if live else "Recorded activity"
+    lead = f"Update {update:,}" if _finite(update) else "Update not reported"
+    lead += (f" · {_number(progress.get('sps'))} decisions/s" if live else " · no live rate")
+    if live and started is not None:
+        lead += f" · elapsed {_duration(now - started)}"
+    lines = [_line(lead, "bold")]
+    counters = [f"{current[key]:,} {label}" for key, label in
+                (("steps", "decisions"), ("trained", "trained"), ("games", "rounds")) if _finite(current.get(key))]
+    if counters:
+        lines.append(_line(" · ".join(counters)))
+    warming = progress.get("phase") in ("starting", "warming_up")
+    inner_width = width - 4
+    if warming:
+        state = warmup_state(progress)
+        lines.append(_bar("Warmup readiness", state["fraction"], "", inner_width))
+        for gate in state["gates"]:
+            detail = (f"{gate['current']:,}/{gate['target']:,}" if gate["current"] is not None and gate["target"] is not None
+                      else "counts unavailable")
+            lines.append(_bar(gate["label"], gate["fraction"], detail, inner_width))
+        waiting = "Waiting for " + ", ".join(label.lower() for label in state["waiting"])
+        lines.append(_line(waiting if not state["complete"] else "All targets ready; awaiting first learner update.",
+                           DIM if live else WARNING))
+    elif live and progress.get("phase") == "learning":
+        ready, capacity = progress.get("ready_samples"), cfg.get("ring")
+        if _finite(ready) and _finite(capacity) and capacity > 4096:
+            lines.append(_bar("Replay ready", ready / (capacity - 4096), f"{ready:,}/{capacity - 4096:,}", inner_width))
+        every = cfg.get("log_every")
+        if _finite(update) and isinstance(every, int) and every > 0:
+            lines.append(_bar("Next report", update % every / every, f"{update % every}/{every} updates", inner_width))
+        interval = cfg.get("save_seconds")
+        if saved_at is not None and _finite(interval) and interval > 0:
+            elapsed = max(0, now - saved_at)
+            lines.append(_bar("Next save", elapsed / interval, f"{_duration(elapsed)}/{_duration(interval)}",
+                              inner_width, due=elapsed >= interval))
+        target = progress.get("max_updates", cfg.get("max_updates"))
+        if _finite(update) and _finite(target) and target > 0:
+            lines.append(_bar("Update target", update / target, f"{update:,}/{target:,}", inner_width))
+        elif target == 0:
+            lines.append(_line("Training continues without a fixed update limit."))
+    if not live or not current:
+        lines.append(_line(status.detail, WARNING if status.label in ("STALE", "FAILED") else DIM))
+    return _panel(title, Group(*lines)), len(lines) + 2
+
+
+def _scores(last: dict, *, bars: bool = False) -> Table:
+    table = Table.grid(padding=(0, 2), expand=True)
+    table.add_column(ratio=2, no_wrap=True, overflow="ellipsis")
+    if bars:
+        table.add_column(width=12, no_wrap=True)
+    for _ in range(3):
+        table.add_column(justify="right", no_wrap=True)
+    header = ["Opponent"] + ([""] if bars else []) + ["Score", "W / D / L", "Rounds"]
+    table.add_row(*[_line(value) for value in header])
+    for key, name in (("win_vs_hunter", "Space fighter"), ("win_vs_past", "V4 snapshots"),
+                      ("win_exploiter", "Exploiter vs target")):
+        counts = last.get("match_results", {}).get(key)
+        score = counts.get("score", last.get(key)) if isinstance(counts, dict) else last.get(key)
+        if isinstance(counts, dict) and counts.get("games", 0) > 0:
+            score = (counts["wins"] + .5 * counts["draws"]) / counts["games"]
+        cells = [_line(name, "default")]
+        if bars:
+            if _finite(score):
+                filled = round(min(max(score, 0), 1) * 12)
+                cells.append(Text.assemble(("━" * filled, ACCENT), ("━" * (12 - filled), BORDER)))
+            else:
+                cells.append(_line(""))
+        cells.append(_line(f"{score:.1%}" if _finite(score) else "—", "default"))
+        if isinstance(counts, dict):
+            cells.extend([_line(f"{counts['wins']} / {counts['draws']} / {counts['losses']}"),
+                          _line(f"n={counts['games']}")])
+        else:
+            cells.extend([_line("count unavailable" if _finite(score) else "—"), _line("—")])
+        table.add_row(*cells)
+    return table
+
+
+def _chart(title: str, graph: AreaGraph, note: str = "") -> Panel:
+    return _panel(title, graph, note)
+
+
+def _arenas(last: dict) -> Panel:
+    table = Table.grid(padding=(0, 2), expand=True)
+    table.add_column(no_wrap=True, ratio=1)
+    table.add_column(no_wrap=True, justify="right")
+    table.add_row(_line("Self-play arena"), _line("Mean round duration"))
+    for key, name in ARENAS.items():
+        value = last.get(f"len_{key}")
+        table.add_row(_line(name, "default"), _line(f"{value / DECISIONS_PER_SECOND:.1f} s" if _finite(value) else "—"))
+    return _panel("Arena reports", table, "Game time per completed round")
+
+
+def _reports(records: list[dict], rows: int, now: float) -> Panel:
+    table = Table.grid(padding=(0, 2), expand=True)
+    for _ in range(6):
+        table.add_column(no_wrap=True, justify="right")
+    table.add_row(*[_line(value) for value in ("Update", "Age", "Policy loss", "Value loss", "Value EV", "Decisions/s")])
+    for row in reversed(records[-rows:]):
+        table.add_row(_line(f"{row['update']:,}", "default"), _line(ago(now - row.get("time", now))),
+                      _line(_number(row.get("pg"), ".4f")), _line(_number(row.get("vf"), ".4f")),
+                      _line(_number(row.get("value_explained"), ".3f")), _line(_number(row.get("sps"))))
+    return _panel("Recent saved reports", table)
+
+
+def build(run_dir: Path, recs: list[dict], width: int = 160, height: int = 48,
+          progress: dict | None = None) -> Layout:
+    progress = read_progress(run_dir / "progress.json") if progress is None else progress
+    status = training_status(run_dir, progress, recs)
+    now = time.time()
+    started = progress.get("started_at")
+    if not _finite(started):
+        started = process_started(progress.get("pid")) if status.running else None
+    if width < 76 or height < 22 or (status.method or progress.get("trainer")) == "imitate":
+        from .cli_progress import build as compact_view
+        return Layout(compact_view(run_dir, progress, recs, status, width=width, height=height,
+                                   now=now, started=started))
+    history = _eligible(recs, progress)
+    last = history[-1] if history else {}
+    current = progress or last
+    cfg = progress.get("config", {})
+    try:
+        saved_at = (run_dir / "latest.pt").stat().st_mtime
+    except OSError:
+        saved_at = None
+    live = status.running and status.fresh
+    wide = width >= 130 and height >= 38
+    header = Table.grid(expand=True, padding=(0, 1))
+    header.add_column(ratio=1, no_wrap=True, overflow="ellipsis")
+    header.add_column(justify="right", no_wrap=True)
+    color = ACCENT if live else WARNING if status.label in ("STARTING", "STALE", "FAILED") else DIM
+    header.add_row(_line(f"armagetron / {run_dir.name}", "bold"), _line(status.label, color))
+    settings = [str(progress.get("mode", cfg.get("mode", ""))), str(cfg.get("device", "")).upper()]
+    if _finite(cfg.get("games")):
+        settings.append(f"{cfg['games']} arenas")
+    if _finite(cfg.get("combat_prob")):
+        settings.append(f"combat starts {cfg['combat_prob']:.0%}")
+    saved = ago(now - saved_at) if saved_at is not None else "not saved"
+    if width < 100 and saved_at is not None:
+        saved = saved.removesuffix(" ago").replace(" ", "")
+    header.add_row(_line(" · ".join(value for value in settings if value)),
+                   _line(f"Checkpoint {saved}"))
+    activity, activity_height = _activity(progress, current, status, width, now, started, saved_at)
+    if last:
+        if started is not None and last.get("time", 0) < started:
+            session = "previous session"
+        else:
+            session = "current session" if live and started is not None else "session unknown" if live else "recorded"
+        report_label = f"Saved report u{last['update']:,} · {session} · {ago(now - last.get('time', now))}"
+        if width >= 100:
+            report_label += f" · history u{history[0]['update']:,}–u{last['update']:,}"
     else:
-        lay.update(graph)
-    return lay
-
-
-def win_text(v: float | None, even: float) -> Text:
-    if v is None:
-        return Text("–", style="#6c6c6c")
-    c = "#5fd75f" if v > even + 0.05 else ("#ff5f5f" if v < even - 0.05 else "#e4e4e4")
-    return Text(f"{100 * v:.0f}%", style=c)
-
-
-def build(run_dir: Path, recs: list[dict], width: int = 160, height: int = 48) -> Layout:
-    running = is_training(run_dir)
-    last = recs[-1] if recs else {}
-    latest = run_dir / "latest.pt"
-    pool = sorted((run_dir / "pool").glob("u*.pt"))
-    wide = width >= 130 and height >= 38  # full btop layout with speed, arenas and updates
-
-    # ---- header bar
-    head = Table.grid(expand=True)
-    head.add_column(no_wrap=True, ratio=1, overflow="ellipsis")
-    head.add_column(no_wrap=True, justify="right")
-    left = Text(no_wrap=True, overflow="ellipsis")
-    left.append(" armagetron-ai ", style="bold #000000 on #5f87af")
-    left.append("  ")
-    left.append("● TRAINING" if running else "■ STOPPED", style="bold #5fd75f" if running else "bold #ff5f5f")
-    compact = width < 100
-    if not compact:
-        left.append(f"   run {run_dir.name}", style="#9e9e9e")
-    if recs:
-        left.append(f"   update {last['update']}", style="bold #e4e4e4")
-        left.append(f"   {last['steps'] / 1e6:.2f} M {'dec' if compact else 'decisions'}", style="#e4e4e4")
-        left.append(f"   {trained_hours(recs):.1f} h{'' if compact else ' trained'}", style="#e4e4e4")
-    right = Text(no_wrap=True)
-    right.append(f"saved {ago(time.time() - latest.stat().st_mtime)}" if latest.exists() else "no checkpoint yet",
-                 style="#5fafd7")
-    if width >= 100:
-        right.append(f"   {len(pool)} past versions", style="#9e9e9e")
-    right.append(f"   {time.strftime('%H:%M:%S')} ", style="#6c6c6c")
-    head.add_row(left, right)
-    header = Layout(Panel(head, box=box.ROUNDED, border_style=BORDER["head"], padding=(0, 0)), size=3)
-
-    # ---- series
-    survival = [r.get("ep_len", 0) / DECISIONS_PER_SECOND for r in recs]
-    bot_small = [r.get("win_vs_ai_small") for r in recs]
-    bot_full = [r.get("win_vs_ai_std") for r in recs]
-    duels = [duel(r) for r in recs]
-    ffa = [r.get("win_ffa4") for r in recs]
-    decisive = [1 - r["ent"] / math.log(4) if "ent" in r else None for r in recs]
-    predict = [max(r["value_explained"], 0) if "value_explained" in r else None for r in recs]
-    speed = [r.get("sps") for r in recs]
-    now = lambda xs: xs[-1] if xs else None  # noqa: E731
-    span = f"updates {recs[0]['update']}–{last['update']}" if recs else "no updates yet"
-
-    surv_vals = [v for v in survival if v]
-    surv_stats = side([
-        ("now", f"{survival[-1]:.0f} s" if recs else "–"),
-        ("best", f"{max(surv_vals):.0f} s" if surv_vals else "–"),
-        ("trend", arrow(trend(survival), 1.0)),
-    ], "higher = stays alive longer")
-    bot_stats = side([
-        ("small", labelled_meter(now(bot_small), GRAD["green"], 0.5)),
-        ("full", labelled_meter(now(bot_full), GRAD["pink"], 0.5)),
-    ], "aim for 100%")
-    self_stats = side([
-        ("duels", labelled_meter(now(duels), GRAD["green"], 0.5, 8)),
-        ("4-player", labelled_meter(now(ffa), GRAD["blue"], 0.25, 8)),
-    ], "▪ = an even share")
-    learn_stats = side([
-        ("decisive", labelled_meter(now(decisive), GRAD["blue"], None, 8)),
-        ("predicts", labelled_meter(now(predict), GRAD["purple"], None, 8)),
-    ], "both rise slowly")
-    sp_vals = [v for v in speed if v]
-    recent_sp = sp_vals[-10:]
-    speed_stats = side([
-        ("now", f"{speed[-1]:,}/s" if recs and speed[-1] else "–"),
-        ("avg", f"{sum(sp_vals) / len(sp_vals):,.0f}/s" if sp_vals else "–"),
-        ("per hour", f"{sum(recent_sp) / len(recent_sp) * 3600 / 1e6:.1f} M" if recent_sp else "–"),
-    ])
-
-    g_surv = AreaGraph(survival, GRAD["teal"], fmt="{:.0f}s")
-    g_bot = AreaGraph(bot_small, GRAD["green"], bot_full, GRAD["pink"], hi=1, down_hi=1,
-                      baseline=0.5, down_baseline=0.5, fmt="{:.0%}")
-    g_self = AreaGraph(duels, GRAD["green"], ffa, GRAD["blue"], hi=1, down_hi=1,
-                       baseline=0.5, down_baseline=0.25, fmt="{:.0%}")
-    g_learn = AreaGraph(decisive, GRAD["blue"], predict, GRAD["purple"], hi=1, down_hi=1, fmt="{:.0%}")
-    g_speed = AreaGraph(speed, GRAD["purple"], fmt="{:.0f}")
-
-    # a stats column only where the graph keeps at least 30 columns; otherwise the title carries the numbers
-    def fits(panel_width: float, side_width: int) -> bool:
-        return panel_width - 4 - side_width >= 30
-
-    w_surv, w_bot, w_row2 = (width * 0.6, width * 0.4, width / 3) if wide else (width / 2, width / 2, width / 2)
-    s_surv, s_bot = fits(w_surv, 27), fits(w_bot, 24)
-    s_self, s_learn = fits(w_row2, 24), fits(w_row2, 24)
-    p_surv = box_panel(1, "survival", graph_with_side(g_surv, surv_stats, 27, s_surv), BORDER["survival"],
-                       f"seconds per round · {span}" if s_surv else "seconds per round",
-                       "" if s_surv else (f"{survival[-1]:.0f} s" if recs else ""))
-    p_bot = box_panel(2, "vs best bot", graph_with_side(g_bot, bot_stats, 24, s_bot), BORDER["bot"],
-                      "▲ small arena  ▼ full-size", "" if s_bot else f"{pct(now(bot_small))} / {pct(now(bot_full))}")
-    p_self = box_panel(3, "vs past self", graph_with_side(g_self, self_stats, 24, s_self), BORDER["self"],
-                       "▲ duels  ▼ 4-player", "" if s_self else f"{pct(now(duels))} / {pct(now(ffa))}")
-    p_learn = box_panel(4, "learning", graph_with_side(g_learn, learn_stats, 24, s_learn), BORDER["learn"],
-                        "▲ decisive  ▼ predicts", "" if s_learn else f"{pct(now(decisive))} / {pct(now(predict))}")
-
+        report_label = "Saved report: none yet. Charts await the first logged update."
+    report = Layout(_line(report_label), size=1)
+    heartbeat = ago(now - progress["time"]) if _finite(progress.get("time")) else "unavailable"
+    footer = Layout(_line(f"Ctrl-C closes view; trainer unaffected. · Heartbeat {heartbeat}"), size=1)
+    duration = [row.get("ep_len", math.nan) / DECISIONS_PER_SECOND for row in history]
+    explained = [row.get("value_explained") for row in history]
+    variance_low = min(-1, min((v for v in explained if _finite(v)), default=0) * 1.1)
+    round_value = f" · {last['ep_len'] / DECISIONS_PER_SECOND:.1f} s" if _finite(last.get("ep_len")) else ""
+    ev_value = f" · {last['value_explained']:.3f}" if _finite(last.get("value_explained")) else ""
+    focus = policy_focus(last, run_dir, progress)
+    p_duration = _chart("Mean round duration" + round_value, AreaGraph(duration, BLUE, fmt="{:.0f}s"),
+                        "Recorded game seconds per round")
+    p_value = _chart("Value EV" + ev_value, AreaGraph(explained, BLUE, hi=1, lo=variance_low, fmt="{:.2f}"),
+                     (f"Policy focus {focus:.0%} · " if focus is not None and width >= 100 else "") + "0 = mean prediction")
+    p_losses = _chart("Policy / value loss", AreaGraph([row.get("pg") for row in history], BLUE,
+                       [row.get("vf") for row in history], NEUTRAL, fmt="{:.3f}"), "Policy above · value below")
+    p_speed = _chart("Logged throughput", AreaGraph([row.get("sps") for row in history], BLUE),
+                     "Decisions/s in saved reports")
+    scores = _scores(last, bars=wide)
     layout = Layout()
-    if not wide:
-        top, bottom = Layout(), Layout()
-        top.split_row(Layout(p_surv), Layout(p_bot))
-        bottom.split_row(Layout(p_self), Layout(p_learn))
-        layout.split_column(
-            header, Layout(top, ratio=1), Layout(bottom, ratio=1),
-            Layout(Text(f" ctrl-c closes this · stop training: {TRAINCTL} stop", style="#6c6c6c",
-                        no_wrap=True, overflow="ellipsis"), size=1),
-        )
-        return layout
-
-    # ---- arenas: one row per arena type, like btop's process list
-    arenas = Table(box=None, expand=True, show_edge=False, pad_edge=False, header_style="bold #d0d0d0")
-    arenas.add_column("arena", no_wrap=True, ratio=3, overflow="ellipsis")
-    arenas.add_column("against", style="#9e9e9e", no_wrap=True, ratio=3, overflow="ellipsis")
-    arenas.add_column("win", justify="right", no_wrap=True, width=5)
-    arenas.add_column("", no_wrap=True, width=1)
-    arenas.add_column("", no_wrap=True, width=12)
-    for key, (name, against, even) in ARENAS.items():
-        k = f"win_{key}"
-        if k not in last:
-            continue
-        arenas.add_row(name, against, win_text(last[k], even), arrow(trend([r.get(k) for r in recs]), 0.03),
-                       meter(last[k], 12, GRAD["green"] if even == 0.5 else GRAD["blue"], even))
-
-    # ---- recent updates, newest first
-    updates = Table(box=None, expand=True, show_edge=False, pad_edge=False, header_style="bold #d0d0d0")
-    for name in ("update", "time", "decisions", "per s", "survive", "bot S", "bot F", "duels", "4p",
-                 "decisive", "kl"):
-        updates.add_column(name, justify="right", no_wrap=True)
-    third = (height - 3) // 3
-    shown = max(third - 3, 1)
-    for r in reversed(recs[-shown:]):
-        updates.add_row(
-            Text(str(r["update"]), style="bold #e4e4e4"),
-            Text(time.strftime("%H:%M", time.localtime(r.get("time", 0))), style="#9e9e9e"),
-            f"{r['steps'] / 1e6:.2f} M",
-            Text(f"{r.get('sps', 0):,}", style="#b9a1ff"),
-            Text(f"{r.get('ep_len', 0) / DECISIONS_PER_SECOND:.0f} s", style="#7fe8d8"),
-            win_text(r.get("win_vs_ai_small"), 0.5), win_text(r.get("win_vs_ai_std"), 0.5),
-            win_text(duel(r), 0.5), win_text(r.get("win_ffa4"), 0.25),
-            Text(f"{100 * (1 - r['ent'] / math.log(4)):.0f}%" if "ent" in r else "–", style="#86b4ff"),
-            Text(f"{r.get('kl', 0):.4f}", style="#9e9e9e"),
-        )
-
-    p_speed = box_panel(5, "speed", graph_with_side(g_speed, speed_stats, 20, True), BORDER["speed"],
-                        "decisions per second")
-    p_arenas = box_panel(6, "arenas", arenas, BORDER["arenas"], "rolling win rate per arena type")
-    p_updates = box_panel(7, "updates", updates, BORDER["updates"], f"ctrl-c closes this · stop: {TRAINCTL} stop")
-
-    row1, row2, row3 = Layout(), Layout(), Layout()
-    row1.split_row(Layout(p_surv, ratio=3), Layout(p_bot, ratio=2))
-    row2.split_row(Layout(p_self), Layout(p_learn), Layout(p_speed))
-    row3.split_row(Layout(p_arenas, ratio=2), Layout(p_updates, ratio=3))
-    layout.split_column(header, Layout(row1, ratio=1), Layout(row2, ratio=1), Layout(row3, ratio=1))
+    base = [Layout(header, size=2), Layout(activity, size=activity_height), report]
+    if wide:
+        matchup_body = Layout()
+        matchup_body.split_column(Layout(scores, size=4), Layout(AreaGraph(
+            [row.get("win_vs_hunter") for row in history], BLUE,
+            [row.get("win_vs_past") for row in history], NEUTRAL, hi=1, down_hi=1, fmt="{:.0%}")))
+        p_scores = _panel("Training matches", matchup_body, "Space fighter above · V4 snapshots below · draws = ½")
+        first, second, third = Layout(), Layout(), Layout()
+        first.split_row(Layout(p_scores, ratio=3), Layout(p_duration, ratio=2))
+        second.split_row(Layout(p_value), Layout(p_losses), Layout(p_speed))
+        third.split_row(Layout(_arenas(last), ratio=2), Layout(_reports(history, 7, now), ratio=3))
+        layout.split_column(*base, Layout(first, ratio=1), Layout(second, ratio=1), Layout(third, size=10), footer)
+    else:
+        charts = Layout()
+        charts.split_row(Layout(p_duration), Layout(p_value))
+        p_scores = _panel("Training matches", scores, "Observed training outcomes · draws = ½")
+        sections = [*base, Layout(p_scores, size=6), Layout(charts, ratio=1)]
+        if height >= 30:
+            extra = Layout()
+            extra.split_row(Layout(p_losses), Layout(p_speed))
+            sections.append(Layout(extra, ratio=1))
+        layout.split_column(*sections, footer)
     return layout
-
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--run", default="runs/v3")
+    ap.add_argument("--run", default="runs/blacklight")
     ap.add_argument("--once", action="store_true", help="print one frame and exit")
+    ap.add_argument("--simple", action="store_true", help="compact inline training console")
     ap.add_argument("--width", type=int, default=None)
     ap.add_argument("--height", type=int, default=None)
     args = ap.parse_args()
     run_dir = (PROJECT / args.run).resolve()
     state: dict = {}
     console = Console(width=args.width, height=args.height)
+
+    if args.simple:
+        from .cli_progress import run
+        run(run_dir, console, once=args.once)
+        return
 
     def frame() -> Layout:
         w, h = console.size

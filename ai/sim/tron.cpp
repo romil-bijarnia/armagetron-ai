@@ -312,7 +312,7 @@ unsigned World::ActionMask( int i ) const
     Cycle const & c = cycles[i];
     unsigned mask = ( 1u << ACT_STRAIGHT ) | ( 1u << ACT_BRAKE );
     if ( c.lastTime >= NextTurn( i ) )
-        mask |= ( 1u << ACT_LEFT ) | ( 1u << ACT_RIGHT );
+        mask |= ( 1u << ACT_LEFT ) | ( 1u << ACT_RIGHT ) | ( 1u << ACT_LEFT_BRAKE ) | ( 1u << ACT_RIGHT_BRAKE );
     return mask;
 }
 
@@ -363,16 +363,16 @@ void World::Act( int i, int action )
     Cycle & c = cycles[i];
     if ( !c.alive )
         return;
-    bool brake = action == ACT_BRAKE;
+    bool brake = action == ACT_BRAKE || action == ACT_LEFT_BRAKE || action == ACT_RIGHT_BRAKE;
     if ( c.braking != brake )
     {
         c.verletSpeed = c.Speed();  // AccelerationDiscontinuity
         c.lastTimestep = 0;
         c.braking = brake;
     }
-    if ( action == ACT_LEFT )
+    if ( action == ACT_LEFT || action == ACT_LEFT_BRAKE )
         DoTurn( i, -1 );
-    else if ( action == ACT_RIGHT )
+    else if ( action == ACT_RIGHT || action == ACT_RIGHT_BRAKE )
         DoTurn( i, 1 );
 }
 

@@ -10,9 +10,9 @@ The engine sends four maps and a vector of exact numbers per agent per decision:
   BFS distance, the partition a good player holds in their head when glancing at the minimap;
 * scalars: ray distances, speed, rubber, nearest enemies.
 
-v2 (`PolicyNet`): one residual tower per map; the previous frame's maps are stacked under the
-current ones so motion is visible. v1 (`PolicyNetV1`) is kept so old checkpoints and the game's
-in-engine brain stay loadable.
+The V4 fighter separates Nearby and Close, processes local geometry at 32x32, and conditions
+local features on the arena. A shared masked encoder handles the three nearest enemies. The
+heads predict six steering/brake actions, bounded outcome value, attack, territory and danger.
 """
 
 from __future__ import annotations
@@ -22,10 +22,36 @@ import math
 import torch
 import torch.nn as nn
 
-from .protocol import GRID, MAP_PLANES, N_ACTIONS, N_GLOBAL_PLANES, N_LOCAL_PLANES, N_MAPS, N_SCALARS
+from .protocol import (GRID, MAP_PLANES, N_MAPS, N_SCALARS, OBSERVATION_VERSION,
+                       OWN_SCALARS, ENEMY_EXTRA_OFFSET, ENEMY_EXTRA_FEATURES, ENEMY_FEATURES)
 
-N_AUX = 2  # territory share in 2 s, dead within 2 s
-AUX_HORIZON = 40  # decisions (2 s at 20 a second)
+MEMORY_VERSION = 1
+MEMORY_HIDDEN = 256
+MEMORY_CONTEXT = 7
+DECISION_INTERVAL = 0.05
+
+
+def recurrent_context(previous_actions, elapsed_seconds) -> torch.Tensor:
+    """Previous *executed* action (or -1 at birth) and elapsed game seconds.
+
+    Works with batch or batch/time tensors. The six action channels are one-hot;
+    the last channel measures elapsed time in nominal 50 ms decisions.
+    """
+    actions = torch.as_tensor(previous_actions)
+    elapsed = torch.as_tensor(elapsed_seconds, device=actions.device)
+    if actions.shape != elapsed.shape:
+        raise ValueError("previous actions and elapsed seconds must have identical shapes")
+    if (actions.dtype == torch.bool or actions.is_floating_point()
+            or actions.is_complex() or ((actions < -1) | (actions >= 6)).any()):
+        raise ValueError("previous executed actions must be integers from -1 to 5")
+    if elapsed.is_complex() or not torch.isfinite(elapsed).all() or (elapsed < 0).any():
+        raise ValueError("elapsed game seconds must be finite and nonnegative")
+    dtype = elapsed.dtype if elapsed.is_floating_point() else torch.float32
+    elapsed = elapsed.to(dtype)
+    one_hot = nn.functional.one_hot(actions.long().clamp_min(0), 6).to(dtype)
+    one_hot = one_hot * (actions >= 0)[..., None]
+    return torch.cat([one_hot, (elapsed / DECISION_INTERVAL)[..., None]], -1)
+
 
 def _masked(dtype) -> float:
     """The logit of a forbidden move: very negative, but representable in half precision too."""
@@ -47,65 +73,6 @@ class Unpack(nn.Module):
         return self.table[packed.long()].permute(0, 3, 1, 2).contiguous()
 
 
-# ------------------------------------------------------------------------------------------ v1
-
-class PatchTower(nn.Module):
-    def __init__(self, in_ch: int, width: int, depth: int, out_dim: int):
-        super().__init__()
-        layers = [nn.Conv2d(in_ch, width, 4, stride=4), nn.ReLU(inplace=True)]  # 16x16
-        for _ in range(depth):
-            layers += [nn.Conv2d(width, width, 3, padding=1), nn.ReLU(inplace=True)]
-        layers += [
-            nn.Conv2d(width, 2 * width, 3, stride=2, padding=1), nn.ReLU(inplace=True),  # 8x8
-            nn.Conv2d(2 * width, 2 * width, 3, stride=2, padding=1), nn.ReLU(inplace=True),  # 4x4
-        ]
-        self.net = nn.Sequential(*layers)
-        self.fc = nn.Linear(2 * width * (GRID // 16) ** 2, out_dim)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return torch.relu(self.fc(self.net(x).flatten(1)))
-
-
-class PolicyNetV1(nn.Module):
-    """The first network: two maps, plain conv towers. Kept for old checkpoints."""
-
-    version = 1
-    n_maps = 2
-    stack_prev = False
-
-    def __init__(self, hidden: int = 512):
-        super().__init__()
-        self.unpack_local = Unpack(N_LOCAL_PLANES)
-        self.unpack_global = Unpack(N_GLOBAL_PLANES)
-        self.local = PatchTower(N_LOCAL_PLANES, 64, 2, 256)
-        self.globl = PatchTower(N_GLOBAL_PLANES, 32, 1, 256)
-        self.scalars = nn.Sequential(nn.Linear(N_SCALARS, 256), nn.ReLU(inplace=True), nn.Linear(256, 256), nn.ReLU(inplace=True))
-        self.trunk = nn.Sequential(nn.Linear(768, hidden), nn.ReLU(inplace=True), nn.Linear(hidden, hidden), nn.ReLU(inplace=True))
-        self.pi = nn.Linear(hidden, N_ACTIONS)
-        self.v = nn.Linear(hidden, 1)
-        for m in self.modules():
-            if isinstance(m, (nn.Conv2d, nn.Linear)):
-                nn.init.orthogonal_(m.weight, gain=2**0.5)
-                nn.init.zeros_(m.bias)
-        nn.init.orthogonal_(self.pi.weight, gain=0.01)
-        nn.init.orthogonal_(self.v.weight, gain=1.0)
-
-    def act(self, maps, feats, greedy: bool = False):
-        logits, value = self(maps, feats[:, :N_SCALARS], feats[:, N_SCALARS:] > 0.5)
-        return _pick(logits, value, greedy)
-
-    def forward(self, maps, scalars, mask=None):
-        local, globl = maps[:, 0], maps[:, 2] if maps.shape[1] >= 3 else maps[:, 1]
-        h = torch.cat([self.local(self.unpack_local(local)), self.globl(self.unpack_global(globl)), self.scalars(scalars)], 1)
-        h = self.trunk(h)
-        logits = self.pi(h)
-        if mask is not None:
-            logits = logits.masked_fill(~mask, _masked(logits.dtype))
-        return logits, self.v(h).squeeze(1)
-
-
-# ------------------------------------------------------------------------------------------ v2
-
 class ResBlock(nn.Module):
     def __init__(self, ch: int):
         super().__init__()
@@ -116,137 +83,6 @@ class ResBlock(nn.Module):
         y = torch.relu(self.c0(x))
         return torch.relu(x + self.c1(y))
 
-
-class ResTower(nn.Module):
-    """stem (4x4 patches) -> residual blocks at 16x16 -> two strided convs -> linear.
-
-    Exported layer names: towers.M.convs.0 (stem), towers.M.res.B.0/.1, towers.M.convs.1/.2
-    (strided), towers.M.fc. The C++ side (gNeuralNet.cpp) replays exactly this order."""
-
-    def __init__(self, in_ch: int, width: int, blocks: int, out_dim: int):
-        super().__init__()
-        self.stem = nn.Conv2d(in_ch, width, 4, stride=4)  # 16x16
-        self.res = nn.ModuleList([ResBlock(width) for _ in range(blocks)])
-        self.down0 = nn.Conv2d(width, 2 * width, 3, stride=2, padding=1)  # 8x8
-        self.down1 = nn.Conv2d(2 * width, 2 * width, 3, stride=2, padding=1)  # 4x4
-        self.fc = nn.Linear(2 * width * (GRID // 16) ** 2, out_dim)
-
-    def features(self, x: torch.Tensor) -> torch.Tensor:
-        """The 16x16 map after the residual blocks (what the ownership head reads)."""
-        x = torch.relu(self.stem(x))
-        for b in self.res:
-            x = b(x)
-        return x
-
-    def head(self, x: torch.Tensor) -> torch.Tensor:
-        x = torch.relu(self.down0(x))
-        x = torch.relu(self.down1(x))
-        return torch.relu(self.fc(x.flatten(1)))
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.head(self.features(x))
-
-    def export_layers(self, prefix: str):
-        """(name, module) in forward order, the names the game's loader expects."""
-        out = [(f"{prefix}.convs.0", self.stem)]
-        for i, b in enumerate(self.res):
-            out += [(f"{prefix}.res.{i}.0", b.c0), (f"{prefix}.res.{i}.1", b.c1)]
-        out += [(f"{prefix}.convs.1", self.down0), (f"{prefix}.convs.2", self.down1), (f"{prefix}.fc", self.fc)]
-        return out
-
-
-# The four maps come in two frames of reference, and maps that share one are fed to one tower, so
-# their planes meet in the very first filter ("a wall that borders my region", "a gap in the close
-# view that the 2 m view shows leads somewhere"): the player tower sees the 2 m and 1 m views
-# (both centred on the cycle, rotated with it), the arena tower sees the minimap and territory
-# (both arena-aligned, cell for cell). Each gets the previous frame's planes stacked underneath.
-TOWER_MAPS = ((0, 1), (2, 3))  # indices into the N_MAPS maps
-TOWER_SPECS = (  # per tower: (width, residual blocks, output dim)
-    (80, 3, 320),  # player: local + close
-    (64, 3, 256),  # arena: global + territory
-)
-TOWER_NAMES = ("player", "arena")
-
-
-class PolicyNet(nn.Module):
-    """v2: two residual towers (player view, arena view), each fed its maps with the previous frame stacked."""
-
-    version = 2
-    n_maps = N_MAPS
-    stack_prev = True
-    specs = TOWER_SPECS
-
-    def make_tower(self, t: int, in_ch: int, width: int, blocks: int, out_dim: int) -> nn.Module:
-        return ResTower(in_ch, width, blocks, out_dim)
-
-    def __init__(self, hidden: int = 768):
-        super().__init__()
-        self.unpack = nn.ModuleList([Unpack(p) for p in MAP_PLANES])
-        self.towers = nn.ModuleList([
-            self.make_tower(t, 2 * sum(MAP_PLANES[m] for m in maps), w, b, d)
-            for t, (maps, (w, b, d)) in enumerate(zip(TOWER_MAPS, self.specs))])
-        fused = sum(d for _, _, d in self.specs) + 256
-        self.scalars = nn.Sequential(nn.Linear(N_SCALARS, 256), nn.ReLU(inplace=True), nn.Linear(256, 256), nn.ReLU(inplace=True))
-        self.trunk = nn.Sequential(nn.Linear(fused, hidden), nn.ReLU(inplace=True), nn.Linear(hidden, hidden), nn.ReLU(inplace=True))
-        self.pi = nn.Linear(hidden, N_ACTIONS)
-        self.v = nn.Linear(hidden, 1)
-        # auxiliary predictions, trained by the teacher and ignored at play time: my share of the
-        # territory two seconds from now, and whether I am dead within two seconds. They cost
-        # nothing in the game and sharpen the features the move and value heads read.
-        self.aux = nn.Linear(hidden, N_AUX)
-        # ownership: who reaches each minimap cell first two seconds from now (nobody, me, an enemy),
-        # read off the arena tower's 16x16 map and trained by the teacher; the game never runs it.
-        self.own = nn.Conv2d(self.specs[1][0], 3, 1)
-        for m in self.modules():
-            if isinstance(m, (nn.Conv2d, nn.Linear)):
-                nn.init.orthogonal_(m.weight, gain=2**0.5)
-                nn.init.zeros_(m.bias)
-        nn.init.orthogonal_(self.pi.weight, gain=0.01)
-        nn.init.orthogonal_(self.v.weight, gain=1.0)
-        nn.init.orthogonal_(self.aux.weight, gain=0.1)
-
-    def act(self, maps, feats, greedy: bool = False):
-        """maps: (B, 2*N_MAPS, G, G) uint8, current maps then the previous frame's; feats: (B, N_SCALARS +
-        N_ACTIONS) float32 whose last N_ACTIONS columns are the action mask. Returns (action, logp, value)."""
-        logits, value = self(maps, feats[:, :N_SCALARS], feats[:, N_SCALARS:] > 0.5)
-        return _pick(logits, value, greedy)
-
-    def tower_input(self, maps, t: int) -> torch.Tensor:
-        """The planes tower T sees: its maps' current planes, then the same maps' previous planes."""
-        stacked = maps.shape[1] >= 2 * N_MAPS
-        cur = [self.unpack[m](maps[:, m]) for m in TOWER_MAPS[t]]
-        prev = [self.unpack[m](maps[:, N_MAPS + m]) for m in TOWER_MAPS[t]] if stacked else cur
-        return torch.cat(cur + prev, 1)
-
-    def trunk_out(self, maps, scalars) -> torch.Tensor:
-        parts = [self.towers[t](self.tower_input(maps, t)) for t in range(len(TOWER_MAPS))]
-        parts.append(self.scalars(scalars))
-        return self.trunk(torch.cat(parts, 1))
-
-    def trunk_and_arena(self, maps, scalars):
-        """The trunk output and the arena tower's 16x16 features, for the training heads."""
-        arena = self.towers[1].features(self.tower_input(maps, 1))
-        parts = [self.towers[0](self.tower_input(maps, 0)), self.towers[1].head(arena), self.scalars(scalars)]
-        return self.trunk(torch.cat(parts, 1)), arena
-
-    def forward(self, maps, scalars, mask=None):
-        h = self.trunk_out(maps, scalars)
-        logits = self.pi(h)
-        if mask is not None:
-            logits = logits.masked_fill(~mask, _masked(logits.dtype))
-        return logits, self.v(h).squeeze(1)
-
-    def heads(self, maps, scalars, mask=None):
-        """(logits, value, aux logits, ownership logits (B, 3, G, G)): the teacher trains all four."""
-        h, arena = self.trunk_and_arena(maps, scalars)
-        logits = self.pi(h)
-        if mask is not None:
-            logits = logits.masked_fill(~mask, _masked(logits.dtype))
-        own = nn.functional.interpolate(self.own(arena), size=(GRID, GRID), mode="bilinear", align_corners=False)
-        return logits, self.v(h).squeeze(1), self.aux(h), own
-
-
-# ------------------------------------------------------------------------------------------ v3
 
 class GPoolResBlock(nn.Module):
     """A residual block that also sees the whole map: the first conv's first G channels are pooled
@@ -289,7 +125,7 @@ class AttnLayer(nn.Module):
         return x + self.fc2(torch.nn.functional.gelu(self.fc1(self.ln2(x))))
 
 
-class ResTowerV3(nn.Module):
+class ResidualTower(nn.Module):
     """stem (4x4 patches) -> residual blocks at 16x16, every third with global pooling -> optional
     attention layers over the 256 cells -> two strided convs -> linear.
 
@@ -350,26 +186,268 @@ class ResTowerV3(nn.Module):
         return out
 
 
-TOWER_SPECS_V3 = (  # per tower: (width, residual blocks, output dim)
-    (96, 5, 320),  # player: local + close
-    (128, 5, 256),  # arena: global + territory
-)
-TOWER_ATTN_V3 = (0, 2)  # attention layers per tower: the arena view reasons about connections
+class ProgressiveTower(ResidualTower):
+    """Read local geometry at 32x32 before reducing it to the common 16x16 feature grid.
+
+    Nearby and Close have separate instances: their cells represent different physical scales.
+    The arena-conditioned features are passed to ``head`` after this tower's residual blocks.
+    """
+
+    def __init__(self, in_ch: int, width: int = 64, blocks: int = 3, out_dim: int = 192):
+        super().__init__(in_ch, width, blocks, out_dim)
+        self.stem = nn.Conv2d(in_ch, 48, 3, stride=2, padding=1)
+        self.pre = ResBlock(48)
+        self.reduce = nn.Conv2d(48, width, 3, stride=2, padding=1)
+
+    def features(self, x: torch.Tensor) -> torch.Tensor:
+        x = self.pre(torch.relu(self.stem(x)))
+        x = torch.relu(self.reduce(x))
+        for block in self.res:
+            x = block(x)
+        return x
+
+    def export_layers(self, prefix: str):
+        layers = super().export_layers(prefix)
+        return layers[:1] + [(f"{prefix}.pre.c0", self.pre.c0), (f"{prefix}.pre.c1", self.pre.c1),
+                             (f"{prefix}.reduce", self.reduce)] + layers[1:]
 
 
-class PolicyNetV3(PolicyNet):
-    """v3: the v2 layout with deeper towers, global pooling in every third block, and attention over the
-    arena view's cells. Same inputs, same heads, so the teacher and the game treat it like v2."""
+class PolicyNet(nn.Module):
+    """Combat architecture: independent scales, arena-conditioned tactics and opponent selection.
 
-    version = 3
-    specs = TOWER_SPECS_V3
+    Six joint steering/brake actions cover straight, left and right with optional braking. The
+    third auxiliary target is a credited kill within two seconds while surviving that horizon. It
+    teaches offensive features without paying the policy for a suicidal trade. Value remains
+    grounded in discounted round outcome and is bounded to [-1, 1].
+    """
 
-    def make_tower(self, t: int, in_ch: int, width: int, blocks: int, out_dim: int) -> nn.Module:
-        return ResTowerV3(in_ch, width, blocks, out_dim, attn_layers=TOWER_ATTN_V3[t])
+    version = 4
+    observation_schema = OBSERVATION_VERSION
+    n_maps = N_MAPS
+    stack_prev = True
+    n_actions = 6
+    n_aux = 3
+    specs = ((64, 3, 192), (64, 3, 192), (128, 5, 256))
+    tower_maps = ((0,), (1,), (2, 3))
+    tower_names = ("nearby", "close", "arena")
+    memory_schema = MEMORY_VERSION
+    state_size = MEMORY_HIDDEN
 
     def __init__(self, hidden: int = 768):
-        super().__init__(hidden)
-        self.register_buffer("net_version", torch.tensor(3))
+        super().__init__()
+        if hidden != 768:
+            raise ValueError("The V4 recurrent trunk has exactly 768 features")
+        self.unpack = nn.ModuleList([Unpack(p) for p in MAP_PLANES])
+        self.towers = nn.ModuleList([
+            ProgressiveTower(16, 64, 3, 192),
+            ProgressiveTower(16, 64, 3, 192),
+            ResidualTower(32, 128, 5, 256, attn_layers=2),
+        ])
+        self.conditioning = nn.ModuleList([nn.Linear(256, 128), nn.Linear(256, 128)])
+        self.scalars = nn.Sequential(nn.Linear(OWN_SCALARS, 256), nn.ReLU(inplace=True),
+                                     nn.Linear(256, 256), nn.ReLU(inplace=True))
+        # Same encoder for each of the three nearest enemies; presence gates absent tokens.
+        self.opponents = nn.Sequential(nn.Linear(ENEMY_FEATURES, 64), nn.ReLU(inplace=True),
+                                       nn.Linear(64, 64), nn.ReLU(inplace=True))
+        self.opponent_query = nn.Linear(896, 64)
+        self.trunk = nn.Sequential(nn.Linear(960, hidden), nn.ReLU(inplace=True),
+                                   nn.Linear(hidden, hidden), nn.ReLU(inplace=True))
+        self.pi = nn.Linear(hidden, self.n_actions)
+        self.v = nn.Linear(hidden, 1)
+        self.aux = nn.Linear(hidden, self.n_aux)
+        self.own = nn.Conv2d(128, 3, 1)
+        self.register_buffer("net_version", torch.tensor(self.version))
+        self.register_buffer("observation_version", torch.tensor(OBSERVATION_VERSION))
+        for module in self.modules():
+            if isinstance(module, (nn.Conv2d, nn.Linear)):
+                nn.init.orthogonal_(module.weight, gain=2**0.5)
+                nn.init.zeros_(module.bias)
+        for module in self.conditioning:
+            nn.init.zeros_(module.weight)  # begin with identity conditioning
+        nn.init.orthogonal_(self.pi.weight, gain=0.01)
+        nn.init.orthogonal_(self.v.weight, gain=1.0)
+        nn.init.orthogonal_(self.aux.weight, gain=0.1)
+        # New resource/timing connections start inactive; migration copies the learned
+        # eight-field encoder exactly and uses the same zero initialization.
+        with torch.no_grad():
+            self.opponents[0].weight[:, 8:].zero_()
+        # Append after every existing module so old optimizer parameter IDs remain stable.
+        self.memory_gru = nn.GRU(hidden + MEMORY_CONTEXT, MEMORY_HIDDEN, batch_first=True)
+        self.memory_projection = nn.Linear(MEMORY_HIDDEN, hidden)
+        nn.init.zeros_(self.memory_projection.weight)
+        nn.init.zeros_(self.memory_projection.bias)
+        self.register_buffer("memory_version", torch.tensor(MEMORY_VERSION))
+
+    def act_step(self, maps, feats, state, greedy: bool = False, reset=None, context=None):
+        """maps: (B, 2*N_MAPS, G, G) uint8, current maps then the previous frame's; feats: (B, N_SCALARS +
+        N_ACTIONS) float32 whose last N_ACTIONS columns are the action mask. State is explicit;
+        returns (action, logp, value, next_state), after consuming this observation."""
+        logits, value, next_state = self.forward_step(maps, feats[:, :N_SCALARS],
+                                                     feats[:, N_SCALARS:] > 0.5, state, reset, context)
+        return (*_pick(logits, value, greedy), next_state)
+
+    def act(self, maps, feats, greedy: bool = False):
+        """Fresh-state frame diagnostic. Stateful controllers must use ``act_step``."""
+        return self.act_step(maps, feats, self.initial_state(len(maps)), greedy=greedy)[:3]
+
+    def initial_state(self, batch: int, device=None, dtype=None):
+        """Explicit start-of-life state. Callers retain the returned state between decisions."""
+        if not isinstance(batch, int) or isinstance(batch, bool) or batch < 1:
+            raise ValueError("state batch size must be a positive integer")
+        weight = self.memory_gru.weight_ih_l0
+        return torch.zeros(batch, MEMORY_HIDDEN, device=weight.device if device is None else device,
+                           dtype=weight.dtype if dtype is None else dtype)
+
+    def _remember(self, features, state, reset=None, context=None):
+        batch, steps, _ = features.shape
+        dtype = self.memory_gru.weight_ih_l0.dtype
+        if not isinstance(state, torch.Tensor) or state.shape != (batch, MEMORY_HIDDEN):
+            raise ValueError("explicit recurrent state must have shape [batch, 256]")
+        if state.device != features.device or not state.is_floating_point():
+            raise ValueError("recurrent state must be floating and match the feature device")
+        if reset is not None and (reset.shape != (batch, steps) or reset.dtype != torch.bool
+                                  or reset.device != features.device):
+            raise ValueError("reset must be a boolean [batch, time] tensor on the feature device")
+        if context is None:
+            context = features.new_zeros(batch, steps, MEMORY_CONTEXT, dtype=dtype)
+        elif (context.shape != (batch, steps, MEMORY_CONTEXT) or not context.is_floating_point()
+              or context.device != features.device):
+            raise ValueError("memory context must be floating [batch, time, 7] on the feature device")
+        else:
+            context = context.to(dtype)
+        if reset is not None:
+            context = context.masked_fill(reset[..., None], 0)
+        # MPS autocast does not enable nn.GRU's input/weight dtype exemption.
+        # Keep recurrent gates in the module's native precision (FP32 learner,
+        # FP16 actor), while the expensive visual trunk can still use BF16.
+        inputs = torch.cat([features.to(dtype), context], -1)
+        hidden = state.to(dtype).unsqueeze(0)
+        with torch.autocast(features.device.type, enabled=False):
+            if reset is None:
+                output, hidden = self.memory_gru(inputs, hidden)
+            else:
+                # Preserve fused execution between life resets. Resets also cut
+                # gradients from the preceding life without mutating caller state.
+                boundaries = reset.any(0).nonzero().flatten().tolist()
+                outputs, offset = [], 0
+                for boundary in boundaries + [steps]:
+                    if boundary > offset:
+                        output, hidden = self.memory_gru(inputs[:, offset:boundary], hidden)
+                        outputs.append(output)
+                    if boundary < steps:
+                        hidden = hidden * (~reset[:, boundary])[None, :, None]
+                    offset = boundary
+                output = torch.cat(outputs, 1)
+            residual = self.memory_projection(output)
+        return features + residual.to(features.dtype), hidden[0]
+
+    def tower_input(self, maps, t: int) -> torch.Tensor:
+        """The planes tower T sees: its maps' current planes, then the same maps' previous planes."""
+        stacked = maps.shape[1] >= 2 * N_MAPS
+        cur = [self.unpack[m](maps[:, m]) for m in self.tower_maps[t]]
+        prev = [self.unpack[m](maps[:, N_MAPS + m]) for m in self.tower_maps[t]] if stacked else cur
+        return torch.cat(cur + prev, 1)
+
+    def condition(self, features: torch.Tensor, arena: torch.Tensor, tower: int) -> torch.Tensor:
+        gain, bias = self.conditioning[tower](arena).chunk(2, dim=1)
+        return torch.relu(features * (1 + 0.1 * torch.tanh(gain)[:, :, None, None])
+                          + 0.1 * torch.tanh(bias)[:, :, None, None])
+
+    @staticmethod
+    def scalar_input(scalars: torch.Tensor) -> torch.Tensor:
+        """Own/arena sensors only; enemy slots belong exclusively to the shared enemy encoder."""
+        return torch.cat([scalars[:, :64], scalars[:, 88:96]], 1)
+
+    @staticmethod
+    def opponent_input(scalars: torch.Tensor) -> torch.Tensor:
+        """Retain each enemy's original eight fields, then its four new measurements."""
+        if scalars.shape[1] != N_SCALARS:
+            raise ValueError(f"Observation schema {OBSERVATION_VERSION} requires {N_SCALARS} scalars")
+        original = scalars[:, 64:88].reshape(-1, 3, 8)
+        extra = scalars[:, ENEMY_EXTRA_OFFSET:].reshape(-1, 3, ENEMY_EXTRA_FEATURES)
+        return torch.cat([original, extra], dim=2)
+
+    def attend_opponents(self, scalars: torch.Tensor, context: torch.Tensor):
+        enemies = self.opponent_input(scalars)
+        present = enemies[:, :, 7] > 0.5
+        tokens = self.opponents(enemies)
+        query = torch.tanh(self.opponent_query(context))
+        scores = (tokens * query[:, None, :]).sum(-1) / math.sqrt(64)
+        # Normalise in float32: 1e-9 rounds to zero in float16, making an all-absent
+        # opponent set produce 0/0 on the half-precision actor otherwise.
+        weights = torch.softmax(scores.float().masked_fill(~present, -1e4), dim=1)
+        weights = weights * present.to(weights.dtype)
+        weights = weights / weights.sum(1, keepdim=True).clamp_min(1e-9)
+        return (tokens * weights.to(tokens.dtype)[:, :, None]).sum(1), weights, tokens, query
+
+    def trunk_and_arena(self, maps, scalars):
+        arena = self.towers[2].features(self.tower_input(maps, 2))
+        arena_summary = self.towers[2].head(arena)
+        parts = [self.towers[t].head(self.condition(self.towers[t].features(self.tower_input(maps, t)),
+                                                  arena_summary, t)) for t in (0, 1)]
+        parts.extend([arena_summary, self.scalars(self.scalar_input(scalars))])
+        context = torch.cat(parts, 1)
+        enemies, _, _, _ = self.attend_opponents(scalars, context)
+        return self.trunk(torch.cat([context, enemies], 1)), arena
+
+    def trunk_out(self, maps, scalars):
+        return self.trunk_and_arena(maps, scalars)[0]
+
+    def _policy_value(self, h, mask):
+        logits = self.pi(h)
+        if mask is not None:
+            if mask.shape != logits.shape or mask.dtype != torch.bool:
+                raise ValueError("legal mask must be boolean with one entry per action")
+            logits = logits.masked_fill(~mask, _masked(logits.dtype))
+        return logits, torch.tanh(self.v(h).squeeze(-1))
+
+    def forward_step(self, maps, scalars, mask, state, reset=None, context=None):
+        h = self.trunk_out(maps, scalars)
+        h, next_state = self._remember(h[:, None], state, None if reset is None else reset[:, None],
+                                       None if context is None else context[:, None])
+        logits, value = self._policy_value(h[:, 0], mask)
+        return logits, value, next_state
+
+    def heads_step(self, maps, scalars, mask, state, reset=None, context=None):
+        h, arena = self.trunk_and_arena(maps, scalars)
+        h, next_state = self._remember(h[:, None], state, None if reset is None else reset[:, None],
+                                       None if context is None else context[:, None])
+        h = h[:, 0]
+        logits, value = self._policy_value(h, mask)
+        own = nn.functional.interpolate(self.own(arena), size=(GRID, GRID), mode="bilinear", align_corners=False)
+        return logits, value, self.aux(h), own, next_state
+
+    def _sequence_features(self, maps, scalars, ownership=False):
+        if maps.ndim != 5 or scalars.ndim != 3 or maps.shape[:2] != scalars.shape[:2]:
+            raise ValueError("sequences require maps [batch,time,maps,height,width] and scalars [batch,time,features]")
+        batch, steps = maps.shape[:2]
+        if batch < 1 or steps < 1:
+            raise ValueError("a sequence needs a nonempty batch and time axis")
+        flat_maps, flat_scalars = maps.flatten(0, 1), scalars.flatten(0, 1)
+        h, arena = self.trunk_and_arena(flat_maps, flat_scalars)
+        return h.reshape(batch, steps, -1), arena if ownership else None
+
+    def forward_sequence(self, maps, scalars, mask, state, reset=None, context=None):
+        h, _ = self._sequence_features(maps, scalars)
+        h, next_state = self._remember(h, state, reset, context)
+        logits, value = self._policy_value(h, mask)
+        return logits, value, next_state
+
+    def heads_sequence(self, maps, scalars, mask, state, reset=None, context=None):
+        h, arena = self._sequence_features(maps, scalars, ownership=True)
+        h, next_state = self._remember(h, state, reset, context)
+        logits, value = self._policy_value(h, mask)
+        own = nn.functional.interpolate(self.own(arena), size=(GRID, GRID), mode="bilinear", align_corners=False)
+        own = own.reshape(*h.shape[:2], 3, GRID, GRID)
+        return logits, value, self.aux(h), own, next_state
+
+    def forward(self, maps, scalars, mask=None):
+        """Fresh-state diagnostic; real inference must retain state with ``forward_step``."""
+        return self.forward_step(maps, scalars, mask, self.initial_state(len(maps)))[:2]
+
+    def heads(self, maps, scalars, mask=None):
+        """Fresh-state diagnostic; sequence learning must use ``heads_sequence``."""
+        return self.heads_step(maps, scalars, mask, self.initial_state(len(maps)))[:4]
 
 
 def _pick(logits, value, greedy):
@@ -382,14 +460,30 @@ def _pick(logits, value, greedy):
     return a, logp, value
 
 
-def make_net(version: int = 2) -> nn.Module:
-    if version == 3:
-        return PolicyNetV3()
-    return PolicyNet() if version == 2 else PolicyNetV1()
+def make_net(version: int = 4) -> PolicyNet:
+    """Construct the supported fighter architecture."""
+    if version != 4:
+        raise ValueError(f"Only V4 networks are supported; received version {version}.")
+    return PolicyNet()
 
 
 def net_version(state_dict) -> int:
-    """Which network a checkpoint's weights belong to."""
-    if "net_version" in state_dict:
-        return int(state_dict["net_version"])
-    return 2 if any(k.startswith("towers.") for k in state_dict) else 1
+    """Require an explicit V4 checkpoint marker; architecture is never guessed from keys."""
+    marker = state_dict.get("net_version")
+    if marker is None:
+        raise ValueError("Only V4 checkpoints are supported; the net_version=4 marker is missing.")
+    integer_types = (torch.uint8, torch.int8, torch.int16, torch.int32, torch.int64)
+    if not isinstance(marker, torch.Tensor) or marker.ndim != 0 or marker.dtype not in integer_types:
+        raise ValueError("Invalid checkpoint version marker: expected the scalar integer net_version=4.")
+    version = int(marker.item())
+    if version != 4:
+        raise ValueError(f"Only V4 checkpoints are supported; received version {version}.")
+    observation = state_dict.get("observation_version")
+    if (not isinstance(observation, torch.Tensor) or observation.ndim != 0
+            or observation.dtype not in integer_types or int(observation.item()) != OBSERVATION_VERSION):
+        raise ValueError(f"V4 observation schema {OBSERVATION_VERSION} is required; migrate the checkpoint before loading")
+    memory = state_dict.get("memory_version")
+    if (not isinstance(memory, torch.Tensor) or memory.ndim != 0 or memory.dtype not in integer_types
+            or int(memory.item()) != MEMORY_VERSION):
+        raise ValueError(f"V4 memory schema {MEMORY_VERSION} is required; migrate the checkpoint before loading")
+    return version

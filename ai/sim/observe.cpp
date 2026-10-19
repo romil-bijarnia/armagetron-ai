@@ -378,6 +378,15 @@ void World::Observe( int self, uint8_t * local, uint8_t * close, uint8_t * globa
         x[5] = o.Speed() / baseSpeed;
         x[6] = o.braking ? 1 : 0;
         x[7] = 1;
+        // The original observation remains at 0..95. Appended enemy state uses this same
+        // sorted enemy slot; absent slots and the original reserved 88..95 stay zero.
+        float * extra = sc + 96 + 4 * e;
+        extra[0] = o.brakingReservoir;
+        extra[1] = s.rubber > 0 ? o.rubber / s.rubber : 0;
+        REAL const turnDelay = std::max( TurnDelay( others[k].idx ), REAL( 1e-6 ) );
+        REAL const wait = Clamp( ( NextTurn( others[k].idx ) - o.lastTime ) / turnDelay, 0, 1 );
+        // The simulator's default physics has equal left/right turn delays.
+        extra[2] = extra[3] = wait;
         ++e;
     }
 }

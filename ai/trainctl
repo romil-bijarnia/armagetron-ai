@@ -1,22 +1,27 @@
 #!/bin/sh
 # trainctl: start, stop and watch Armagetron AI training from any terminal.
 #
-#   ./trainctl start [flags]    train with the teacher (self-play with search in the simulator, a league
-#                               of past selves and an exploiter) in the background, Mac kept awake, and
-#                               open the brain page; restarts itself from the last checkpoint if it crashes
-#   ./trainctl gentle [flags]   same, but fewer rounds at once and at low priority so the laptop stays usable
-#   ./trainctl ppo [flags]      the old trainer instead (PPO against the real engine), in runs/ppo
-#   ./trainctl ladder [flags]   rate the network in the real game: duels against the built-in AI, the old
-#                               brain and the league pool, fitted into Elo ratings (runs/v3/ratings.json)
+#   ./trainctl background [flags]  96 parallel arenas, 4 simulation workers, batch 256, low priority;
+#                                  actor and learner each rest to target 35% work / total time
+#   ./trainctl full [flags]        256 parallel arenas, simulation workers for all CPU cores, batch 512;
+#                                  no work/rest cap;
+#                                  Mac kept awake; uses the GPU for batched inference and learning
+#   ./trainctl gentle [flags]      alias for background
+#   ./trainctl start [flags]       alias for full
+#                                  terminal progress opens when attached; --no-watch detaches
+#   ./trainctl imitate [flags]     continuous foreground imitation; --epochs N limits this session
+#   ./trainctl ladder [flags]   rate V4 in the real game against the built-in AI and the league pool,
+#                               fitted into Elo ratings (runs/blacklight/ratings.json)
 #   ./trainctl stop             stop training (it saves a checkpoint on the way out)
 #   ./trainctl status           is it running, latest progress, when the last checkpoint was saved
-#   ./trainctl watch            terminal charts of how training is going (Ctrl-C closes them, not training)
+#   ./trainctl watch            reconnect to the compact training console (Ctrl-C closes it, not training)
+#   ./trainctl dashboard        optional full-screen terminal charts
 #   ./trainctl show [flags]     watch the AI play a match, drawn in the terminal (Ctrl-C quits)
-#   ./trainctl brain [flags]    watch the network think: its beliefs on the arena, live in the browser, with pause
-#                               and single-step; follows the newest weights while training runs
+#   ./trainctl brain [flags]    live training game, bot inputs, network structure and learning statistics
+#                               no replay or speed controls; viewer starts only when requested
 #   ./trainctl log              follow the training log (Ctrl-C stops watching, not training)
 #
-# Extra flags go straight to the trainer, e.g. ./trainctl start --lr 1e-4 or --run runs/exp1.
+# Extra flags go to the trainer, except --no-watch, e.g. ./trainctl start --lr 1e-4 or --run runs/exp1.
 # Checkpoints are saved automatically every few minutes and whenever training stops.
 
 set -u
@@ -26,78 +31,124 @@ cd "$(dirname "$self")" || exit 1
 cmd="${1:-help}"
 [ $# -gt 0 ] && shift
 
-# the run folder is the value after --run: runs/v3 by default, runs/ppo for the old trainer
-run=runs/v3
-[ "$cmd" = ppo ] && run=runs/ppo
+watch=auto
+case "$cmd" in
+background | full | start | gentle)
+    # Remove only our own option while preserving each trainer argument and its quoting.
+    remaining=$#
+    while [ "$remaining" -gt 0 ]; do
+        arg=$1
+        shift
+        remaining=$((remaining - 1))
+        case "$arg" in
+            --no-watch) watch=off ;;
+            *) set -- "$@" "$arg" ;;
+        esac
+    done
+    ;;
+esac
+
+# the run folder is the value after --run: runs/blacklight by default
+run=runs/blacklight
 prev=""
 for a in "$@"; do
     [ "$prev" = "--run" ] && run="$a"
+    case "$a" in --run=*) run="${a#--run=}" ;; esac
     prev="$a"
 done
 mkdir -p "$run"
 pidfile="$run/trainctl.pid"
+imitation_pidfile="$run/imitation.pid"
 stopflag="$run/trainctl.stop"
 log="$run/train.log"
 
-short="$(printf '%s' "$self" | sed "s|^$HOME|~|")"  # how to call this script, for messages
-
 running() { [ -f "$pidfile" ] && kill -0 "$(cat "$pidfile")" 2>/dev/null; }
-dashboard() { exec uv run -q arma-dash --run "$run"; }
-brainpage() {
-    # the brain page follows runs/<run>/actor.pt, which exists after the first update: wait for it
-    # in the background, then start the page (it opens the browser itself); the brain log is beside train.log
-    pkill -f "bin/arma-brain" 2>/dev/null
-    nohup sh -c 'i=0; while [ ! -f "'"$run"'/actor.pt" ] && [ $i -lt 600 ]; do sleep 1; i=$((i+1)); done; exec uv run -q arma-brain --checkpoint "'"$run"'/actor.pt"' >> "$run/brain.log" 2>&1 &
+dashboard() { exec uv run -q arma-dash --run "$run" "$@"; }
+progress() { exec uv run -q arma-dash --simple --run "$run" "$@"; }
+watch_if_terminal() {
+    if [ "$watch" = auto ] && [ -t 0 ] && [ -t 1 ]; then
+        progress
+    fi
 }
-trainer_pids() { pgrep -f "bin/arma-(train|teach)"; }
+imitation_pid() {
+    [ -f "$imitation_pidfile" ] || return 1
+    imitation=$(cat "$imitation_pidfile")
+    case "$imitation" in '' | 0 | *[!0-9]*) return 1 ;; esac
+    kill -0 "$imitation" 2>/dev/null || return 1
+    # A stale PID file must never make stop signal an unrelated reused PID.
+    imitation_command=$(ps -p "$imitation" -o command= 2>/dev/null)
+    case " $imitation_command " in
+        *'/arma-imitate '* | *' arma-imitate '* | *'/imitate '* | *' imitate '* | *' -m arma_ai.imitate '*)
+            echo "$imitation" ;;
+        *) return 1 ;;
+    esac
+}
+trainer_pids() { { pgrep -f 'bin/arma-teach|[[:space:]]-m[[:space:]]+arma_ai\.teach([[:space:]]|$)'; imitation_pid; } | sort -nu; }
+imitation_progress() {
+    [ -f "$run/progress.json" ] && grep -q '"trainer"[[:space:]]*:[[:space:]]*"imitate"' "$run/progress.json"
+}
 stamp() { date '+%Y-%m-%d %H:%M:%S'; }
 
 case "$cmd" in
-start | gentle | ppo)
+background | full | start | gentle)
     if running; then
         echo "already training in $run"
-        pgrep -f "bin/arma-brain" >/dev/null || brainpage
+        watch_if_terminal
         exit 0
     fi
     if [ -n "$(trainer_pids)" ]; then
-        echo "a training process started some other way is already running; stop it first (pkill -f arma-teach)"
+        echo "a training process started some other way is already running; save and stop it with stop"
         exit 1
     fi
     command -v uv >/dev/null || { echo "uv not found on PATH"; exit 1; }
     rm -f "$stopflag"
-    if [ "$cmd" = ppo ]; then
-        [ "$run" = runs/ppo ] && set -- --run runs/ppo "$@"
-        nohup caffeinate -i "$self" _supervise train "$@" >> "$log" 2>&1 &
-    elif [ "$cmd" = gentle ]; then
-        set -- --games 96 --threads 4 "$@"
-        nohup nice -n 15 "$self" _supervise teach "$@" >> "$log" 2>&1 &
+    mode=full
+    case "$cmd" in background | gentle) mode=background ;; esac
+    prev=""
+    for a in "$@"; do
+        [ "$prev" = "--mode" ] && mode="$a"
+        case "$a" in --mode=*) mode="${a#--mode=}" ;; esac
+        prev="$a"
+    done
+    case "$mode" in
+        background | full) ;;
+        *) echo "--mode must be background or full"; exit 1 ;;
+    esac
+    # The Python parser supplies the preset; arguments after it override every default.
+    set -- --mode "$mode" "$@"
+    if [ "$mode" = background ]; then
+        nohup nice -n 15 "$self" _supervise "$@" </dev/null >> "$log" 2>&1 &
     else
-        nohup caffeinate -i "$self" _supervise teach "$@" >> "$log" 2>&1 &
+        nohup caffeinate -i "$self" _supervise "$@" </dev/null >> "$log" 2>&1 &
     fi
     echo $! > "$pidfile"
-    echo "training started ($cmd) in $run"
-    mkdir -p "$run"
-    brainpage
-    echo "the brain page opens in your browser once the first update has landed (a minute or two)"
-    echo "stop it:  $short stop"
+    echo "training started (${mode:-$cmd}) in $run"
+    echo "optional viewer:  brain --no-open --checkpoint \"$run/latest.pt\""
+    echo "stop it:  stop --run \"$run\""
+    watch_if_terminal
+    ;;
+
+imitate)
+    if running || [ -n "$(trainer_pids)" ]; then
+        echo "already training in $run; stop saves the current session"
+        exit 1
+    fi
+    command -v uv >/dev/null || { echo "uv not found on PATH"; exit 1; }
+    exec uv run -q arma-imitate "$@"
     ;;
 
 _supervise)
-    trainer="$1"  # teach or train
-    shift
     quick=0
     first=1
     while :; do
         started=$(date +%s)
         if [ "$first" = 1 ]; then
-            uv run "arma-$trainer" "$@"
+            uv run arma-teach "$@"
         else
-            uv run "arma-$trainer" "$@" --resume true  # a restart always continues from the checkpoint
+            uv run arma-teach "$@" --resume true  # a restart always continues from the checkpoint
         fi
         code=$?
         first=0
-        # engines of a crashed trainer exit on their own; make sure none linger before restarting
-        pkill -f "/runtime/$(basename "$run")/engine" 2>/dev/null
         [ -f "$stopflag" ] && break
         [ "$code" -eq 0 ] && break
         if [ $(( $(date +%s) - started )) -lt 120 ]; then quick=$((quick + 1)); else quick=0; fi
@@ -114,13 +165,10 @@ _supervise)
 stop)
     if ! running && [ -z "$(trainer_pids)" ]; then
         echo "not training"
-        pkill -f "bin/arma-brain" 2>/dev/null
-        pkill -f "/runtime/$(basename "$run")/engine" 2>/dev/null
-        rm -f "$pidfile" "$stopflag"
+        rm -f "$pidfile" "$imitation_pidfile" "$stopflag"
         exit 0
     fi
     touch "$stopflag"
-    pkill -f "bin/arma-brain" 2>/dev/null
     pids=$(trainer_pids)
     [ -n "$pids" ] && kill -TERM $pids
     echo "stopping and saving a checkpoint..."
@@ -130,28 +178,37 @@ stop)
         i=$((i + 1))
     done
     if running || [ -n "$(trainer_pids)" ]; then
-        echo "still shutting down after 2 minutes; check again with ./trainctl status"
+        echo "still shutting down after 2 minutes; check again with status"
     else
-        pkill -f "/runtime/$(basename "$run")/engine" 2>/dev/null
-        rm -f "$pidfile" "$stopflag"
+        rm -f "$pidfile" "$imitation_pidfile" "$stopflag"
         echo "stopped; checkpoint saved in $run/latest.pt"
     fi
     ;;
 
 status)
-    if running; then
+    imitation=$(imitation_pid || true)
+    if [ -n "$imitation" ]; then
+        echo "imitation (pid $imitation), run folder $run"
+    elif running; then
         echo "training (pid $(cat "$pidfile")), run folder $run"
     elif [ -n "$(trainer_pids)" ]; then
         echo "training (started without trainctl)"
     else
         echo "not training"
     fi
+    if [ -n "$imitation" ] || imitation_progress; then
+        progress --once
+    fi
     [ -f "$log" ] && grep '^u[0-9]' "$log" | tail -1
     [ -f "$run/latest.pt" ] && echo "last checkpoint saved $(date -r "$run/latest.pt" '+%Y-%m-%d %H:%M:%S')"
     ;;
 
 watch)
-    dashboard
+    progress "$@"
+    ;;
+
+dashboard)
+    dashboard "$@"
     ;;
 
 show)
@@ -172,6 +229,6 @@ log)
     ;;
 
 *)
-    sed -n '2,21p' "$self" | sed 's/^# \{0,1\}//'
+    sed -n '2,/^$/p' "$self" | sed 's/^# \{0,1\}//'
     ;;
 esac

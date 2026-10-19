@@ -1,0 +1,3 @@
+identical_maps=1 identical_96_scalars=1 identical_legal_mask=1
+reserved_scalars_88_95_all_zero=1
+after_identical_controls_seconds=0.5 enemy_speed_full_reserve=14.6311 enemy_speed_empty_reserve=19.9838

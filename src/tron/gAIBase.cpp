@@ -1208,6 +1208,21 @@ void gAIPlayer::ConfigureAIs()  // ai configuration menu
 
 }
 
+bool gAIPlayer::SetCharacterProfile( tString const & name )
+{
+    gAICharacter * found = NULL;
+    for (int i = 0; i < gAICharacter::s_Characters.Len(); ++i)
+        if (gAICharacter::s_Characters(i).name == name)
+        {
+            if (found) return false;
+            found = &gAICharacter::s_Characters(i);
+        }
+    if (!found) return false;
+    character = found;
+    SetName(found->name);
+    return true;
+}
+
 
 // make sure this many AI players are in the game
 void gAIPlayer::SetNumberOfAIs(int num, int minPlayers, int iq, int tries)
@@ -3100,7 +3115,8 @@ void gAIPlayer::ActOnData( ThinkDataBase & data )
     {
         if( Object()->CanMakeTurn( data.turn ) )
         {
-            Object()->Turn( data.turn );
+            bool const executed = Object()->Turn( data.turn );
+            gNeural::TeacherTurn( this, data.turn, executed );
         }
         else
         {

@@ -6,8 +6,12 @@
 // hands over a batch of observations; Feed() takes the outputs back. One batch mixes the rounds'
 // real decisions and their searches' look-ahead positions.
 //
-// Search (per searched decision, joint over all players): a tree whose edges are MACRO decisions
-// (0.1 s by default, the turn delay). Each player keeps its own statistics at every node
+// Search (per searched decision, joint over network players): a tree whose edges are at most MACRO
+// decisions (0.1 s by default, the turn delay). A deterministic hunter's cached control is exact
+// until its next replan; hunter games stop the tree there and bootstrap from the network instead
+// of inventing replies or nesting the expensive hunter planner inside every simulation. Edges
+// retain their actual duration for discounting and one-decision observation history.
+// Each network player keeps its own statistics at every node
 // (decoupled). At the root each player picks its candidates with Gumbel noise and narrows them by
 // sequential halving; below the root each player follows Gumbel MuZero's deterministic rule. The
 // training target is softmax(logits + sigma(completed Q)), which improves on the network's policy
@@ -19,6 +23,7 @@
 #include "tron.h"
 
 #include <atomic>
+#include <array>
 #include <cstdint>
 #include <vector>
 
@@ -26,8 +31,28 @@ namespace tron
 {
 int const kMaxPlayers = 8;
 int const kMapBytes = 4 * World::kGrid * World::kGrid;  // one decision's four maps
-int const kActions = 4;
+int const kActions = 6;
+int const kAux = 3;
+int const kMemory = 256;
+int const kContext = kActions + 1; //!< previous executed control and elapsed decision intervals
 int const kAgentHunter = -1;  //!< a seat played by the built-in space fighter; it asks no network
+
+// Telemetry describes the last move actually sent to World::Step. It never selects a move
+// or consumes randomness; a search currently in progress is separate from that last move.
+enum { WATCH_NONE = 0, WATCH_SEARCH = 1, WATCH_SAMPLED = 2, WATCH_GREEDY = 3, WATCH_HUNTER = 4 };
+struct DecisionWatch
+{
+    int action = -1, decision = -1, selection = WATCH_NONE;
+    unsigned mask = 0;
+    int64_t policyUpdate = -1;
+    float policy[kActions] = {}, search[kActions] = {}, value = 0;
+    bool hunterReplanned = false;
+    float observedAt = 0;
+    std::array< float, kContext > context{};
+    // Exact inputs for the last executed root decision, never a hypothetical search node.
+    std::vector< uint8_t > maps, previous;
+    std::vector< float > scalars;
+};
 
 struct SPConfig
 {
@@ -54,18 +79,20 @@ struct SPConfig
 struct Ring
 {
     uint8_t * maps = 0;     //!< [cap][4][64][64]
-    float * scalars = 0;    //!< [cap][96]
+    float * scalars = 0;    //!< [cap][108]
     uint8_t * mask = 0;     //!< [cap]
-    float * policy = 0;     //!< [cap][4]
+    float * policy = 0;     //!< [cap][kActions]
     uint8_t * hasPolicy = 0;
     float * value = 0;
-    float * aux = 0;        //!< [cap][2]: territory share in auxHorizon decisions, dead within auxHorizon
+    float * aux = 0;        //!< [cap][kAux]: territory share, dead within auxHorizon, credited kill and survive that horizon
     int64_t * prev = 0;     //!< global index of the same player's previous decision, -1 at a spawn
     int64_t * gen = 0;      //!< global index of the sample a slot holds
     uint8_t * ready = 0;    //!< targets filled in (the round is over)
     int64_t * counter = 0;  //!< samples ever written
     int64_t * future = 0;   //!< [cap]: ring index of the sample whose territory map is the ownership target
     uint8_t * heading = 0;  //!< [cap]: the player's heading quadrant (0 up, 1 right, 2 down, 3 left)
+    int64_t * generation = 0; //!< live exploiter generation; never a cached recurrent state
+    float * context = 0;   //!< [cap][kContext], retained independently of target readiness
     int64_t cap = 0;
     bool Valid() const { return cap > 0 && counter; }
 };
@@ -73,13 +100,17 @@ struct Ring
 struct Node
 {
     World w;
-    int depth = 0;
-    bool evaluated = false;
+    int depth = 0, elapsed = 0;  //!< edges and actual decisions from the root
+    bool evaluated = false, cutoff = false;  //!< cutoff leaves bootstrap at the hunter's next replan
     bool done[kMaxPlayers];    //!< the player's round is over here (dead, or the round ended)
     float util[kMaxPlayers];   //!< ... and what it got
     float logits[kMaxPlayers][kActions];
     float value[kMaxPlayers];
     unsigned mask[kMaxPlayers];
+    std::array< float, kMemory > memory[kMaxPlayers]{}; //!< after this node's observation
+    std::array< float, kContext > context[kMaxPlayers]{};
+    // Each branch carries the known hunter control; it never simulates an unknown replan.
+    int hunterAct[kMaxPlayers], hunterAt[kMaxPlayers];
     int N[kMaxPlayers][kActions];
     float W[kMaxPlayers][kActions];
     std::vector< std::pair< uint32_t, int > > kids;  //!< joint action code -> node
@@ -89,6 +120,9 @@ struct Request
 {
     int node;    //!< -1: the real decision
     int player;
+    std::array< float, kMemory > memory{}; //!< before the first requested observation
+    std::vector< uint8_t > maps, masks; //!< consecutive observations along this edge
+    std::vector< float > scalars, contexts;
 };
 
 class Game
@@ -99,6 +133,9 @@ public:
     float size = -3;
     int agents[kMaxPlayers];
     bool learn[kMaxPlayers];
+    int64_t generation[kMaxPlayers]{};
+    std::array< float, kMemory > memory[kMaxPlayers]{};
+    std::array< float, kContext > context[kMaxPlayers]{};
     uint64_t rng = 1;
     // state
     World world;
@@ -114,9 +151,12 @@ public:
     // network outputs at the real decision
     float rootLogits[kMaxPlayers][kActions];
     float rootValue[kMaxPlayers];
-    float rootBoot[kMaxPlayers];  //!< the value n-step targets are built from (see Feed)
+    int64_t rootUpdate[kMaxPlayers];  //!< checkpoint used for the real decision's network evaluation
+    DecisionWatch lastChoice[kMaxPlayers];
+    int64_t sourceCounts[5] = {};  //!< executed player moves in this round, indexed by WATCH_*
     // search
     bool searching = false;
+    int searchUntil = -1;  //!< absolute next hunter replan; -1 for unrestricted network-only search
     std::vector< Node > nodes;
     int simsDone = 0;
     std::vector< std::pair< int, uint32_t > > path;  //!< (node, joint action) from the root
@@ -132,12 +172,14 @@ public:
     bool died[kMaxPlayers];
     // what Collect handed out and Feed must answer
     std::vector< Request > requests;
-    std::vector< float > outLogits, outValue, outBoot;
+    std::vector< float > outLogits, outValue;
+    std::vector< float > outMemory;
+    std::vector< int64_t > outUpdates;
     std::vector< uint8_t > reqMaps;     //!< [k][8][64][64]: current maps then the previous decision's
-    std::vector< float > reqScalars;    //!< [k][96]
+    std::vector< float > reqScalars;    //!< [k][108]
     std::vector< uint8_t > reqMask;
     // the trajectory of each learning player: (global ring index, decision, territory share)
-    struct Entry { int64_t index; int decision; float share, value; bool hasValue; };
+    struct Entry { int64_t index; int decision; float share, value; int kills; };
     std::vector< Entry > traj[kMaxPlayers];
     size_t filled[kMaxPlayers];  //!< entries of traj whose targets are written
     // stats
@@ -156,11 +198,13 @@ public:
     //! advance every round to its next network evaluation; returns the batch size
     //! ROOTS (may be null) gets 1 for a request that is a real decision (not a look-ahead position)
     int Collect( uint8_t * maps, float * scalars, uint8_t * masks, int * agentIds, int * gameIds, int maxBatch,
-                 uint8_t * roots = 0 );
-    //! BOOTS (may be null: VALUES then) is the value the samples' n-step targets are built from; it differs
-    //! from VALUES during the warm start, when an old network steers but the new one's values count. NaN:
-    //! no value for this decision (a target then looks a little further ahead, to the next one that has one)
-    void Feed( float const * logits, float const * values, int batch, float const * boots = 0 );
+                 uint8_t * roots = 0, float * memory = 0, int * lengths = 0,
+                 uint8_t * sequenceMaps = 0, float * sequenceScalars = 0, uint8_t * sequenceMasks = 0,
+                 float * sequenceContexts = 0 );
+    //! LOGITS has six entries per request; the world's action mask determines legal moves.
+    //! VALUES guide search and form the n-step targets of real decisions.
+    void Feed( float const * logits, float const * values, int batch, int64_t const * updates = 0,
+               float const * memory = 0 );
 
     // stats since the last call
     std::atomic< int64_t > statDecisions{ 0 }, statSearches{ 0 }, statSims{ 0 }, statSamples{ 0 };
@@ -170,8 +214,10 @@ private:
     void Advance( Game & g );
     void BeginDecision( Game & g );
     void Decide( Game & g );
+    void WatchDecision( Game & g, int p, int action, int selection, float const * search = 0 );
     int HunterAction( Game & g, int p );
-    int HunterMove( Game const & g, int p ) const;
+    int HunterAction( World const & w, int decision, int p, int & action, int & plannedAt ) const;
+    int HunterMove( World const & w, int p ) const;
     float HunterEval( World const & w, int p, int e ) const;
     void FinishDecision( Game & g, int const * acts );
     void BeginSearch( Game & g );

@@ -63,7 +63,7 @@ def main():
                 needs = alive[k] and not over
                 if needs:
                     flags |= P.FLAG_NEEDS_ACTION
-                body += P.SLOT_HEAD.pack(flags, 0, 0b0111, 0)
+                body += P.SLOT_HEAD.pack(flags, 0, (1 << P.N_ACTIONS) - 1, 0)
                 if needs:
                     body += np.random.randint(0, 256, P.GRID * P.GRID * P.N_MAPS, dtype=np.uint8).tobytes()
                     body += np.random.randn(P.N_SCALARS).astype(np.float32).tobytes()

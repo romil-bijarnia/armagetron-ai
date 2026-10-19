@@ -62,6 +62,8 @@ public:
     static bool IsBenchmark(); //!< returns true if a benchmark is running
 
     static void IsInGame(); //!< call while game content is rendered
+    //! Mark a scene frame for hidden rendering telemetry or opt-in FRAME_TELEMETRY logging.
+    static void GameFrameRendered( double gameTime, int reportedFPS );
 
     // starting and stopping of background network processing
     class rNetIdler

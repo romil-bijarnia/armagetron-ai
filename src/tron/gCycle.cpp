@@ -27,6 +27,7 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 
 #include "eEventNotification.h"
 #include "gCycle.h"
+#include "gArenaMaterial.h"
 #include "nConfig.h"
 #include "rModel.h"
 //#include "eTess.h"
@@ -4135,7 +4136,12 @@ static rFileTexture dir_eWall_moviepack(rTextureGroups::TEX_WALL,"moviepack/dir_
 
 static void dir_eWall_select()
 {
-    if (sg_MoviePack()){
+    if (sg_blacklightVisuals && !sg_MoviePack())
+    {
+        static gArenaMaterial material(gArenaMaterial::Trail);
+        material.Select();
+    }
+    else if (sg_MoviePack()){
         TexMatrix();
         IdentityMatrix();
         ScaleMatrix(1/mp_eWall_stretch,1,1);

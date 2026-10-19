@@ -50,13 +50,16 @@
 class gCommandLineJumpStartAnalyzer : public tCommandLineAnalyzer
 {
 public:
-    bool ShouldConnect() { return _shouldConnect; }
+    bool ShouldConnect() const { return _shouldConnect; }
+    bool ShouldStartLocalGame() const { return _localGame; }
     void Connect();
 private:
-    bool _shouldConnect;
+    bool _shouldConnect = false;
+    bool _localGame = false;
     tString _raw;
     bool DoAnalyze( tCommandLineParser & parser, int pass ) override;
     void DoHelp( std::ostream & s ) override;
+    bool DoExecute() override;
 };
 
 void ExtractConnectionInformation( tString &raw, tString &servername, tString &port );

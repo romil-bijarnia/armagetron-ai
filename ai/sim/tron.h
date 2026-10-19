@@ -20,7 +20,7 @@ typedef float REAL;
 const REAL EPS = REAL( 1E-7 );
 
 enum { S_NONE = 0, S_RIM = 1, S_ENEMY = 2, S_TEAMMATE = 3, S_SELF = 4 };  // gSensorWallType
-enum { ACT_STRAIGHT = 0, ACT_LEFT = 1, ACT_RIGHT = 2, ACT_BRAKE = 3 };
+enum { ACT_STRAIGHT = 0, ACT_LEFT = 1, ACT_RIGHT = 2, ACT_BRAKE = 3, ACT_LEFT_BRAKE = 4, ACT_RIGHT_BRAKE = 5 };
 
 struct Settings
 {
@@ -137,7 +137,7 @@ public:
     //! the observation gNeural.cpp builds for cycle I: four 64x64 maps and the scalars
     void Observe( int i, uint8_t * local, uint8_t * close, uint8_t * global, uint8_t * territory, float * scalars ) const;
 
-    static int const kGrid = 64, kScalars = 96;
+    static int const kGrid = 64, kScalars = 108;
 
     //! is the point at trail distance W of cycle C's walls solid at time T (no owner exclusions)
     bool WallPointDangerous( int c, REAL w, REAL t ) const;

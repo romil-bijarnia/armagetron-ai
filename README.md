@@ -1,17 +1,17 @@
 # Armagetron AI
 
-Armagetron Advanced with a deep reinforcement learning opponent that learns the game by playing against itself inside the real engine.
+Armagetron Advanced with a V4 combat policy trained through search-guided self-play.
 
-This repository is the Armagetron Advanced source (0.4 trunk) plus two additions. The engine gains a neural network bridge (`src/tron/gNeural.cpp`) that lets an external process drive chosen AI cycles, and a headless lockstep mode in which the dedicated server plays rounds without any connected human, as fast as the network can answer. The `ai/` folder holds the Python side: the policy network, a self-play PPO trainer that runs dozens of engines in parallel, evaluation tools, and a play mode where you join a local server from the normal game client and race the trained network.
+The engine's neural bridge (`src/tron/gNeural.cpp`) controls AI cycles through normal steering and braking commands. The `ai/` folder contains the single supported network (`PolicyNet` in `arma_ai/model.py`), the GPU learner, a C++ self-play simulator, evaluation tools, and a play server for racing the trained policy from the normal game client.
 
-Because training happens in the game itself, the agent learns the real physics (rubber, wall acceleration, turn delay, brakes) rather than an approximation, and it controls its cycle through exactly the same turn and brake commands a human uses.
+Training mixes ordinary rounds with varied close encounters. Simulator behavior is checked against recorded engine rounds; fixed-opponent evaluation uses the real dedicated engine. Exported V4 weights also run directly in the game's C++ inference code.
 
 ## Getting started
 
 Build the dedicated server with the bridge, then train or play. The details, including the full configure line, are in [ai/README.md](ai/README.md).
 
 ```bash
-cd ai && uv run arma-train
+cd ai && uv run arma-background
 ```
 
 ```bash
@@ -30,10 +30,23 @@ desktop/os-x/build_native_app.sh
 
 The result is `build-macos/Armagetron Advanced.app`, with a `.dmg` and a `.zip` of it beside it. The script lists the Homebrew packages it needs at the top. Without an Apple developer ID the app gets an ad-hoc signature, which is enough to run it on the Mac that built it.
 
+The included `blacklight-visuals.cfg` preset provides a dark procedural arena grid,
+clean light trails and perimeter panels, subdued reflections, and a compact cockpit.
+Enable it with `INCLUDE blacklight-visuals.cfg` in the user's `autoexec.cfg`.
+It requests 4× anti-aliasing and 8× anisotropic filtering; unsupported multisampling
+falls back to an ordinary framebuffer. These settings affect presentation only.
+
+To verify the actual renderer without opening a window, run
+`ai/.venv/bin/python desktop/os-x/capture_preview.py --output ai/runtime/graphics-preview/check`.
+The helper uses an isolated spectator arena and saves real screenshots. `--classic`
+selects the original appearance; `--load-only` renders without framebuffer readback
+for concurrent inference timing. The hidden-rendering path logs active sample count,
+drawable dimensions, and rendered throughput.
+
 ## Documentation
 
 - [ai/README.md](ai/README.md): building, training, playing and measuring.
-- [ai/docs/DESIGN.md](ai/docs/DESIGN.md): the system design, covering the engine bridge, observations, network, training, evaluation, measured performance, planned changes and the test plan.
+- [ai/docs/V4.md](ai/docs/V4.md): the current architecture, observations, controls, training targets and verification.
 - The original Armagetron Advanced documentation is unchanged: `README`, `README-DEVELOPER`, `INSTALL` and `documentation/`.
 
 ## License

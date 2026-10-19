@@ -1,6 +1,8 @@
 // Runs the game's C++ policy network on recorded inputs so the Python test can compare it with
-// PyTorch. usage: brain_check policy.bin inputs.bin
-// inputs.bin: u32 n, then per case: NumMaps() grids of grid*grid bytes, n_scalars float32, u8 mask. Prints per case: probs... value, and the decision time.
+// PyTorch. usage: brain_check policy.bin inputs.bin [reset_index]
+// inputs.bin: u32 n, then per case: NumMaps() grids of grid*grid bytes, n_scalars float32, u8 mask.
+// With fourth argument "memory", each case appends seven context floats and output appends state.
+// Prints per case: action probs... value. Reset temporal memory before reset_index, if supplied.
 #include "../../../src/tron/gNeuralNet.h"
 
 #include <chrono>
@@ -13,7 +15,7 @@ int main( int argc, char ** argv )
 {
     if ( argc < 3 )
     {
-        std::cerr << "usage: brain_check policy.bin inputs.bin\n";
+        std::cerr << "usage: brain_check policy.bin inputs.bin [reset_index]\n";
         return 2;
     }
     gNeuralNet::Net net;
@@ -35,6 +37,8 @@ int main( int argc, char ** argv )
     std::vector< float > scalars( net.NumScalars() ), probs( net.NumActions() );
     double total = 0;
     uint32_t rng = 1;
+    int const resetIndex = argc > 3 ? std::stoi( argv[3] ) : -1;
+    bool const withMemory = argc > 4 && std::string( argv[4] ) == "memory";
     gNeuralNet::Net::Memory memory; // the cases are one cycle's decisions in a row
     for ( uint32_t i = 0; i < n; ++i )
     {
@@ -43,14 +47,25 @@ int main( int argc, char ** argv )
             in.read( reinterpret_cast< char * >( &maps[m][0] ), g2 );
         in.read( reinterpret_cast< char * >( &scalars[0] ), scalars.size() * 4 );
         in.read( reinterpret_cast< char * >( &mask ), 1 );
+        float context[7] = {};
+        if ( withMemory ) in.read( reinterpret_cast< char * >( context ), sizeof( context ) );
+        if ( !in )
+        {
+            std::cerr << "truncated input case " << i << "\n";
+            return 2;
+        }
+        if ( int( i ) == resetIndex )
+            memory.Reset();
         float value = 0;
         auto t0 = std::chrono::steady_clock::now();
-        int a = net.Decide( &mapPtrs[0], &scalars[0], mask, false, &probs[0], &value, rng, memory );
+        int a = net.Decide( &mapPtrs[0], &scalars[0], mask, false, &probs[0], &value, rng, memory, context );
         total += std::chrono::duration< double, std::milli >( std::chrono::steady_clock::now() - t0 ).count();
         std::printf( "%d", a );
         for ( int k = 0; k < net.NumActions(); ++k )
-            std::printf( " %.6f", probs[k] );
-        std::printf( " %.6f\n", value );
+            std::printf( " %.9g", probs[k] );
+        std::printf( " %.9g", value );
+        if ( withMemory ) for ( float hidden : memory.recurrent ) std::printf( " %.9g", hidden );
+        std::printf( "\n" );
     }
     std::fprintf( stderr, "update %d, %.2f ms per decision\n", net.Update(), n ? total / n : 0.0 );
     return 0;
