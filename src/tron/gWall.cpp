@@ -1346,7 +1346,8 @@ void gNetPlayerWall::RenderBegin(const eCoord &p1,const eCoord &pp2,REAL ta,REAL
 
     REAL h=1;
 
-    eCoord ppos=cycle_->PredictPosition() - cycle_->dir*REAL(gCYCLE_LEN);
+    // A larger blacklight bike pushes the drawn start of the ribbon back to its tail.
+    eCoord ppos=cycle_->PredictPosition() - cycle_->dir*(REAL(gCYCLE_LEN)*(energy ? sg_LightcycleScale() : 1));
 
     if( !good(ppos.x) || !good(ppos.y) ||
         !good(p1.x)   || !good(p1.y) ||

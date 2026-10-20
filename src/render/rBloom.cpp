@@ -46,17 +46,20 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 //   BLOOM_THRESHOLD  brightness (max of r, g, b) from which a pixel glows
 //   BLOOM_RADIUS     glow width, relative to a 1080-pixel-tall screen
 //   BLOOM_HALO       strength of the wide halo relative to the narrow glow
+//   BLOOM_VIGNETTE   how much the corners of the picture darken (0 disables)
 static bool sr_bloom = false;
 static REAL sr_bloomIntensity = 1.2;
 static REAL sr_bloomThreshold = .5;
 static REAL sr_bloomRadius = .8;
 static REAL sr_bloomHalo = .25;
+static REAL sr_bloomVignette = 0;
 
 static tSettingItem< bool > sr_bloomConf( "BLOOM", sr_bloom );
 static tSettingItem< REAL > sr_bloomIntensityConf( "BLOOM_INTENSITY", sr_bloomIntensity );
 static tSettingItem< REAL > sr_bloomThresholdConf( "BLOOM_THRESHOLD", sr_bloomThreshold );
 static tSettingItem< REAL > sr_bloomRadiusConf( "BLOOM_RADIUS", sr_bloomRadius );
 static tSettingItem< REAL > sr_bloomHaloConf( "BLOOM_HALO", sr_bloomHalo );
+static tSettingItem< REAL > sr_bloomVignetteConf( "BLOOM_VIGNETTE", sr_bloomVignette );
 
 #ifdef HAVE_GLEW
 
@@ -77,7 +80,7 @@ Target glowTarget, scratchTarget; // narrow glow, normally a quarter of the scre
 Target haloTarget, haloScratchTarget; // wide halo, half the narrow glow's resolution
 GLuint brightProgram = 0, blurProgram = 0, compositeProgram = 0;
 GLint brightTexel = -1, brightThreshold = -1, brightTaps = -1, blurStep = -1;
-GLint compositeIntensity = -1, compositeHalo = -1;
+GLint compositeIntensity = -1, compositeHalo = -1, compositeVignette = -1;
 bool failed = false;             // after an error the pass stays off until the next screen mode change
 bool reported = false;           // the reason is printed once
 
@@ -143,6 +146,7 @@ char const * compositeSource =
     "uniform sampler2D halo;\n"
     "uniform float intensity;\n"
     "uniform float haloStrength;\n"
+    "uniform float vignette;\n"
     "void main()\n"
     "{\n"
     "    vec2 uv = gl_TexCoord[0].xy;\n"
@@ -161,7 +165,9 @@ char const * compositeSource =
     "    vec3 core = base * ( shoulder / max( basePeak, 0.00001 ) );\n"
     "    vec3 result = mix( mapped, core, smoothstep( 0.85, 1.0, basePeak ) );\n"
     "    float resultPeak = max( result.r, max( result.g, result.b ) );\n"
-    "    gl_FragColor = vec4( result * ( shoulder / max( resultPeak, 0.00001 ) ), 1.0 );\n"
+    // The frame falls off towards its corners, the centre stays untouched.
+    "    float falloff = 1.0 - vignette * smoothstep( 0.45, 1.05, length( ( uv - 0.5 ) * 2.0 ) * 0.78 );\n"
+    "    gl_FragColor = vec4( result * ( shoulder / max( resultPeak, 0.00001 ) ) * falloff, 1.0 );\n"
     "}\n";
 
 // Program and framebuffer bindings are not part of glPushAttrib. Saving before
@@ -321,7 +327,7 @@ void Unload()
         glDeleteProgram( compositeProgram );
     brightProgram = blurProgram = compositeProgram = 0;
     brightTexel = brightThreshold = brightTaps = blurStep = -1;
-    compositeIntensity = compositeHalo = -1;
+    compositeIntensity = compositeHalo = compositeVignette = -1;
     if ( sceneTexture )
         glDeleteTextures( 1, &sceneTexture );
     sceneTexture = 0;
@@ -376,6 +382,7 @@ bool Prepare( int width, int height )
         glUniform1i( glGetUniformLocation( compositeProgram, "halo" ), 1 );
         compositeIntensity = glGetUniformLocation( compositeProgram, "intensity" );
         compositeHalo = glGetUniformLocation( compositeProgram, "haloStrength" );
+        compositeVignette = glGetUniformLocation( compositeProgram, "vignette" );
         glUseProgram( 0 );
     }
     if ( sceneWidth != width || sceneHeight != height )
@@ -504,6 +511,7 @@ void sr_Bloom()
         glUseProgram( compositeProgram );
         glUniform1f( compositeIntensity, Clamp( sr_bloomIntensity, 0.f, 16.f ) );
         glUniform1f( compositeHalo, Clamp( sr_bloomHalo, 0.f, 2.f ) );
+        glUniform1f( compositeVignette, Clamp( sr_bloomVignette, 0.f, 1.f ) );
         glActiveTexture( GL_TEXTURE2 );
         glBindTexture( GL_TEXTURE_2D, sceneTexture );
         glActiveTexture( GL_TEXTURE1 );

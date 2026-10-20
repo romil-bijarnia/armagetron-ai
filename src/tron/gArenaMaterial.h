@@ -50,37 +50,36 @@ private:
                 Uint8 alpha = 255;
                 if (kind_ == Floor)
                 {
-                    // Broad rounded circuit panels leave quiet black glass for
-                    // the reflected bikes and trails instead of a dense wire grid.
-                    float px = std::fabs(float(x) * 512.f / size - 256.f);
-                    float py = std::fabs(float(y) * 512.f / size - 256.f);
-                    float qx = px - 205.f, qy = py - 205.f;
-                    float outside = std::sqrt(std::max(0.f,qx)*std::max(0.f,qx)
-                                              + std::max(0.f,qy)*std::max(0.f,qy));
-                    float edge = outside + std::min(std::max(qx,qy),0.f) - 27.f;
-                    float seam = Line(std::fabs(edge), 1.7f);
-                    float shoulder = Line(std::fabs(edge), 5.f);
-                    float inner = Line(std::fabs(edge+10.f), .9f);
-                    float marker = std::max(Line(px,.8f)*Line(py,4.f),
-                                            Line(py,.8f)*Line(px,4.f));
-                    intensity = .043f + .50f*seam + .07f*shoulder + .035f*inner + .065f*marker;
+                    // Square glass tiles, four by four per grid cell, parted by
+                    // thin seams with a small stud where four tiles meet. Each
+                    // tile is a shade apart so the floor reads as panels.
+                    float const tiles = 4.f, tile = 512.f;
+                    float fx = float(x) * tiles / size, fy = float(y) * tiles / size;
+                    int ix = int(fx), iy = int(fy);
+                    float lx = (fx - ix) * tile, ly = (fy - iy) * tile;
+                    float dx = std::min(lx, tile - lx), dy = std::min(ly, tile - ly);
+                    float edge = std::min(dx, dy);
+                    float seam = Line(edge, 1.6f);
+                    float shoulder = Line(edge, 7.f);
+                    float bevel = Line(std::fabs(edge - 16.f), 1.f);
+                    float stud = Line(dx, 5.f) * Line(dy, 5.f);
+                    unsigned hash = unsigned(ix * 73856093) ^ unsigned(iy * 19349663);
+                    hash = (hash ^ (hash >> 13)) * 1274126177u;
+                    float shade = float(hash & 255u) / 255.f;
+                    intensity = .034f + .014f*shade + .46f*seam + .05f*shoulder
+                                + .022f*bevel + .30f*stud;
                 }
                 else if (kind_ == Trail)
                 {
-                    // A transparent energy sheet between two narrow optical
-                    // edges. Greyscale modulation preserves every player's hue;
-                    // the field adds light without painting an opaque panel.
+                    // A ribbon of solid light: a smooth body that brightens
+                    // towards a hot top edge (v = 0) with a thinner lower
+                    // edge. Greyscale keeps every player's hue.
                     float v = float(y) / (size - 1);
-                    float u = float(x) / size;
-                    float top = std::exp(-v * 85.f);
-                    float bottom = std::exp(-(1.f - v) * 60.f);
-                    float shoulder = std::exp(-v * 14.f);
-                    float foot = std::exp(-(1.f - v) * 10.f);
-                    float weave = .5f + .5f * std::sin(v * 452.38934f
-                                      + .55f * std::sin(u * 6.2831853f));
-                    float edge = std::max(top,bottom);
-                    intensity = .60f + .025f*weave + .12f*shoulder + .09f*foot + .35f*edge;
-                    float opacity = .27f + .014f*weave + .13f*shoulder + .10f*foot + .72f*edge;
+                    float top = std::exp(-v * 70.f);
+                    float upper = std::exp(-v * 4.5f);
+                    float bottom = std::exp(-(1.f - v) * 45.f);
+                    intensity = .62f + .26f*upper + .30f*bottom + .40f*top;
+                    float opacity = .56f + .20f*upper + .22f*bottom + .40f*top;
                     alpha = Uint8(std::min(1.f,opacity)*255.f+.5f);
                 }
                 else

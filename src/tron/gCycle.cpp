@@ -4683,7 +4683,8 @@ void gCycle::Render(const eCamera *cam){
         glPushMatrix();
         eCoord p = PredictPosition();
         glTranslatef(p.x,p.y,0);
-        glScalef(.5f,.5f,.5f);
+        REAL const modelScale = .5f * (blacklightCycle ? sg_LightcycleScale() : 1);
+        glScalef(modelScale,modelScale,modelScale);
 
 
         eCoord ske(1,modelSkew);
@@ -5209,7 +5210,11 @@ void gCycle::RenderName( const eCamera* cam ) {
             name << *this->player;
         else
             name << this->player->GetName();
+        // A white plate behind a dark name glares over the black arena; the
+        // blacklight look lifts the dark colour to a readable tint instead.
+        rTextField::SetDarkBackdrop(!sg_blacklightVisuals || sg_MoviePack());
         DisplayText(0, 0, rCHEIGHT_NORMAL, name, sr_fontCycleLabel, 0, 0);
+        rTextField::SetDarkBackdrop(true);
         rTextField::SetDefaultColor(tColor(1,1,1));
     }
     static cCockpit cycleCockpit(cCockpit::VIEWPORT_CYCLE);

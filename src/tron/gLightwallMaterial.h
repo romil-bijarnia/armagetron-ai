@@ -12,9 +12,9 @@
 #include <algorithm>
 #include <cmath>
 
-// A material over the existing wall mesh. Only recent portions of the energy
-// sheet carry strong moving caustics; collision filaments remain crisp and the
-// older wall stays quiet. The RGBA texture is the compatibility fallback.
+// A material over the existing wall mesh: a solid ribbon of light in the
+// rider's colour, brightest along its top edge and hottest just behind the
+// cycle, as in the film. The RGBA texture is the compatibility fallback.
 class gLightwallMaterial
 {
     static bool & ActiveState() { static bool value=false; return value; }
@@ -73,10 +73,6 @@ class gLightwallMaterial
             "uniform float headCoord;\n"
             "varying vec3 wallCoord;\n"
             "varying vec4 wallColour;\n"
-            "float filamentMask(float field, float coreWidth) {\n"
-            "    float width = clamp(fwidth(field) * 0.75, 0.012, 0.18);\n"
-            "    return 1.0 - smoothstep(coreWidth, coreWidth + width, abs(field));\n"
-            "}\n"
             "void main() {\n"
             // Negative third coordinates are stable material markers baked in
             // the mesh, never per-draw uniform changes captured in a wall list.
@@ -88,39 +84,18 @@ class gLightwallMaterial
             "        return;\n"
             "    }\n"
             "    vec4 sheet = texture2D(energyTexture, wallCoord.xy);\n"
-            "    float u = wallCoord.x;\n"
             "    float v = clamp(wallCoord.y, 0.0, 1.0);\n"
-            "    float behind = max(0.0, headCoord - u);\n"
-            "    if (behind >= 12.0) {\n"
-            "        float alpha = clamp(wallColour.a * sheet.a, 0.0, 1.0);\n"
-            "        gl_FragColor = vec4(wallColour.rgb * sheet.rgb * alpha, alpha);\n"
-            "        return;\n"
-            "    }\n"
-            "    float recent = exp(-behind * 0.38);\n"
-            "    float strength = (0.035 + 0.965 * recent) * (1.0 - smoothstep(8.0, 12.0, behind));\n"
-            "    float interior = smoothstep(0.018, 0.10, v) * (1.0 - smoothstep(0.90, 0.982, v));\n"
-            "    vec2 q = vec2(u * 1.04 - flowTime * 0.12, v * 2.275);\n"
-            "    float wx = 0.46 * sin(v * 5.2 + sin(u * 1.105 + flowTime * 0.27));\n"
-            "    float wy = 0.18 * sin(u * 2.925 - flowTime * 0.38);\n"
-            "    wy += 0.10 * sin(u * 5.265 + v * 3.51 + flowTime * 0.21);\n"
-            "    q += vec2(wx, wy);\n"
-            "    float network = sin(q.x * 5.1 + q.y * 1.7);\n"
-            "    network += 0.75 * sin(q.y * 5.8 - q.x * 0.9);\n"
-            "    network += 0.28 * sin(q.x * 9.1 + q.y * 3.4);\n"
-            "    float crossing = sin(q.x * 6.2 - q.y * 4.0 + flowTime * 0.25);\n"
-            "    crossing += 0.70 * sin(q.y * 6.6 + q.x * 1.5 - flowTime * 0.15);\n"
-            "    crossing += 0.22 * network;\n"
-            // Derivative filtering prevents subpixel filaments from crawling;
-            // the wider shoulder remains a subtle ripple, not an opaque fill.
-            "    float ripple = 0.5 + 0.5 * sin(u * 2.6 - v * 5.85 + flowTime * 0.50 + wx * 2.0);\n"
-            "    float first = filamentMask(network, 0.040 + 0.040 * ripple) * (0.58 + 0.42 * ripple);\n"
-            "    float second = filamentMask(crossing, 0.025 + 0.035 * (1.0 - ripple)) * (0.35 + 0.45 * (1.0 - ripple));\n"
-            "    float shoulder = exp(-min(abs(network), abs(crossing)) * 2.8);\n"
-            "    float energy = clamp(interior * strength * (first + second + 0.24 * shoulder + 0.04 * ripple * recent), 0.0, 1.0);\n"
-            "    vec3 brightness = min(vec3(1.0), sheet.rgb * (1.0 + 0.035 * (ripple - 0.5) * strength) + 0.70 * energy);\n"
-            "    float opacity = clamp(sheet.a + 0.65 * energy + 0.025 * interior * ripple * strength, 0.0, 1.0);\n"
-            "    float alpha = clamp(wallColour.a * opacity, 0.0, 1.0);\n"
-            "    gl_FragColor = vec4(wallColour.rgb * brightness * alpha, alpha);\n"
+            "    float behind = max(0.0, headCoord - wallCoord.x);\n"
+            // Fresh light right behind the cycle runs hot and settles within a
+            // few lengths; the rest of the ribbon holds a steady glow.
+            "    float fresh = exp(-behind * 0.55);\n"
+            "    float lip = exp(-v * 38.0);\n"
+            "    float glow = sheet.r * (1.0 + 0.35 * fresh);\n"
+            "    vec3 tint = wallColour.rgb * glow;\n"
+            // Only the top lip runs towards white, so the body keeps its hue.
+            "    tint = mix(tint, vec3(1.0), clamp(lip * (0.30 + 0.25 * fresh), 0.0, 0.55));\n"
+            "    float alpha = clamp(wallColour.a * (sheet.a + 0.12 * fresh), 0.0, 1.0);\n"
+            "    gl_FragColor = vec4(tint * alpha, alpha);\n"
             "}\n";
         GLuint vs=Compile(GL_VERTEX_SHADER,vertex), fs=Compile(GL_FRAGMENT_SHADER,fragment);
         if (vs && fs)

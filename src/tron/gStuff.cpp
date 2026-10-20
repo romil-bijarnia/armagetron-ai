@@ -60,6 +60,18 @@ static tConfItem<bool> ump("MOVIEPACK",sg_moviepackUse);
 bool sg_blacklightVisuals=false;
 static tConfItem<bool> arenaVisuals("BLACKLIGHT_VISUALS",sg_blacklightVisuals);
 
+// The sculpted lightcycle is drawn larger than the classic bike so its rider
+// stands about as tall as the one-metre light ribbon, as in the film. Only the
+// picture changes; collisions still use the cycle's position.
+static REAL sg_lightcycleScale=1.4;
+static tSettingItem<REAL> lightcycleScale("LIGHTCYCLE_SCALE",sg_lightcycleScale);
+
+REAL sg_LightcycleScale(){
+    if (!sg_blacklightVisuals || sg_MoviePack() || !(sg_lightcycleScale > 0))
+        return 1;
+    return sg_lightcycleScale < .5 ? .5 : sg_lightcycleScale > 2 ? 2 : sg_lightcycleScale;
+}
+
 // setting item for double bind (available since version 7)
 static nSettingItemWatched<REAL> su_doubleBindTimeoutConf( "DOUBLEBIND_TIME", su_doubleBindTimeout, nConfItemVersionWatcher::Group_Cheating, 7  );
 
