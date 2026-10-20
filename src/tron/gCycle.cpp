@@ -2340,6 +2340,7 @@ static eCallbackPlayerColor sg_playerCycleColorChanged(&sg_RefreshPlayerCycleCol
 }
 
 void gCycle::MyInitAfterCreation(){
+    renderMotion_.Reset();
 #ifndef DEDICATED
     joystick_ = tNEW( gJoystick( this ) );
 #else
@@ -4651,6 +4652,16 @@ void gCycle::Render(const eCamera *cam){
 #endif
 
         bool const blacklightCycle = sg_blacklightVisuals && !mp;
+        eCoord modelDirection = dir;
+        REAL modelSkew = skew;
+        if (blacklightCycle)
+        {
+            renderMotion_.Update(se_GameTime(), std::atan2(dirDrive.y, dirDrive.x), GetLastTurnTime());
+            modelDirection = eCoord(std::cos(renderMotion_.Yaw()), std::sin(renderMotion_.Yaw()));
+            modelSkew = std::tan(renderMotion_.Bank());
+        }
+        else
+            renderMotion_.Reset();
         GLfloat color[4]={1,1,1,1};
         static GLfloat lposa[4] = { 320, 240, 200,0};
         static GLfloat lposb[4] = { -240, -100, 200,0};
@@ -4675,11 +4686,11 @@ void gCycle::Render(const eCamera *cam){
         glScalef(.5f,.5f,.5f);
 
 
-        eCoord ske(1,skew);
+        eCoord ske(1,modelSkew);
         ske=ske*(1/sqrt(ske.NormSquared()));
 
-        GLfloat m[4][4]={{dir.x,dir.y,0,0},
-                         {-dir.y,dir.x,0,0},
+        GLfloat m[4][4]={{modelDirection.x,modelDirection.y,0,0},
+                         {-modelDirection.y,modelDirection.x,0,0},
                          {0,0,1,0},
                          {0,0,0,1}};
         glMultMatrixf(&m[0][0]);
@@ -4738,9 +4749,8 @@ void gCycle::Render(const eCamera *cam){
                     RenderEnd();
                     gLightcycleMaterial::Scope material(color_.r_,color_.g_,color_.b_,
                         gLightcycleModel::RearAxle,gLightcycleModel::FrontAxle,gLightcycleModel::WheelRadius);
-                    gLightcycleModel::Render(color_.r_, color_.g_, color_.b_,
-                                            std::atan2(rotationRearWheel.y, rotationRearWheel.x),
-                                            std::atan2(rotationFrontWheel.y, rotationFrontWheel.x));
+                    REAL wheelAngle = gLightcycleMotion::WheelAngle(GetDistance(), gLightcycleModel::WheelRadius);
+                    gLightcycleModel::Render(color_.r_, color_.g_, color_.b_, wheelAngle, wheelAngle);
                 }
                 else
                 {

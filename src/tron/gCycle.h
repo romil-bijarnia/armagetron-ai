@@ -39,6 +39,7 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 #include "rDisplayList.h"
 
 #include "gCycleMovement.h"
+#include "gLightcycleMotion.h"
 
 class rModel;
 class gTextureCycle;
@@ -191,6 +192,7 @@ public:
     eCoord            lastGoodPosition_;    // the location of the last known good position
 
     REAL skew,skewDot;						// leaning to the side
+    gLightcycleMotion::State renderMotion_; // model-only pose; never used by the camera
 
     bool 				mp; 				// use moviepack or not?
 
