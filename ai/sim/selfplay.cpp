@@ -35,11 +35,6 @@ inline float Gumbel( uint64_t & s )
     return -std::log( -std::log( u ) );
 }
 
-inline int Hold( int a )
-{
-    // inside a tree edge a turn is followed by driving straight; braking keeps braking
-    return ( a == ACT_BRAKE || a == ACT_LEFT_BRAKE || a == ACT_RIGHT_BRAKE ) ? ACT_BRAKE : ACT_STRAIGHT;
-}
 
 void AppliedContext( World const & before, World const & after, int player, int action,
                      std::array< float, kContext > & context )
@@ -60,17 +55,6 @@ inline uint8_t Heading( Cycle const & c )
 {
     // the frame the minimap and territory maps are drawn in: one of the four cardinal headings
     return c.dx > .5f ? 1 : ( c.dx < -.5f ? 3 : ( c.dy < -.5f ? 2 : 0 ) );
-}
-
-float TerritoryShare( uint8_t const * territory )
-{
-    int mine = 0, theirs = 0;
-    for ( int i = 0; i < World::kGrid * World::kGrid; ++i )
-    {
-        mine += territory[i] & 1;
-        theirs += ( territory[i] >> 1 ) & 1;
-    }
-    return mine + theirs > 0 ? float( mine ) / float( mine + theirs ) : 0.f;
 }
 
 void MaskedSoftmax( float const * logits, unsigned mask, float * out, float temperature = 1 )
@@ -822,115 +806,24 @@ void SelfPlay::RunSimulations( Game & g )
 }
 
 // ------------------------------------------------------------------ the space fighter
-// A built-in opponent that asks no network: a shallow minimax over the real physics, scored by
-// the territory share (the cells it reaches before the nearest enemy). It cuts, seals and takes
-// space because that is what the score rewards; nothing else is scripted.
-static void Ply( World & w, int n, int p, int a, int e, int ea, int macro )
+// The search itself lives in fighter.cpp, shared with the game's bots.
+static FighterConfig Fighter( SPConfig const & cfg )
 {
-    int step[kMaxPlayers];
-    for ( int d = 0; d < macro; ++d )
-    {
-        for ( int q = 0; q < n; ++q )
-            step[q] = ACT_STRAIGHT;
-        step[p] = d == 0 ? a : Hold( a );
-        if ( e >= 0 )
-            step[e] = d == 0 ? ea : Hold( ea );
-        w.Step( step );
-        if ( !w.cycles[p].alive || ( e >= 0 && !w.cycles[e].alive ) )
-            return;
-    }
+    FighterConfig f;
+    f.depth = cfg.hunterDepth;
+    f.ply = cfg.hunterPly;
+    f.probe = cfg.hunterProbe;
+    return f;
 }
 
 float SelfPlay::HunterEval( World const & w, int p, int e ) const
 {
-    if ( !w.cycles[p].alive )
-        return -1.f;
-    if ( e >= 0 && !w.cycles[e].alive )
-        return 1.f;
-    static thread_local std::vector< uint8_t > maps;
-    static thread_local std::vector< float > sc;
-    int const g2 = World::kGrid * World::kGrid;
-    maps.resize( 4 * g2 );
-    sc.resize( World::kScalars );
-    w.Observe( p, &maps[0], &maps[g2], &maps[2 * g2], &maps[3 * g2], &sc[0] );
-    float score = 2 * TerritoryShare( &maps[3 * g2] ) - 1;
-    // the probe: everyone drives on; a wall met soon costs, an enemy crashing soon pays
-    if ( cfg.hunterProbe > 0 )
-    {
-        World probe = w;
-        int step[kMaxPlayers];
-        for ( int q = 0; q < int( probe.cycles.size() ); ++q )
-            step[q] = ACT_STRAIGHT;
-        for ( int k = 0; k < cfg.hunterProbe; ++k )
-        {
-            probe.Step( step );
-            float soon = 1.f - float( k ) / float( cfg.hunterProbe );
-            if ( !probe.cycles[p].alive )
-                return score - .8f * soon;
-            if ( e >= 0 && !probe.cycles[e].alive )
-                return score + .3f * soon;
-        }
-    }
-    return score;
+    return FighterEval( w, p, e, Fighter( cfg ) );
 }
 
 int SelfPlay::HunterMove( World const & w0, int p ) const
 {
-    int const n = int( w0.cycles.size() );
-    unsigned mask = w0.ActionMask( p );
-    // the nearest living enemy answers; everyone else drives on
-    int e = -1;
-    REAL bestD = 1e30f;
-    for ( int q = 0; q < n; ++q )
-    {
-        if ( q == p || !w0.cycles[q].alive || w0.cycles[q].team == w0.cycles[p].team )
-            continue;
-        REAL dx = w0.cycles[q].x - w0.cycles[p].x, dy = w0.cycles[q].y - w0.cycles[p].y;
-        REAL d = dx * dx + dy * dy;
-        if ( d < bestD )
-        {
-            bestD = d;
-            e = q;
-        }
-    }
-    unsigned emask = e >= 0 ? w0.ActionMask( e ) : 1u;
-    int best = ACT_STRAIGHT;
-    float bestV = -1e30f;
-    for ( int a = 0; a < kActions; ++a )
-    {
-        if ( !( mask >> a & 1 ) )
-            continue;
-        float worst = 1e30f;
-        for ( int ea = 0; ea < kActions && worst > bestV; ++ea )
-        {
-            if ( !( emask >> ea & 1 ) )
-                continue;
-            World w1 = w0;
-            Ply( w1, n, p, a, e, ea, cfg.hunterPly );
-            float v = -1e30f;
-            if ( cfg.hunterDepth >= 2 && w1.cycles[p].alive && ( e < 0 || w1.cycles[e].alive ) )
-            {
-                unsigned m2 = w1.ActionMask( p );
-                for ( int b = 0; b < kActions; ++b )
-                {
-                    if ( !( m2 >> b & 1 ) )
-                        continue;
-                    World w2 = w1;
-                    Ply( w2, n, p, b, e, ACT_STRAIGHT, cfg.hunterPly );
-                    v = std::max( v, HunterEval( w2, p, e ) );
-                }
-            }
-            if ( v == -1e30f )
-                v = HunterEval( w1, p, e );
-            worst = std::min( worst, v );
-        }
-        if ( worst > bestV )
-        {
-            bestV = worst;
-            best = a;
-        }
-    }
-    return best;
+    return FighterMove( w0, p, Fighter( cfg ) );
 }
 
 int SelfPlay::HunterAction( Game & g, int p )

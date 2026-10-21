@@ -170,6 +170,16 @@ private:
 #endif
 
 // a complete lightcycle
+//! what a death looked like, for the screen of the human it happened to: who got them (shown
+//! for a few seconds) and a moment of slow motion in a local game
+namespace gDeathFeel
+{
+    void Record( gCycle * prey, ePlayerNetID * hunter ); //!< a cycle just died; called where the killer is known
+    void Timestep();                                     //!< every frame: ends the slow motion
+    void Render( int localPlayer );                      //!< the notice, over this local player's viewport
+    void NewRound();                                     //!< forget the last round's deaths
+}
+
 class gCycle: public gCycleMovement
 {
     friend class gPlayerWall;

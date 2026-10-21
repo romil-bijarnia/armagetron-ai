@@ -71,15 +71,20 @@ private:
                 }
                 else if (kind_ == Trail)
                 {
-                    // A ribbon of solid light: a smooth body that brightens
-                    // towards a hot top edge (v = 0) with a thinner lower
-                    // edge. Greyscale keeps every player's hue.
+                    // A transparent energy sheet between two narrow optical
+                    // edges. Greyscale modulation preserves every player's hue;
+                    // the field adds light without painting an opaque panel.
                     float v = float(y) / (size - 1);
-                    float top = std::exp(-v * 70.f);
-                    float upper = std::exp(-v * 4.5f);
-                    float bottom = std::exp(-(1.f - v) * 45.f);
-                    intensity = .62f + .26f*upper + .30f*bottom + .40f*top;
-                    float opacity = .56f + .20f*upper + .22f*bottom + .40f*top;
+                    float u = float(x) / size;
+                    float top = std::exp(-v * 85.f);
+                    float bottom = std::exp(-(1.f - v) * 60.f);
+                    float shoulder = std::exp(-v * 14.f);
+                    float foot = std::exp(-(1.f - v) * 10.f);
+                    float weave = .5f + .5f * std::sin(v * 452.38934f
+                                      + .55f * std::sin(u * 6.2831853f));
+                    float edge = std::max(top,bottom);
+                    intensity = .60f + .025f*weave + .12f*shoulder + .09f*foot + .35f*edge;
+                    float opacity = .27f + .014f*weave + .13f*shoulder + .10f*foot + .72f*edge;
                     alpha = Uint8(std::min(1.f,opacity)*255.f+.5f);
                 }
                 else

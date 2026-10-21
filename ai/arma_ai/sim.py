@@ -76,6 +76,7 @@ def lib() -> ctypes.CDLL:
             "tr_act": ([vp, i32, i32], None), "tr_frame": ([vp], None), "tr_mask": ([vp, i32], ctypes.c_uint),
             "tr_observe": ([vp, i32, u8p, fp], None), "tr_state": ([vp, fp], i32), "tr_time": ([vp], f32),
             "tr_over": ([vp], i32), "tr_bounds": ([vp, fp], None),
+            "tr_fighter_move": ([vp, i32, i32, i32, i32], i32),
         }
         i64p = ctypes.POINTER(ctypes.c_int64)
         sig.update({

@@ -3374,6 +3374,129 @@ static eLadderLogWriter sg_deathFragWriter( "DEATH_FRAG", true, "prey hunter" );
 static eLadderLogWriter sg_deathSuicideWriter( "DEATH_SUICIDE", true, "player" );
 static eLadderLogWriter sg_deathTeamkillWriter("DEATH_TEAMKILL", true, "prey hunter" );
 
+// ------------------------------------------------------------------ death feel
+static REAL sg_deathSlowMotion = .3;   // game speed right after a human's death in a local game (1: none)
+static tSettingItem< REAL > sg_deathSlowMotionConf( "DEATH_SLOW_MOTION", sg_deathSlowMotion );
+static REAL sg_deathSlowMotionTime = 1.1; // for this many real seconds
+static tSettingItem< REAL > sg_deathSlowMotionTimeConf( "DEATH_SLOW_MOTION_TIME", sg_deathSlowMotionTime );
+static bool sg_deathNotice = true;     // say who got you
+static tSettingItem< bool > sg_deathNoticeConf( "DEATH_NOTICE", sg_deathNotice );
+static bool sg_impactMarker = true;    // light up the spot where your own cycle is about to hit a wall
+static tSettingItem< bool > sg_impactMarkerConf( "IMPACT_MARKER", sg_impactMarker );
+
+namespace
+{
+struct DeathRecord
+{
+    ePlayerNetID const * prey = NULL;
+    tColoredString line;
+    double realTime = 0;
+};
+std::vector< DeathRecord > sg_deaths;
+double sg_slowMotionUntil = -1;
+
+bool LocalHuman( ePlayerNetID const * p )
+{
+    return p && p->IsHuman() && p->Owner() == sn_myNetID;
+}
+}
+
+void gDeathFeel::Record( gCycle * prey, ePlayerNetID * hunter )
+{
+    ePlayerNetID * player = prey ? prey->Player() : NULL;
+    if ( !player || !player->IsHuman() )
+        return;
+    DeathRecord record;
+    record.prey = player;
+    record.realTime = tRealSysTimeFloat();
+    if ( hunter && hunter != player )
+    {
+        record.line << tColoredString::ColorString( .75, .75, .75 ) << "cut off by ";
+        record.line << *hunter << tColoredString::ColorString( .75, .75, .75 );
+    }
+    else
+        record.line << tColoredString::ColorString( .75, .75, .75 ) << "you hit your own wall";
+    for ( size_t i = 0; i < sg_deaths.size(); ++i )
+        if ( sg_deaths[i].prey == player )
+            sg_deaths.erase( sg_deaths.begin() + i-- );
+    sg_deaths.push_back( record );
+
+    // a moment of slow motion, only where this game is the only game (no network to keep up with)
+    if ( sn_GetNetState() == nSTANDALONE && se_mainGameTimer && LocalHuman( player ) &&
+         sg_deathSlowMotion > 0 && sg_deathSlowMotion < 1 && sg_deathSlowMotionTime > 0 )
+    {
+        se_mainGameTimer->speed = sg_deathSlowMotion;
+        sg_slowMotionUntil = record.realTime + sg_deathSlowMotionTime;
+    }
+}
+
+void gDeathFeel::Timestep()
+{
+    if ( sg_slowMotionUntil < 0 )
+        return;
+    if ( tRealSysTimeFloat() >= sg_slowMotionUntil || sn_GetNetState() != nSTANDALONE )
+    {
+        if ( se_mainGameTimer && se_mainGameTimer->speed < 1 )
+            se_mainGameTimer->speed = 1;
+        sg_slowMotionUntil = -1;
+    }
+}
+
+void gDeathFeel::NewRound()
+{
+    sg_deaths.clear();
+    if ( sg_slowMotionUntil >= 0 && se_mainGameTimer && se_mainGameTimer->speed < 1 )
+        se_mainGameTimer->speed = 1;
+    sg_slowMotionUntil = -1;
+}
+
+void gDeathFeel::Render( int localPlayer )
+{
+#ifndef DEDICATED
+    if ( !sg_deathNotice || !sr_glOut )
+        return;
+    ePlayer * config = ePlayer::PlayerConfig( localPlayer );
+    ePlayerNetID const * me = config ? static_cast< ePlayerNetID const * >( config->netPlayer ) : NULL;
+    if ( !me )
+        return;
+    double now = tRealSysTimeFloat();
+    for ( size_t i = 0; i < sg_deaths.size(); ++i )
+    {
+        DeathRecord const & record = sg_deaths[i];
+        if ( record.prey != me )
+            continue;
+        double age = now - record.realTime;
+        if ( age > 4 )
+            continue;
+        REAL alpha = age < .25 ? REAL( age / .25 ) : ( age > 3 ? REAL( 4 - age ) : 1 );
+        RenderEnd();
+        glPushAttrib( GL_ENABLE_BIT | GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT | GL_CURRENT_BIT );
+        glDisable( GL_DEPTH_TEST );
+        glDisable( GL_LIGHTING );
+        glEnable( GL_BLEND );
+        glBlendFunc( GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA );
+        ModelMatrix();
+        glPushMatrix();
+        glLoadIdentity();
+        ProjMatrix();
+        glPushMatrix();
+        glLoadIdentity();
+        rTextField::SetBlendColor( tColor( 1, 1, 1, alpha ) );
+        DisplayText( 0, .30f, .11f, "DEREZZED", sr_fontCenterMessage, 0 );
+        DisplayText( 0, .19f, .05f, record.line, sr_fontCenterMessage, 0 );
+        rTextField::SetBlendColor( tColor( 1, 1, 1, 1 ) );
+        rTextField::SetDefaultColor( tColor( 1, 1, 1 ) );
+        ProjMatrix();
+        glPopMatrix();
+        ModelMatrix();
+        glPopMatrix();
+        glPopAttrib();
+    }
+#else
+    (void)localPlayer;
+#endif
+}
+
 void gCycle::KillAt( const eCoord& deathPos){
     // don't kill invulnerable cycles
     if ( !Vulnerable() )
@@ -3401,6 +3524,8 @@ void gCycle::KillAt( const eCoord& deathPos){
 
     if (!Alive() || sn_GetNetState()==nCLIENT)
         return;
+
+    gDeathFeel::Record( this, hunter );
 
 #ifdef KRAWALL_SERVER_LEAGUE
     if (    hunter           && Player()          &&
@@ -4962,7 +5087,6 @@ void gCycle::Render(const eCamera *cam){
         // Name
         RenderName( cam );
 
-
         // shadow:
 
         sr_DepthOffset(true);
@@ -5084,6 +5208,58 @@ void gCycle::Render(const eCamera *cam){
 
         glPopMatrix();
 
+        // the spot where this cycle is about to hit a wall, for the human riding it
+        if ( sg_impactMarker && !blinking && Alive() && LocalHuman( Player() ) && cam->RenderingMain() )
+        {
+            REAL speed = Speed();
+            REAL range = std::max( 8.f, speed * 1.35f );
+            gSensor ahead( this, pos, dirDrive );
+            ahead.detect( range );
+            if ( ahead.ehit && ahead.hit < range && ahead.type != gSENSOR_NONE )
+            {
+                REAL closeness = 1 - ahead.hit / range;
+                REAL r = .55f, g = .85f, b = 1; // the rim
+                if ( ahead.type != gSENSOR_RIM )
+                {
+                    gPlayerWall const * wall = dynamic_cast< gPlayerWall const * >( ahead.ehit->GetWall() );
+                    if ( wall && wall->Cycle() )
+                    {
+                        r = wall->Cycle()->color_.r_;
+                        g = wall->Cycle()->color_.g_;
+                        b = wall->Cycle()->color_.b_;
+                    }
+                }
+                eCoord at = pos + dirDrive * ahead.hit;
+                eCoord side( -dirDrive.y, dirDrive.x );
+                REAL pulse = .8f + .2f * sinf( REAL( tRealSysTimeFloat() * 14 ) );
+                REAL alpha = closeness * closeness * pulse;
+                REAL width = .18f + .5f * closeness, height = 1 + .6f * closeness;
+                RenderEnd();
+                glPushAttrib( GL_ENABLE_BIT | GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT |
+                              GL_CURRENT_BIT | GL_TEXTURE_BIT | GL_LIGHTING_BIT );
+                glDisable( GL_LIGHTING );
+                glDisable( GL_TEXTURE_2D );
+                glDisable( GL_CULL_FACE );
+                glEnable( GL_BLEND );
+                glBlendFunc( GL_SRC_ALPHA, GL_ONE );
+                glDepthMask( GL_FALSE );
+                ModelMatrix();
+                BeginQuads();
+                // a bright core with a soft skirt, standing on the wall across the line of travel
+                for ( int layer = 0; layer < 2; ++layer )
+                {
+                    REAL w = layer ? width * 3 : width, a = layer ? alpha * .25f : alpha;
+                    glColor4f( r, g, b, a );
+                    glVertex3f( at.x - side.x * w, at.y - side.y * w, 0 );
+                    glVertex3f( at.x + side.x * w, at.y + side.y * w, 0 );
+                    glColor4f( r, g, b, 0 );
+                    glVertex3f( at.x + side.x * w, at.y + side.y * w, height );
+                    glVertex3f( at.x - side.x * w, at.y - side.y * w, height );
+                }
+                RenderEnd();
+                glPopAttrib();
+            }
+        }
     }
 }
 

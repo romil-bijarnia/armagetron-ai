@@ -1122,6 +1122,43 @@ bool gCycleMovement::CanMakeTurn( REAL time, int direction ) const
 //!
 // *******************************************************************************************
 
+gCyclePhysics gCycleMovement::ExportPhysics()
+{
+    gCyclePhysics ph;
+    REAL const m = SpeedMultiplier();
+    ph.speed = sg_speedCycle * m;
+    ph.speedMin = sg_speedCycleMin;
+    ph.speedMax = sg_speedCycleMax;
+    ph.decayBelow = sg_speedCycleDecayBelow;
+    ph.decayAbove = sg_speedCycleDecayAbove;
+    ph.startSpeed = sg_speedCycleStart * m;
+    ph.accel = sg_accelerationCycle;
+    ph.accelOffset = sg_accelerationCycleOffs;
+    ph.wallNear = sg_nearCycle;
+    ph.accelSelf = sg_accelerationCycleSelf;
+    ph.accelTeam = sg_accelerationCycleTeam;
+    ph.accelEnemy = sg_accelerationCycleEnemy;
+    ph.accelRim = sg_accelerationCycleRim;
+    ph.accelSlingshot = sg_accelerationCycleSlingshot;
+    ph.accelTunnel = sg_accelerationCycleTunnel;
+    ph.brake = sg_brakeCycle;
+    ph.brakeRefill = sg_cycleBrakeRefill;
+    ph.brakeDeplete = sg_cycleBrakeDeplete;
+    ph.delay = sg_delayCycle / m;
+    ph.delayBonus = sg_delayCycleBonus;
+    ph.turnSpeedFactor = sg_cycleTurnSpeedFactor;
+    ph.rubber = sg_rubberCycle;
+    ph.rubberSpeed = sg_rubberCycleSpeed;
+    ph.rubberTime = sg_rubberCycleTime;
+    ph.rubberMinDistance = sg_rubberCycleMinDistance;
+    ph.rubberMinDistanceRatio = sg_rubberCycleMinDistanceRatio;
+    ph.rubberMinDistanceReservoir = sg_rubberCycleMinDistanceReservoir;
+    ph.rubberMinDistanceUnprepared = sg_rubberCycleMinDistanceUnprepared;
+    ph.rubberMinDistancePreparation = sg_rubberCycleMinDistancePreparation;
+    ph.rubberMinAdjust = sg_rubberCycleMinAdjust;
+    return ph;
+}
+
 REAL gCycleMovement::GetTurnDelay( void ) const
 {
     // the basic delay as it was before 0.2.8 looked like this:

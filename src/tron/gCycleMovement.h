@@ -72,6 +72,19 @@ public:
 typedef rColor gRealColor;
 
 //! class handling lightcycle movement aspects ( not networking beyond construction, no rendering, no wall building )
+//! the movement settings a look-ahead needs, as they are right now (gFighter copies them into its simulator)
+struct gCyclePhysics
+{
+    REAL speed, speedMin, speedMax, decayBelow, decayAbove, startSpeed;
+    REAL accel, accelOffset, wallNear;
+    REAL accelSelf, accelTeam, accelEnemy, accelRim, accelSlingshot, accelTunnel;
+    REAL brake, brakeRefill, brakeDeplete;
+    REAL delay, delayBonus, turnSpeedFactor;
+    REAL rubber, rubberSpeed, rubberTime;
+    REAL rubberMinDistance, rubberMinDistanceRatio, rubberMinDistanceReservoir;
+    REAL rubberMinDistanceUnprepared, rubberMinDistancePreparation, rubberMinAdjust;
+};
+
 class gCycleMovement : public eNetGameObject
 {
 public:
@@ -103,6 +116,9 @@ public:
     bool                    CanMakeTurn             (int direction                      ) const     ;   //!< returns whether a turn is currently possible
     bool                    CanMakeTurn             ( REAL time, int direction          ) const     ;   //!< returns whether a turn is possible at the given time
     inline  REAL            GetDistanceSinceLastTurn(                                   ) const     ;   //!< returns the distance since the last turn
+    static gCyclePhysics    ExportPhysics           (                                   )           ;   //!< the current movement settings
+    REAL                    GetLastTurnTimeLeft     (                                   ) const { return lastTurnTimeLeft_; }   //!< the time of the last turn left
+    REAL                    GetLastTurnTimeRight    (                                   ) const { return lastTurnTimeRight_; }  //!< the time of the last turn right
     REAL                    GetTurnDelay            (                                   ) const     ;   //!< returns the time between turns in different directions
     REAL                    GetTurnDelayDb          (                                   ) const     ;   //!< returns the time between turns in the same direcion
     REAL                    GetNextTurn             (int direction                                   ) const     ;   //!< returns the time of the next turn

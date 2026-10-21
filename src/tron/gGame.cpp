@@ -40,6 +40,7 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 #include "eTimer.h"
 #include "gAIBase.h"
 #include "gNeural.h"
+#include "gFighter.h"
 #include "gTutorial.h"
 #include "rSysdep.h"
 #include "rFont.h"
@@ -1408,6 +1409,7 @@ void s_Timestep(eGrid *grid, REAL time,bool cam){
 
         // let the neural network make its decisions
         gNeural::Timestep(time);
+        gDeathFeel::Timestep();
     }
 
     lastTimeTimestep=time;
@@ -1436,7 +1438,10 @@ void RenderAllViewports(eGrid *grid){
 				conf->Select(i);
 				rViewport *act=conf->Port(i);
 				if (act && ePlayer::PlayerConfig(p))
+				{
 					ePlayer::PlayerConfig(p)->Render();
+					gDeathFeel::Render(p);
+				}
 				else con << "hey! viewport " << i << " does not exist!\n";
 			} else {
 				cameras(i)->SetRenderInCockpit(false);
@@ -3246,6 +3251,8 @@ void gGame::StateUpdate(){
 
             init_game_objects(grid);
             gNeural::NewRound();
+            gFighter::NewRound();
+            gDeathFeel::NewRound();
 
             eTeam::WriteOnlinePlayers();
 

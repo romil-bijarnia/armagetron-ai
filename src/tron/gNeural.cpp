@@ -28,6 +28,7 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 #include "gNeural.h"
 #include "gNeuralNet.h"
 #include "gNeuralAsync.h"
+#include "gFighter.h"
 #include "tConsole.h"
 #include "tDirectories.h"
 
@@ -959,11 +960,22 @@ void gNeural::Shutdown()
 {
     sg_shuttingDown = true;
     StopLocalWorker();
+    gFighter::Shutdown();
 }
 
 int & gNeural::Slots()
 {
     return sg_numSlots;
+}
+
+unsigned gNeural::LegalActions( gCycle * c )
+{
+    return ActionMask( c );
+}
+
+int gNeural::ApplyAction( gCycle * c, int action )
+{
+    return Apply( c, action );
 }
 
 REAL gNeural::LockstepDT()

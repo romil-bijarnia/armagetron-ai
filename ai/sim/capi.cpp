@@ -1,6 +1,7 @@
 // C entry points for Python (ctypes): one World per handle.
 
 #include "tron.h"
+#include "fighter.h"
 
 #include <cstring>
 #include <algorithm>
@@ -49,6 +50,14 @@ void tr_place( void * w, int i, float x, float y, float dx, float dy )
     static_cast< World * >( w )->Place( i, x, y, dx, dy );
 }
 
+int tr_fighter_move( void const * w, int p, int depth, int ply, int probe )
+{
+    tron::FighterConfig cfg;
+    cfg.depth = depth;
+    cfg.ply = ply;
+    cfg.probe = probe;
+    return tron::FighterMove( *static_cast< World const * >( w ), p, cfg );
+}
 void tr_step( void * w, int const * actions )
 {
     static_cast< World * >( w )->Step( actions );

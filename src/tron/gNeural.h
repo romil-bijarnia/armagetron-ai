@@ -31,6 +31,7 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 #include "defs.h"
 
 class gAIPlayer;
+class gCycle;
 
 //! Bridge that lets a local inference worker or an external process drive some AI players.
 //! Configured with NEURAL_SOCKET (unix socket path) and NEURAL_SLOTS (how many AI players
@@ -66,6 +67,12 @@ namespace gNeural
 
     //! how many AI players the network drives (the NEURAL_SLOTS setting, for the menu)
     int & Slots();
+
+    //! the moves a cycle may make now, one bit per action (straight, left, right, brake, left+brake, right+brake)
+    unsigned LegalActions( gCycle * c );
+
+    //! give a cycle one of those moves; returns the move that was actually executed (-1 before the game runs)
+    int ApplyAction( gCycle * c, int action );
 }
 
 #endif

@@ -154,6 +154,7 @@ libtron_a_SOURCES=tron/gAIBase.cpp tron/gAIBase.h tron/gAICharacter.cpp tron/gAI
 	tron/gNeural.cpp tron/gNeural.h tron/gNeuralAsync.h tron/gNeuralNet.cpp tron/gNeuralNet.h tron/gSensor.cpp tron/gSensor.h tron/gServerBrowser.cpp tron/gServerBrowser.h tron/gSparks.cpp tron/gSparks.h\
 	tron/gStuff.cpp tron/gStuff.h tron/gTeam.cpp tron/gTeam.h tron/gWall.cpp\
 	tron/gWall.h tron/gArenaMaterial.h tron/gLightcycleModel.h tron/gLightcycleMaterial.h tron/gLightwallMaterial.h tron/gArenaBackdrop.h tron/gCycleInput.h tron/gLightcycleMotion.h\
+	tron/gFighter.cpp tron/gFighter.h ../ai/sim/tron.cpp ../ai/sim/tron.h ../ai/sim/observe.cpp ../ai/sim/fighter.cpp ../ai/sim/fighter.h\
 	tron/gServerFavorites.h tron/gServerFavorites.cpp\
 	tron/gStatistics.h tron/gStatistics.cpp\
 	tron/gStatList.h tron/gStatList.cpp\

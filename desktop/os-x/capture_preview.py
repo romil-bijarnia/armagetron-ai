@@ -60,8 +60,8 @@ def main():
                     help="explicit native policy file for a headless inference/frame-time check")
     ap.add_argument("--port", type=int, default=49534)
     args = ap.parse_args()
-    if not 1 <= args.seconds <= 60:
-        ap.error("--seconds must be between 1 and 60")
+    if not 1 <= args.seconds <= 600:
+        ap.error("--seconds must be between 1 and 600")
     if not 320 <= args.width <= 1920 or not 240 <= args.height <= 1200:
         ap.error("preview dimensions are out of range")
     if not 0 <= args.neural_slots <= 4:

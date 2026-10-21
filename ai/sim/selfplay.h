@@ -21,6 +21,7 @@
 #define TRON_SELFPLAY_H
 
 #include "tron.h"
+#include "fighter.h"
 
 #include <atomic>
 #include <array>
@@ -29,9 +30,7 @@
 
 namespace tron
 {
-int const kMaxPlayers = 8;
 int const kMapBytes = 4 * World::kGrid * World::kGrid;  // one decision's four maps
-int const kActions = 6;
 int const kAux = 3;
 int const kMemory = 256;
 int const kContext = kActions + 1; //!< previous executed control and elapsed decision intervals

@@ -27,6 +27,7 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 
 #include "gAIBase.h"
 #include "gNeural.h"
+#include "gFighter.h"
 #include "gArena.h"
 #include "gStuff.h"
 #include "eGrid.h"
@@ -119,6 +120,15 @@ static gAITeam* AITeam()
 static void ClearAITeam()
 {
     sg_AITeam = NULL;
+}
+
+// With one player per team allowed (TEAM_MAX_PLAYERS 1) every bot fights for itself, as in a
+// free-for-all; otherwise the bots share the AI team as they always did.
+static gAITeam* NewAITeam()
+{
+    if ( eTeam::maxPlayers <= 1 )
+        return tNEW( gAITeam );
+    return AITeam();
 }
 
 // an instance of this class will prevent deterministic random lookups
@@ -1282,7 +1292,7 @@ void gAIPlayer::SetNumberOfAIs(int num, int minPlayers, int iq, int tries)
             // count the active AIs
             ePlayerNetID *p = se_PlayerNetIDs(i);
             gAIPlayer  *ai  = dynamic_cast<gAIPlayer*>(p);
-            if (ai && ai->NextTeam() == sg_AITeam )
+            if (ai && dynamic_cast< gAITeam * >( ai->NextTeam() ) )
             {
                 //				int index = ((int)ai->character - (int)&gAICharacter::s_Characters(0))/sizeof(gAICharacter);
                 //				inGame(index) = true;
@@ -1349,7 +1359,7 @@ void gAIPlayer::SetNumberOfAIs(int num, int minPlayers, int iq, int tries)
 
             sg_AIReferences.Add( ai );
 
-            ai->SetTeam ( AITeam() );
+            ai->SetTeam ( NewAITeam() );
             ai->UpdateTeam();
 
             /*
@@ -3147,6 +3157,13 @@ void gAIPlayer::Timestep(REAL time){
     // the neural network bridge does the thinking for these
     if ( gNeural::Controls( this ) )
         return;
+
+    // and the space fighter for these
+    if ( gFighter::Controls( this ) )
+    {
+        gFighter::Timestep( this, time );
+        return;
+    }
 
     // don't think if the object is not up to date
     if ( Object() && Object()->LastTime() < time - EPS )
