@@ -10,7 +10,7 @@ import torch
 
 from arma_ai import protocol as P
 from arma_ai.model import make_net
-from arma_ai.teach import Config, Learner, _half
+from arma_ai.teach import Config, Learner, RL_OBJECTIVE, _half
 
 
 def same_state(expected, actual):
@@ -35,14 +35,16 @@ def batch():
     return dict(maps=torch.zeros(1, steps, 2 * P.N_MAPS, P.GRID, P.GRID, dtype=torch.uint8),
                 scalars=torch.zeros(1, steps, P.N_SCALARS), mask=torch.ones(1, steps, P.N_ACTIONS, dtype=torch.bool),
                 context=torch.zeros(1, steps, 7), reset=torch.tensor([[True, False, False]]),
-                policy=policy, has_policy=torch.ones(1, steps, dtype=torch.bool),
-                learn=torch.tensor([[False, True, True]]), value=torch.tensor([[0., .25, -.25]]),
+                policy=policy, has_policy=torch.zeros(1, steps, dtype=torch.bool),
+                action=torch.full((1, steps), 4, dtype=torch.long),
+                behavior_logp=torch.full((1, steps), -1.7917595), behavior_value=torch.zeros(1, steps),
+                learn=torch.tensor([[False, True, True]]), value=torch.tensor([[0., .25, .5]]),
                 aux=torch.full((1, steps, 3), .5), own=torch.zeros(1, steps, P.GRID, P.GRID, dtype=torch.long),
                 own_ok=torch.zeros(1, steps, dtype=torch.bool))
 
 
-@pytest.mark.parametrize("method", ["rl", "imitation"])
-def test_canonical_resume_preserves_weights_and_resets_only_cross_method_moments(tmp_path, method):
+@pytest.mark.parametrize("method,objective", [("rl", RL_OBJECTIVE), ("imitation", RL_OBJECTIVE), ("rl", "search_teacher")])
+def test_canonical_resume_preserves_weights_and_resets_only_cross_method_moments(tmp_path, method, objective):
     old_threads = torch.get_num_threads()
     torch.set_num_threads(2)
     try:
@@ -59,7 +61,7 @@ def test_canonical_resume_preserves_weights_and_resets_only_cross_method_moments
                          "rng_state": {"seed": 17}, "torch_rng_state": torch.get_rng_state()}
             if method == "imitation":
                 imitation["optimizer"] = optimizer.state_dict()
-            ck = {"trainer": "teach", "last_training_method": method,
+            ck = {"trainer": "teach", "last_training_method": method, "rl_objective": objective,
                   "model": net.state_dict(), "opt": optimizer.state_dict(),
                   "exploiter": old_model, "exploiter_opt": optimizer.state_dict(),
                   "update": 41, "xupdates": 9, "generation": 3,
@@ -76,7 +78,7 @@ def test_canonical_resume_preserves_weights_and_resets_only_cross_method_moments
                 assert (learner.update, learner.generation, learner.decisions, learner.games) == (41, 3, 9000, 90)
                 assert learner.trained == [2048, 128] and learner.generated == [3000, 500]
                 same_state(imitation, learner.imitation_state)
-                if method == "imitation":
+                if method == "imitation" or objective != RL_OBJECTIVE:
                     assert not learner.opt.state and not learner.xopt.state and learner.xupdates == 0
                     same_state(learner.main.state_dict(), learner.exploiter.state_dict())
                 else:

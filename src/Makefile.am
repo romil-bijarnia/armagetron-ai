@@ -107,7 +107,7 @@ libenginecore_a_SOURCES=engine/eGameObject.cpp engine/eGameObject.h \
 	engine/eGrid.cpp engine/eGrid.h
 
 libengine_a_SOURCES=engine/eAdvWall.cpp engine/eAdvWall.h engine/eAuthentication.cpp\
-	engine/eAuthentication.h engine/eAxis.cpp	engine/eAxis.h engine/eCamera.cpp engine/eCamera.h\
+	engine/eAuthentication.h engine/eAxis.cpp	engine/eAxis.h engine/eCamera.cpp engine/eCamera.h engine/eCameraMotion.h\
 	engine/eCoord.h engine/eDebugLine.cpp engine/eDebugLine.h engine/eDisplay.cpp engine/eFloor.cpp\
 	engine/eFloor.h \
 	engine/eKrawall.cpp engine/eKrawall.h engine/eNetGameObject.cpp engine/eNetGameObject.h\
@@ -142,7 +142,7 @@ librender_a_SOURCES=${render_extra} render/rConsole.cpp render/rConsoleGraph.cpp
 	render/rRender.h render/rScreen.cpp render/rScreen.h render/rSDL.h render/rSysdep.cpp render/rSysdep.h\
 	render/rTexture.cpp render/rTexture.h render/rViewport.cpp render/rViewport.h render/rColor.h render/rGradient.cpp render/rGradient.h \
 	render/rTextureRenderTarget.cpp render/rTextureRenderTarget.h render/rGLuintObject.cpp render/rGLuintObject.h \
-	render/rBloom.cpp render/rBloom.h
+	render/rBloom.cpp render/rBloom.h render/rSceneSample.h
 
 libtron_a_SOURCES=tron/gAIBase.cpp tron/gAIBase.h tron/gAICharacter.cpp tron/gAICharacter.h tron/gArena.cpp tron/gArena.h\
 	tron/gArmagetron.cpp tron/gCamera.cpp tron/gCamera.h tron/gCycle.cpp tron/gCycle.h tron/gCycleMovement.cpp\
@@ -153,7 +153,7 @@ libtron_a_SOURCES=tron/gAIBase.cpp tron/gAIBase.h tron/gAICharacter.cpp tron/gAI
 	tron/gMenus.cpp tron/gMenus.h tron/gParser.cpp tron/gParser.h tron/gParticles.cpp tron/gParticles.h\
 	tron/gNeural.cpp tron/gNeural.h tron/gNeuralAsync.h tron/gNeuralNet.cpp tron/gNeuralNet.h tron/gSensor.cpp tron/gSensor.h tron/gServerBrowser.cpp tron/gServerBrowser.h tron/gSparks.cpp tron/gSparks.h\
 	tron/gStuff.cpp tron/gStuff.h tron/gTeam.cpp tron/gTeam.h tron/gWall.cpp\
-	tron/gWall.h tron/gArenaMaterial.h tron/gLightcycleModel.h tron/gLightcycleMaterial.h tron/gLightwallMaterial.h tron/gArenaBackdrop.h tron/gCycleInput.h tron/gLightcycleMotion.h\
+	tron/gWall.h tron/gArenaMaterial.h tron/gLightcycleModel.h tron/gLightcycleMaterial.h tron/gLightColour.h tron/gLightcycleEffects.h tron/gLightwallMaterial.h tron/gArenaBackdrop.h tron/gCycleInput.h tron/gLightcycleMotion.h tron/gImpactAnimation.h\
 	tron/gFighter.cpp tron/gFighter.h ../ai/sim/tron.cpp ../ai/sim/tron.h ../ai/sim/observe.cpp ../ai/sim/fighter.cpp ../ai/sim/fighter.h\
 	tron/gServerFavorites.h tron/gServerFavorites.cpp\
 	tron/gStatistics.h tron/gStatistics.cpp\

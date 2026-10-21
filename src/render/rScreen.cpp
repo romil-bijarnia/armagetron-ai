@@ -1024,6 +1024,22 @@ static bool lowlevel_sr_InitDisplay(){
                   << ", active " << ( sampleBuffers > 0 ? samples : 0 )
                   << ", drawable " << drawableWidth << "x" << drawableHeight
                   << ( sr_hiddenWindow ? " (hidden capture)" : "" ) << '\n';
+        GLint maxTexture = 0, maxRenderbuffer = 0, maxSamples = 0, maxViewport[2] = { 0, 0 };
+        glGetIntegerv( GL_MAX_TEXTURE_SIZE, &maxTexture );
+        glGetIntegerv( GL_MAX_VIEWPORT_DIMS, maxViewport );
+        char const * extensions = reinterpret_cast<char const *>( glGetString( GL_EXTENSIONS ) );
+#ifdef GL_MAX_RENDERBUFFER_SIZE_EXT
+        if ( extensions && ( std::string( extensions ).find( "GL_EXT_framebuffer_object" ) != std::string::npos
+                            || std::string( extensions ).find( "GL_ARB_framebuffer_object" ) != std::string::npos ) )
+            glGetIntegerv( GL_MAX_RENDERBUFFER_SIZE_EXT, &maxRenderbuffer );
+#endif
+#ifdef GL_MAX_SAMPLES_EXT
+        if ( extensions && ( std::string( extensions ).find( "GL_EXT_framebuffer_multisample" ) != std::string::npos
+                            || std::string( extensions ).find( "GL_ARB_framebuffer_object" ) != std::string::npos ) )
+            glGetIntegerv( GL_MAX_SAMPLES_EXT, &maxSamples );
+#endif
+        std::cerr << "OpenGL limits: texture=" << maxTexture << " renderbuffer=" << maxRenderbuffer
+                  << " viewport=" << maxViewport[0] << "x" << maxViewport[1] << " samples=" << maxSamples << '\n';
     }
 
     #ifndef DEDICATED

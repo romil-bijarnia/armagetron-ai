@@ -123,6 +123,7 @@ static tSettingItem<bool> se_RimWrapYConf
 static rDisplayList se_rimDisplayList;
 
 extern bool sg_MoviePack();
+extern bool sg_blacklightVisuals;
 
 static rFileTexture se_RimWallNoWrap(rTextureGroups::TEX_WALL,"textures/rim_wall.png",1,0);
 static rFileTexture se_RimWallWrap(rTextureGroups::TEX_WALL,"textures/rim_wall.png",1,1);
@@ -139,27 +140,33 @@ static rFileTexture se_RimWallWrap(rTextureGroups::TEX_WALL,"textures/rim_wall.p
 void eWallRim::RenderAll( eCamera * camera )
 {
 #ifndef DEDICATED
-    // call or fill display list
+    // The stadium retains its own geometry, but its light sweep and GL state
+    // must be evaluated for each view. A surrounding display list would freeze
+    // time and bake the first view's material state into every later frame.
+    auto drawRim=[&]()
+    {
+        glEnable(GL_DEPTH_TEST);
+        glDisable(GL_CULL_FACE);
+        if (!sg_MoviePack())
+            (se_RimWrapY ? se_RimWallWrap : se_RimWallNoWrap).Select();
+        for (int i=se_rimWalls.Len()-1;i>=0;--i)
+            se_rimWalls(i)->RenderReal(rDisplayList::IsRecording() ? 0 : camera);
+        RenderEnd();
+        glEnable(GL_CULL_FACE);
+    };
+    if (sg_blacklightVisuals && !sg_MoviePack())
+    {
+        drawRim();
+        return;
+    }
+    // Classic rims keep the original display-list path.
     if ( se_rimDisplayList.Call() )
     {
         return;
     }
     rDisplayListFiller filler( se_rimDisplayList );
 
-    glEnable(GL_DEPTH_TEST);
-    glDisable(GL_CULL_FACE);
-    
-    if ( !sg_MoviePack() )
-    {
-        ( se_RimWrapY ? se_RimWallWrap : se_RimWallNoWrap).Select();
-    }
-
-    for(int i=se_rimWalls.Len()-1;i>=0;i--){
-        se_rimWalls(i)->RenderReal( rDisplayList::IsRecording() ? 0 : camera );
-    }
-    RenderEnd();
-    
-    glEnable(GL_CULL_FACE);
+    drawRim();
 #endif
 }
 

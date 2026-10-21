@@ -8,11 +8,13 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 from pathlib import Path
 import re
 import select
 import shutil
+import signal
 import struct
 import subprocess
 import sys
@@ -29,21 +31,46 @@ def png(path, pixels, width, height):
     def chunk(tag, data):
         return struct.pack("!I", len(data)) + tag + data + struct.pack("!I", zlib.crc32(tag + data))
     stride = width * 3
-    scanlines = b"".join(b"\0" + pixels[y * stride:(y + 1) * stride] for y in range(height))
-    path.write_bytes(b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack("!IIBBBBB", width, height, 8, 2, 0, 0, 0))
-                     + chunk(b"IDAT", zlib.compress(scanlines)) + chunk(b"IEND", b""))
+    if len(pixels) != stride * height:
+        raise ValueError("RGB frame size does not match its dimensions")
+    # Compress one row at a time, avoiding another entire uncompressed 8K copy.
+    compressor = zlib.compressobj()
+    view = memoryview(pixels)
+    with path.open("wb") as output:
+        output.write(b"\x89PNG\r\n\x1a\n")
+        output.write(chunk(b"IHDR", struct.pack("!IIBBBBB", width, height, 8, 2, 0, 0, 0)))
+        for y in range(height):
+            data = compressor.compress(b"\0") + compressor.compress(view[y * stride:(y + 1) * stride])
+            if data:
+                output.write(chunk(b"IDAT", data))
+        output.write(chunk(b"IDAT", compressor.flush()))
+        output.write(chunk(b"IEND", b""))
+
+
+def pixel_dimensions(value):
+    value = {"4k": "3840x2160", "8k": "7680x4320"}.get(value.lower(), value)
+    match = re.fullmatch(r"(\d+)[xX](\d+)", value)
+    if not match:
+        raise argparse.ArgumentTypeError("use WIDTHxHEIGHT, 4k, or 8k")
+    width, height = map(int, match.groups())
+    if not 320 <= width <= 7680 or not 240 <= height <= 4320:
+        raise argparse.ArgumentTypeError("pixel dimensions must be between 320x240 and 7680x4320")
+    return width, height
 
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
-    built_client = ROOT / "build-macos/Armagetron Advanced.app/Contents/MacOS/armagetronad"
     installed_client = Path("/Applications/Armagetron Advanced.app/Contents/MacOS/armagetronad")
-    ap.add_argument("--client", type=Path, default=built_client if built_client.is_file() else installed_client)
+    ap.add_argument("--client", type=Path, default=installed_client)
     ap.add_argument("--output", type=Path, required=True)
     ap.add_argument("--classic", action="store_true")
     ap.add_argument("--load-only", action="store_true", help="render without GPU readback, for concurrent latency checks")
-    ap.add_argument("--width", type=int, default=768, help="logical window width; Retina drawable is twice this")
+    ap.add_argument("--width", type=int, default=768, help="logical window width; actual Retina scale is reported")
     ap.add_argument("--height", type=int, default=480)
+    ap.add_argument("--pixels", type=pixel_dimensions, metavar="WIDTHxHEIGHT",
+                    help="exact native framebuffer size (also accepts 4k or 8k); fails on mismatch, never upscales")
+    ap.add_argument("--readback-interval", type=float, default=None, metavar="SECONDS",
+                    help="minimum delay after GPU readback; defaults to 1s for --pixels stills, otherwise every frame")
     ap.add_argument("--font", type=Path, help="optional installed font to verify with the local preset")
     ap.add_argument("--set", action="append", default=[], metavar="KEY=VALUE",
                     help="override one local client setting for a controlled comparison")
@@ -62,8 +89,15 @@ def main():
     args = ap.parse_args()
     if not 1 <= args.seconds <= 600:
         ap.error("--seconds must be between 1 and 600")
-    if not 320 <= args.width <= 1920 or not 240 <= args.height <= 1200:
+    if not 320 <= args.width <= 3840 or not 240 <= args.height <= 2160:
         ap.error("preview dimensions are out of range")
+    interval = args.readback_interval
+    if interval is None:
+        interval = 1.0 if args.pixels and not args.video and not args.load_only else 0.0
+    if not math.isfinite(interval) or not 0 <= interval < args.seconds:
+        ap.error("--readback-interval must be finite, nonnegative, and below --seconds")
+    if args.video and interval:
+        ap.error("video requires --readback-interval 0 to record every rendered frame")
     if not 0 <= args.neural_slots <= 4:
         ap.error("--neural-slots must be between zero and four")
     if args.neural_model and not args.neural_model.is_file():
@@ -126,22 +160,34 @@ TEXT_OUT 1
         config += f"FONT_TYPE 3\nFONT_FILE_CUSTOM {args.font.resolve()}\nUSE_CUSTOM_FONT 1\n"
     for key, value in settings(args.set):
         config += f"{key} {value}\n"
+    if args.pixels:
+        # In this isolated hidden client one point is one pixel. The measured
+        # drawable still must match, since drivers can reject oversized windows.
+        config += (f"LOW_DPI_WINDOW 1\nARMAGETRON_WINDOWSIZE -1\n"
+                   f"ARMAGETRON_WINDOWSIZE_W {args.pixels[0]}\nARMAGETRON_WINDOWSIZE_H {args.pixels[1]}\n")
     (root / "client/config/autoexec.cfg").write_text(config)
     client_path = args.client.resolve()
     if client_path.parent.name == "MacOS" and client_path.parent.parent.name == "Contents":
         bundle = client_path.parent.parent
     else:
-        # A bare incremental-build executable uses the installed game assets.
+        # Incremental executables share assets with the one installed app.
+        # Previewing never creates another discoverable application bundle.
         bundle = installed_client.parent.parent
     resources = bundle / "Resources/armagetronad"
     configdir = bundle / "etc/armagetronad"
     processes = []
     dimensions = []
+    gl_limits = {}
     started = time.monotonic()
     frames = 0
     recording = None
     recording_log = None
     recorded_frames = 0
+
+    def interrupted(_signum, _frame):
+        raise KeyboardInterrupt
+
+    previous_sigterm = signal.signal(signal.SIGTERM, interrupted)
     try:
         with (root / "server.log").open("w") as log:
             server = subprocess.Popen([str(ENGINE_BIN), "--daemon", "--datadir", str(ENGINE_DATA),
@@ -156,6 +202,8 @@ TEXT_OUT 1
                    "--connect", f"127.0.0.1:{args.port}"]
         if args.load_only:
             command.remove("--videoout")
+        elif interval:
+            command.extend(["--videoout-interval", str(interval)])
         client = subprocess.Popen(command, stdin=subprocess.DEVNULL,
                                   stdout=subprocess.DEVNULL if args.load_only else subprocess.PIPE,
                                   stderr=subprocess.PIPE)
@@ -170,20 +218,41 @@ TEXT_OUT 1
                     match = re.search(rb"drawable[ =:]*(\d+)\s*[xX]\s*(\d+)", line)
                     if match:
                         dimensions[:] = [int(match[1]), int(match[2])]
+                    limits = re.search(rb"OpenGL limits: texture=(\d+) renderbuffer=(\d+) viewport=(\d+)x(\d+)(?: samples=(\d+))?", line)
+                    if limits:
+                        gl_limits.update(texture=int(limits[1]), renderbuffer=int(limits[2]),
+                                         viewport=[int(limits[3]), int(limits[4])])
+                        if limits[5]:
+                            gl_limits["samples"] = int(limits[5])
         reader = threading.Thread(target=stderr, daemon=True)
         reader.start()
+
+        def check_dimensions():
+            if args.pixels and dimensions and tuple(dimensions) != args.pixels:
+                raise RuntimeError(f"Requested native {args.pixels[0]}x{args.pixels[1]}, "
+                                   f"but drawable is {dimensions[0]}x{dimensions[1]}; no image was upscaled")
+
         if args.load_only:
             while time.monotonic() - started < args.seconds:
                 if client.poll() is not None:
                     raise RuntimeError(f"Preview client exited {client.returncode}")
+                check_dimensions()
                 time.sleep(.2)
             if args.neural_slots and "loaded (training update " not in (root / "server.log").read_text():
                 raise RuntimeError("Native policy did not load; built-in fallback is not a valid memory check")
-            print(json.dumps({"hidden": True, "load_only": True, "dimensions": dimensions,
-                              "seconds": time.monotonic() - started}))
+            check_dimensions()
+            if not dimensions:
+                raise RuntimeError(f"No drawable dimensions reported; see {root / 'client.log'}")
+            report = {"hidden": True, "load_only": True, "dimensions": dimensions,
+                      "framebuffer_dimensions": dimensions,
+                      "requested_pixels": args.pixels, "gl_limits": gl_limits,
+                      "seconds": time.monotonic() - started}
+            (root / "capture.json").write_text(json.dumps(report, indent=2) + "\n")
+            print(json.dumps(report))
             return
         buffer = bytearray()
         captured = set()
+        capture_times = {}
         while time.monotonic() - started < args.seconds:
             if client.poll() is not None:
                 raise RuntimeError(f"Preview client exited {client.returncode}; see {root / 'client.log'}")
@@ -196,10 +265,11 @@ TEXT_OUT 1
             buffer.extend(chunk)
             if not dimensions:
                 continue
+            check_dimensions()
             width, height = dimensions
             length = width * height * 3
             while len(buffer) >= length:
-                frame = bytes(buffer[:length])
+                frame = bytes(memoryview(buffer)[:length])
                 del buffer[:length]
                 frames += 1
                 elapsed = time.monotonic() - started
@@ -221,10 +291,15 @@ TEXT_OUT 1
                     if elapsed >= mark and mark not in captured:
                         png(root / f"frame-{mark:02g}.png", frame, width, height)
                         captured.add(mark)
+                        capture_times[mark] = elapsed
         if not captured:
             raise RuntimeError(f"No rendered frames captured; see {root / 'client.log'}")
         report = {"frames": frames, "dimensions": dimensions, "elapsed_seconds": time.monotonic() - started,
-                  "classic": args.classic, "hidden": True, "captures": sorted(captured)}
+                  "classic": args.classic, "hidden": True, "captures": sorted(captured),
+                  "capture_times": capture_times, "requested_pixels": args.pixels,
+                  "framebuffer_dimensions": dimensions, "output_dimensions": dimensions,
+                  "pixel_source": "native_opengl_framebuffer", "pixel_format": "rgb8_sdr",
+                  "readback_interval_seconds": interval, "gl_limits": gl_limits}
         if recording is not None:
             recording.stdin.close()
             if recording.wait(timeout=15) != 0:
@@ -235,7 +310,10 @@ TEXT_OUT 1
     finally:
         if recording is not None:
             if not recording.stdin.closed:
-                recording.stdin.close()
+                try:
+                    recording.stdin.close()
+                except (BrokenPipeError, OSError):
+                    pass
             if recording.poll() is None:
                 try:
                     recording.wait(timeout=5)
@@ -252,7 +330,12 @@ TEXT_OUT 1
                 except subprocess.TimeoutExpired:
                     process.kill()
                     process.wait()
+        signal.signal(signal.SIGTERM, previous_sigterm)
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except KeyboardInterrupt:
+        print("Preview capture interrupted; isolated processes stopped.", file=sys.stderr)
+        raise SystemExit(130)

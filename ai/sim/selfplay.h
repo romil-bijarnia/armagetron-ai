@@ -92,6 +92,9 @@ struct Ring
     uint8_t * heading = 0;  //!< [cap]: the player's heading quadrant (0 up, 1 right, 2 down, 3 left)
     int64_t * generation = 0; //!< live exploiter generation; never a cached recurrent state
     float * context = 0;   //!< [cap][kContext], retained independently of target readiness
+    uint8_t * action = 0;  //!< executed action; policy-gradient replay never imitates a search target
+    float * behaviorLogp = 0, * behaviorValue = 0;
+    int64_t * policyUpdate = 0;
     int64_t cap = 0;
     bool Valid() const { return cap > 0 && counter; }
 };
@@ -224,7 +227,7 @@ private:
     void Backup( Game & g, int leaf );
     void Expand( Game & g, int parent, uint32_t code, int & child );
     void Ask( Game & g, int node, int player, World const & now, World const & before );
-    void Record( Game & g, int p, bool searched, float const * policy );
+    void Record( Game & g, int p, bool searched, float const * policy, int action );
     void Fill( Game & g, int p, Ring & R );
     void FinishPlayer( Game & g, int p );
     void Finish( Game & g );

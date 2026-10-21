@@ -124,6 +124,18 @@ static REAL se_SoundGain(REAL value)
     return std::isfinite(value) ? std::max(REAL(0), std::min(REAL(1), value)) : 0;
 }
 
+#ifdef HAVE_LIBSDL_MIXER
+static void se_ReportMutedTurn()
+{
+    static bool reported=false;
+    if (sr_hiddenWindow && !reported)
+    {
+        std::cerr << "Turn audio: event suppressed by CYCLE_TURN_SOUND_VOLUME=0.\n";
+        reported=true;
+    }
+}
+#endif
+
 namespace
 {
 static tConfigMigration migrate([](tString const &savedInVersion){
@@ -467,7 +479,11 @@ void eSoundMixer::PushButton( int soundEffect ) {
     if (!m_active) return;
 
     REAL gain = soundEffect == CYCLE_TURN ? se_SoundGain(se_turnSoundVolume) : 1;
-    if (gain <= 0) return;
+    if (gain <= 0)
+    {
+        if (soundEffect==CYCLE_TURN) se_ReportMutedTurn();
+        return;
+    }
 
     int theChannel = FirstAvailableChannel();
     if( theChannel < 0) return;
@@ -482,7 +498,12 @@ void eSoundMixer::PushButton( int soundEffect, eGameObject const &noiseMaker, RE
 
     bool const turn = soundEffect == CYCLE_TURN;
     REAL gain = turn ? se_SoundGain(se_turnSoundVolume) : 1;
-    if (gain <= 0 || !std::isfinite(volume) || volume <= 0) return;
+    if (gain <= 0)
+    {
+        if (turn) se_ReportMutedTurn();
+        return;
+    }
+    if (!std::isfinite(volume) || volume <= 0) return;
 
     // If we don't have an owner yet, just call regular PushButton
     if(!m_Grid)

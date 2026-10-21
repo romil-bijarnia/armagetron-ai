@@ -8,9 +8,9 @@ import subprocess
 import time
 
 
-def replay_requirements(warmup: int, batch: int) -> tuple[int, int, int]:
+def replay_requirements(warmup: int, batch: int, *, search: bool = False) -> tuple[int, int, int]:
     """Collected positions, ready targets, and searched targets needed for a batch."""
-    return warmup, max(warmup // 2, batch - batch // 2), batch // 2
+    return warmup, max(warmup // 2, batch - batch // 2 if search else batch), batch // 2 if search else 0
 
 
 def _count(value) -> int | None:
@@ -33,7 +33,9 @@ def warmup_state(progress: dict) -> dict:
     ready = _count(progress.get("warmup_ready_target"))
     searched = _count(progress.get("warmup_searched_target"))
     if warmup is not None and batch is not None and batch > 0:
-        _, fallback_ready, fallback_searched = replay_requirements(warmup, batch)
+        legacy_search = bool(searched or cfg.get("search_prob", 0) or
+                             (searched is None and progress.get("searched_samples", 0)))
+        _, fallback_ready, fallback_searched = replay_requirements(warmup, batch, search=legacy_search)
         ready = fallback_ready if ready is None else ready
         searched = fallback_searched if searched is None else searched
     specs = (
@@ -43,6 +45,8 @@ def warmup_state(progress: dict) -> dict:
     )
     gates = []
     for key, label, field, target in specs:
+        if key == "searched" and target == 0:
+            continue
         current = _count(progress.get(field))
         fraction = None if current is None or target is None else min(current / target, 1.0) if target else 1.0
         gates.append({"id": key, "label": label, "current": current, "target": target,

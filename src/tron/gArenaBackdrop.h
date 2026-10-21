@@ -2,6 +2,8 @@
 #define ARMAGETRON_ARENA_BACKDROP_H
 
 #include "rRender.h"
+#include "rScreen.h"
+#include "tConsole.h"
 
 #ifndef DEDICATED
 #include <algorithm>
@@ -22,7 +24,7 @@ public:
     static void RenderSegment(float x1, float y1, float x2, float y2,
                               float outwardX, float outwardY,
                               float r, float g, float b,
-                              bool miterStart=false, bool miterEnd=false)
+                              bool miterStart=false, bool miterEnd=false,float seconds=0)
     {
         Key key = {{x1, y1, x2, y2, outwardX, outwardY, r, g, b,
                     float(miterStart),float(miterEnd)}};
@@ -74,12 +76,42 @@ public:
         mesh.used = ++cache.clock;
         RenderEnd();
         State state;
+        Draw(mesh.atmosphere);
+#ifdef HAVE_GLEW
+        bool material=StructureMaterial::Use(x1,y1,tx,ty,ox,oy,
+            14.f*std::max(1.f,std::ceil(length/(14.f*128.f))));
+#endif
         Draw(mesh.structure);
+#ifdef HAVE_GLEW
+        if (material) glUseProgram(0);
+#endif
         Draw(mesh.lights);
         glEnable(GL_BLEND);
         glBlendFunc(GL_SRC_ALPHA, GL_ONE);
         glDepthMask(GL_FALSE);
         Draw(mesh.halos);
+        // A slow optical sweep along the lower fascia gives the stadium depth
+        // in motion. It is evaluated outside the retained architectural mesh.
+        if (std::isfinite(seconds))
+        {
+            float origin=x1*tx+y1*ty;
+            float phase=std::fmod(seconds*7.f,84.f);
+            float stride=84.f*std::max(1.f,std::ceil(length/(84.f*128.f)));
+            float first=std::floor((origin-phase-8.f)/stride)*stride+phase-origin;
+            BeginQuads();
+            for (float station=first;station<length;station+=stride)
+            {
+                float a=std::max(0.f,station),z=std::min(length,station+8.f);
+                if (a>=z) continue;
+                glColor4f(.32f,.82f,1.f,.04f);
+                glVertex3f(x1+tx*a+ox*3.005f,y1+ty*a+oy*3.005f,3.84f);
+                glVertex3f(x1+tx*z+ox*3.005f,y1+ty*z+oy*3.005f,3.84f);
+                glColor4f(.52f,.94f,1.f,.32f);
+                glVertex3f(x1+tx*z+ox*3.005f,y1+ty*z+oy*3.005f,4.01f);
+                glVertex3f(x1+tx*a+ox*3.005f,y1+ty*a+oy*3.005f,4.01f);
+            }
+            RenderEnd();
+        }
     }
 
 private:
@@ -90,9 +122,9 @@ private:
     using Key = std::array<float, 11>;
     struct Mesh
     {
-        Batch structure, lights, halos;
+        Batch atmosphere, structure, lights, halos;
         std::uint64_t used = 0;
-        std::size_t Count() const { return structure.size() + lights.size() + halos.size(); }
+        std::size_t Count() const { return atmosphere.size() + structure.size() + lights.size() + halos.size(); }
     };
     struct Cache
     {
@@ -201,13 +233,26 @@ private:
              {s1,depth,height+thickness}, {s0,depth,height+thickness}, colour, colour);
         if (halo <= 0)
             return;
-        // Narrow mesh halos have bounded screen coverage; bloom supplies the soft
-        // optical spill. No camera-facing quads or per-frame billboard work.
-        Colour soft = colour;
-        soft.a = halo;
-        Quad(mesh.halos, f, {s0,depth-.015f,height-thickness*5},
-             {s1,depth-.015f,height-thickness*5}, {s1,depth-.015f,height+thickness*5},
-             {s0,depth-.015f,height+thickness*5}, soft, soft);
+        // Feather both axes. A constant-alpha rectangle here looked like
+        // duplicate lamp outlines when inspected at high resolution.
+        float radius=thickness*5;
+        float along[]={std::max(0.f,s0-radius),s0,s1,std::min(f.length,s1+radius)};
+        float heights[]={height-radius,height-thickness,height+thickness,height+radius};
+        float weights[]={0,1,1,0};
+        for (int row=0;row<3;++row)
+            for (int column=0;column<3;++column)
+            {
+                if (along[column]>=along[column+1]) continue;
+                auto corner=[&](int x,int y)
+                {
+                    Colour soft=colour;
+                    soft.a=halo*weights[x]*weights[y];
+                    return f.Make({along[x],depth-.015f,heights[y]},soft);
+                };
+                Vertex a=corner(column,row),b=corner(column+1,row);
+                Vertex c=corner(column+1,row+1),d=corner(column,row+1);
+                mesh.halos.insert(mesh.halos.end(),{a,b,c,a,c,d});
+            }
     }
     static void Terrace(std::vector<Point> & profile, float startDepth, float startHeight,
                         float tread, float rise, int rows)
@@ -227,15 +272,24 @@ private:
     {
         Frame f = {x,y,tx,ty,ox,oy,length,miterStart,miterEnd};
         Frame details = {x,y,tx,ty,ox,oy,length,false,false};
-        Colour graphite = {.022f+.008f*r, .034f+.010f*g, .047f+.012f*b, 1};
-        Colour steel = {.045f+.012f*r, .069f+.016f*g, .085f+.020f*b, 1};
+        // These are visible material midtones, not emissive edge colours. The
+        // shader shades the solid mass, while this baked face gradient remains
+        // readable on the compatibility renderer as well.
+        Colour graphite = {.042f+.004f*r, .058f+.005f*g, .071f+.006f*b, 1};
+        Colour steel = {.080f+.005f*r, .103f+.006f*g, .123f+.008f*b, 1};
         Colour cyan = {.23f+.07f*r, .78f+.12f*g, .94f+.06f*b, 1};
         Colour dim = {.08f, .25f+.07f*g, .33f+.07f*b, 1};
-        Colour white = {.70f,.92f,1.f,1};
+        Colour white = {.82f,.91f,.96f,1};
         std::size_t bays=static_cast<std::size_t>(std::min(130.f,std::ceil(length/14.f)+2));
-        mesh.structure.reserve(1248+180*bays);
+        mesh.atmosphere.reserve(6);
+        mesh.structure.reserve(1536+180*bays);
         mesh.lights.reserve(42+48*bays);
         mesh.halos.reserve(24+6*bays);
+
+        // A distant blue-black falloff behind the tiers supplies the film's
+        // atmospheric depth. It is geometry outside the rim, not a screen tint.
+        Quad(mesh.atmosphere,f,{0,39.f,0},{length,39.f,0},{length,39.f,110.f},{0,39.f,110.f},
+             {.028f,.050f,.061f,1},{.004f,.010f,.015f,1});
 
         std::vector<Point> bowl = {{0,3.15f,0}, {0,3.15f,3.45f}, {0,5.f,3.45f}};
         Terrace(bowl,5.f,3.45f,1.35f,.94f,6);
@@ -256,7 +310,10 @@ private:
         for (int tier=0;tier<3;++tier)
         {
             float d=railDepth[tier], z=railHeight[tier];
-            Box(mesh.structure,f,0,length,d+.04f,d+.40f,z-.23f,z+.12f,steel);
+            // A solid fascia and recessed soffit give each tier a readable
+            // thickness below its rail, instead of a luminous floating outline.
+            Box(mesh.structure,f,0,length,d+.08f,d+1.10f,z-.64f,z+.10f,Scale(graphite,.91f));
+            Box(mesh.structure,f,0,length,d+.04f,d+.40f,z-.15f,z+.15f,steel);
             Light(mesh,f,0,length,d,z,.035f,Scale(cyan,tier==0 ? .82f : .62f),.10f);
             Light(mesh,f,0,length,d+.02f,z-.19f,.012f,dim,0);
         }
@@ -273,6 +330,7 @@ private:
             Quad(mesh.structure,f,{0,a.d,a.z},{length,a.d,a.z},{length,c.d,c.z},{0,c.d,c.z},
                  Scale(steel,.62f),Scale(steel,.9f));
         }
+        Box(mesh.structure,f,0,length,28.63f,29.25f,26.40f,27.25f,Scale(steel,.90f));
         Light(mesh,f,0,length,28.62f,27.04f,.035f,Scale(cyan,.75f),.12f);
 
         // Station spacing is fixed on ordinary maps and grows only for extreme
@@ -284,14 +342,23 @@ private:
         {
             float s=float(station);
             Box(mesh.structure,details,s-.32f,s+.32f,3.035f,4.2f,.05f,4.1f,steel);
-            Box(mesh.structure,details,s-.42f,s+.42f,14.2f,15.4f,.3f,10.7f,steel);
-            Beam(mesh.structure,details,s,.31f,14.8f,8.8f,30.3f,26.95f,.23f,steel);
-            Box(mesh.structure,details,s-.40f,s+.40f,33.8f,35.f,22.5f,27.4f,steel);
+            Box(mesh.structure,details,s-.20f,s+.20f,14.2f,15.4f,.3f,10.7f,graphite);
+            // Support the canopy at its rear instead of running bright diagonal
+            // ribs across the entire bowl and its floor reflection.
+            Beam(mesh.structure,details,s,.23f,30.8f,23.9f,34.0f,27.25f,.16f,graphite);
+            Box(mesh.structure,details,s-.25f,s+.25f,33.8f,35.f,22.5f,27.4f,graphite);
             // Warm-white lamps are orderly architectural fixtures, not a field
             // of randomly coloured neon or animated spectator lights.
             Box(mesh.structure,details,s-2.45f,s+2.45f,28.53f,29.f,26.38f,27.40f,graphite);
             Light(mesh,details,s-2.15f,s+2.15f,28.49f,26.89f,.32f,white,.08f);
             Light(mesh,details,s-.32f,s+.32f,3.015f,1.55f,.055f,Scale(cyan,.72f),0);
+            // Recessed banks of light and edge-lit structural blades make the
+            // tiers legible against the sky, as in the lightcycle stadium.
+            Box(mesh.structure,details,s-2.1f,s+2.1f,3.02f,3.25f,4.9f,5.6f,graphite);
+            Light(mesh,details,s-1.75f,s+1.75f,2.995f,5.25f,.115f,Scale(white,.72f),.10f);
+            Light(mesh,details,s-.19f,s+.19f,14.16f,7.4f,.72f,Scale(cyan,.46f),.035f);
+            Quad(mesh.lights,details,{s-.025f,30.79f,23.9f},{s+.025f,30.79f,23.9f},
+                 {s+.025f,33.99f,27.2f},{s-.025f,33.99f,27.2f},Scale(dim,.65f),Scale(dim,.25f));
         }
 
         // Sparse aisle markers give the dark seating scale. They follow a quiet,
@@ -313,13 +380,205 @@ private:
             }
     }
 
-    // The fixed-function path is intentional: untextured architectural colours
-    // are already baked into the mesh, and any caller's material shader is restored.
+#ifdef HAVE_GLEW
+    // A small opaque material pass gives the retained stadium actual face and
+    // metal response. Fixtures and halos are still drawn independently, so a
+    // diffuse roof cannot accidentally become an enormous glowing light source.
+    class StructureMaterial
+    {
+        struct Bindings { GLint frame=-1, origin=-1, spacing=-1; };
+        static GLuint & Program() { static GLuint value=0; return value; }
+        static bool & Failed() { static bool value=false; return value; }
+        static Bindings & Uniforms() { static Bindings value; return value; }
+        static void Unload()
+        {
+            if (Program()) glDeleteProgram(Program());
+            Program()=0;
+            Failed()=false;
+            Uniforms()=Bindings();
+        }
+        static GLuint Compile(GLenum type,char const * source)
+        {
+            GLuint shader=glCreateShader(type);
+            glShaderSource(shader,1,&source,NULL);
+            glCompileShader(shader);
+            GLint success=GL_FALSE;
+            glGetShaderiv(shader,GL_COMPILE_STATUS,&success);
+            if (!success)
+            {
+                char message[1024]="";
+                glGetShaderInfoLog(shader,sizeof(message)-1,NULL,message);
+                con << "Stadium material: " << message << "\n";
+                glDeleteShader(shader);
+                return 0;
+            }
+            return shader;
+        }
+        static bool Prepare()
+        {
+            static rCallbackBeforeScreenModeChange cleanup(&Unload);
+            if (Program()) return true;
+            if (Failed() || !GLEW_VERSION_2_0) return false;
+            char const * vertex=
+                "#version 120\n"
+                "uniform vec4 arenaFrame;\n"
+                "uniform vec2 arenaOrigin;\n"
+                "varying vec3 viewPosition;\n"
+                "varying vec3 architecturalPosition;\n"
+                "varying vec3 alongView, outwardView, upView;\n"
+                "varying vec3 keyView, fillView;\n"
+                "varying vec4 materialColour;\n"
+                "void main() {\n"
+                "    vec4 position=gl_ModelViewMatrix*gl_Vertex;\n"
+                "    viewPosition=position.xyz;\n"
+                "    architecturalPosition=vec3(dot(gl_Vertex.xy,arenaFrame.xy),dot(gl_Vertex.xy-arenaOrigin,arenaFrame.zw),gl_Vertex.z);\n"
+                "    alongView=(gl_ModelViewMatrix*vec4(arenaFrame.xy,0.0,0.0)).xyz;\n"
+                "    outwardView=(gl_ModelViewMatrix*vec4(arenaFrame.zw,0.0,0.0)).xyz;\n"
+                "    upView=(gl_ModelViewMatrix*vec4(0.0,0.0,1.0,0.0)).xyz;\n"
+                "    keyView=normalize((gl_ModelViewMatrix*vec4(0.36,-0.48,0.80,0.0)).xyz);\n"
+                "    fillView=normalize(-outwardView+upView*0.45);\n"
+                "    materialColour=gl_Color;\n"
+                "    gl_ClipVertex=position;\n"
+                "    gl_Position=ftransform();\n"
+                "}\n";
+            char const * fragment=
+                "#version 120\n"
+                "uniform float fixtureSpacing;\n"
+                "varying vec3 viewPosition;\n"
+                "varying vec3 architecturalPosition;\n"
+                "varying vec3 alongView, outwardView, upView;\n"
+                "varying vec3 keyView, fillView;\n"
+                "varying vec4 materialColour;\n"
+                "float seam(float coordinate,float halfWidth) {\n"
+                "    float distance=abs(fract(coordinate+0.5)-0.5);\n"
+                "    float footprint=max(fwidth(coordinate),0.00001);\n"
+                "    return (1.0-smoothstep(halfWidth,halfWidth+footprint,distance))*halfWidth/(halfWidth+footprint);\n"
+                "}\n"
+                "float lamp(vec3 source,vec3 n,float reach) {\n"
+                "    vec3 local=source-architecturalPosition;\n"
+                "    float distance2=dot(local,local);\n"
+                "    vec3 delta=alongView*local.x+outwardView*local.y+upView*local.z;\n"
+                "    float diffuse=max(dot(n,normalize(delta)),0.0);\n"
+                "    return diffuse/(1.0+distance2/(reach*reach))*(1.0-smoothstep(reach*1.4,reach*2.8,sqrt(distance2)));\n"
+                "}\n"
+                "float seatHash(vec2 p) {\n"
+                "    vec3 q=fract(vec3(p.xyx)*0.1031);\n"
+                "    q+=dot(q,q.yzx+33.33);\n"
+                "    return fract((q.x+q.y)*q.z);\n"
+                "}\n"
+                "void main() {\n"
+                // Derivative normals retain the actual flat architectural faces
+                // without duplicating the cached mesh or uploading normal arrays.
+                "    vec3 n=normalize(cross(dFdx(viewPosition),dFdy(viewPosition)));\n"
+                "    vec3 eye=normalize(-viewPosition);\n"
+                "    if (dot(n,eye)<0.0) n=-n;\n"
+                "    vec3 key=normalize(keyView), fill=normalize(fillView);\n"
+                "    float vertical=1.0-abs(dot(n,normalize(upView)));\n"
+                "    float metal=smoothstep(0.075,0.18,materialColour.r);\n"
+                "    float panel=seam(architecturalPosition.x/3.5,0.004);\n"
+                "    panel+=seam(architecturalPosition.z/2.4,0.005)*vertical*0.4;\n"
+                "    float finish=1.0-0.15*panel;\n"
+                "    float grainPhase=architecturalPosition.x*240.0+architecturalPosition.z*39.0;\n"
+                "    finish+=sin(grainPhase)*(1.0-smoothstep(0.65,3.0,fwidth(grainPhase)))*0.018*metal;\n"
+                "    float light=0.59+0.66*max(dot(n,key),0.0)+0.37*max(dot(n,fill),0.0);\n"
+                "    vec3 body=materialColour.rgb*light*finish;\n"
+                "    float keyGloss=pow(max(dot(n,normalize(eye+key)),0.0),mix(12.0,38.0,metal));\n"
+                "    float fillGloss=pow(max(dot(n,normalize(eye+fill)),0.0),9.0);\n"
+                "    float fresnel=pow(1.0-max(dot(n,eye),0.0),4.0);\n"
+                "    body+=vec3(0.85,0.91,0.96)*keyGloss*(0.018+0.11*metal);\n"
+                "    body+=vec3(0.40,0.55,0.61)*fillGloss*(0.012+0.050*metal+0.025*fresnel);\n"
+                // The light pools coincide with existing lower and canopy lamps.
+                // They expose recess depth without introducing extra neon objects.
+                "    float station=floor(architecturalPosition.x/fixtureSpacing+0.5)*fixtureSpacing;\n"
+                "    float lower=lamp(vec3(station,2.995,5.25),n,4.5);\n"
+                "    float upper=lamp(vec3(station,28.49,26.89),n,6.0);\n"
+                "    body+=vec3(0.075,0.105,0.115)*(lower+upper)*mix(0.55,1.0,metal);\n"
+                "    vec2 local=architecturalPosition.yz;\n"
+                "    float rail=exp(-dot(local-vec2(3.09,3.95),local-vec2(3.09,3.95))*0.45);\n"
+                "    rail+=exp(-dot(local-vec2(13.30,9.65),local-vec2(13.30,9.65))*0.45);\n"
+                "    rail+=exp(-dot(local-vec2(24.30,17.05),local-vec2(24.30,17.05))*0.45);\n"
+                "    body+=vec3(0.005,0.017,0.022)*rail;\n"
+                // Fine, non-emissive seating texture gives the stands scale.
+                // It converges to an average below pixel size instead of
+                // becoming a flickering field of point lights.
+                "    float d=architecturalPosition.y;\n"
+                "    float seating=(step(5.2,d)-step(12.8,d))+(step(16.2,d)-step(23.8,d))+(step(27.2,d)-step(33.8,d));\n"
+                "    seating*=step(3.4,architecturalPosition.z)*(1.0-step(24.8,architecturalPosition.z));\n"
+                "    vec2 seats=vec2(architecturalPosition.x*2.4,architecturalPosition.z*2.6);\n"
+                "    vec2 seat=floor(seats);\n"
+                "    float population=seatHash(seat);\n"
+                "    vec2 offset=vec2(seatHash(seat+vec2(7.0,3.0)),seatHash(seat+vec2(2.0,9.0)))-0.5;\n"
+                "    vec2 cell=fract(seats)-vec2(0.5,0.42)-offset*0.28;\n"
+                "    float footprint=max(length(fwidth(seats)),0.001);\n"
+                "    float resolved=1.0-smoothstep(0.5,1.4,footprint);\n"
+                "    vec2 head=(cell-vec2(0.0,0.16))*vec2(7.5,8.0);\n"
+                "    vec2 shoulders=(cell+vec2(0.0,0.10))*vec2(3.9,5.0);\n"
+                "    float shape=exp(-dot(head,head))*0.7+exp(-dot(shoulders,shoulders))*0.55;\n"
+                "    float grain=mix(0.075,shape*(0.25+0.75*population),resolved);\n"
+                "    float aisle=abs(fract(architecturalPosition.x/fixtureSpacing+0.5)-0.5);\n"
+                "    grain*=smoothstep(0.015,0.045,aisle);\n"
+                "    body=mix(body,body*0.45+vec3(0.10,0.18,0.20)*grain,seating);\n"
+                "    gl_FragColor=vec4(min(body,vec3(0.65)),materialColour.a);\n"
+                "}\n";
+            GLuint vs=Compile(GL_VERTEX_SHADER,vertex),fs=Compile(GL_FRAGMENT_SHADER,fragment);
+            if (vs && fs)
+            {
+                Program()=glCreateProgram();
+                glAttachShader(Program(),vs);
+                glAttachShader(Program(),fs);
+                glLinkProgram(Program());
+                GLint success=GL_FALSE;
+                glGetProgramiv(Program(),GL_LINK_STATUS,&success);
+                if (!success)
+                {
+                    char message[1024]="";
+                    glGetProgramInfoLog(Program(),sizeof(message)-1,NULL,message);
+                    con << "Stadium material link: " << message << "\n";
+                    glDeleteProgram(Program());
+                    Program()=0;
+                }
+                else
+                {
+                    Uniforms().frame=glGetUniformLocation(Program(),"arenaFrame");
+                    Uniforms().origin=glGetUniformLocation(Program(),"arenaOrigin");
+                    Uniforms().spacing=glGetUniformLocation(Program(),"fixtureSpacing");
+                }
+            }
+            if (vs) glDeleteShader(vs);
+            if (fs) glDeleteShader(fs);
+            if (!Program())
+            {
+                Failed()=true;
+                con << "Stadium material: using compatibility shading.\n";
+            }
+            return Program()!=0;
+        }
+    public:
+        static bool Use(float x,float y,float tx,float ty,float ox,float oy,float spacing)
+        {
+            if (!Prepare()) return false;
+            glUseProgram(Program());
+            glUniform4f(Uniforms().frame,tx,ty,ox,oy);
+            glUniform2f(Uniforms().origin,x,y);
+            glUniform1f(Uniforms().spacing,spacing);
+            return true;
+        }
+    };
+#endif
+
+    // Architectural colours remain usable without shaders. The caller's GL
+    // state is restored after structure, fixtures, and optical halos are drawn.
     class State
     {
     public:
         State()
         {
+            glGetIntegerv(GL_MATRIX_MODE,&matrixMode_);
+            glMatrixMode(GL_MODELVIEW);
+            glPushMatrix();
+            // This is scenery outside the collision rim. Compress its vertical
+            // profile into a low stadium; the playing plane and camera stay put.
+            glScalef(1.f,1.f,.58f);
             glPushAttrib(GL_ENABLE_BIT | GL_CURRENT_BIT | GL_COLOR_BUFFER_BIT |
                          GL_DEPTH_BUFFER_BIT | GL_POLYGON_BIT | GL_LIGHTING_BIT | GL_TEXTURE_BIT);
             glPushClientAttrib(GL_CLIENT_VERTEX_ARRAY_BIT);
@@ -384,6 +643,9 @@ private:
         {
             glPopClientAttrib();
             glPopAttrib();
+            glMatrixMode(GL_MODELVIEW);
+            glPopMatrix();
+            glMatrixMode(matrixMode_);
 #ifdef HAVE_GLEW
             if (buffers_) glBindBuffer(GL_ARRAY_BUFFER,arrayBuffer_);
             if (shaders_) glUseProgram(program_);
@@ -395,6 +657,7 @@ private:
 #endif
         }
     private:
+        GLint matrixMode_=GL_MODELVIEW;
         static void DisableTexture()
         {
             glDisable(GL_TEXTURE_1D);

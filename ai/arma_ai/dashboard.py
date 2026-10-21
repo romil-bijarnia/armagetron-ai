@@ -525,15 +525,16 @@ def _arenas(last: dict) -> Panel:
 
 
 def _reports(records: list[dict], rows: int, now: float) -> Panel:
+    direct = any("clip_fraction" in row for row in records[-rows:])
     table = Table.grid(padding=(0, 2), expand=True)
     for _ in range(7):
         table.add_column(no_wrap=True, justify="right")
-    table.add_row(*[_line(value) for value in ("Update", "Age", "Policy loss", "Value loss", "Gain", "Value EV",
+    table.add_row(*[_line(value) for value in ("Update", "Age", "Policy loss", "Value loss", "Clipped" if direct else "Gain", "Value EV",
                                                "Decisions/s")])
     for row in reversed(records[-rows:]):
         table.add_row(_line(f"{row['update']:,}", "default"), _line(ago(now - row.get("time", now))),
                       _line(_number(row.get("pg"), ".4f")), _line(_number(row.get("vf"), ".4f")),
-                      _line(_number(row.get("search_kl"), ".3f")),
+                      _line(_number(row.get("clip_fraction" if direct else "search_kl"), ".3f")),
                       _line(_number(row.get("value_explained"), ".3f")), _line(_number(row.get("sps"))))
     return _panel("Recent saved reports", table)
 
@@ -603,10 +604,12 @@ def build(run_dir: Path, recs: list[dict], width: int = 160, height: int = 48,
                        [row.get("vf") for row in history], NEUTRAL, fmt="{:.3f}"), "Policy above · value below")
     p_speed = _chart("Logged throughput", AreaGraph([row.get("sps") for row in history], BLUE),
                      "Decisions/s in saved reports")
-    gain_value = f" · {last['search_kl']:.3f}" if _finite(last.get("search_kl")) else ""
-    p_gain = _chart("Search gain" + gain_value, AreaGraph([row.get("search_kl") for row in history], BLUE,
+    direct = progress.get("rl_objective") == "clipped_actor_critic" or "clip_fraction" in last
+    gain_key, gain_title = ("clip_fraction", "Clipped updates") if direct else ("search_kl", "Search gain")
+    gain_value = f" · {last[gain_key]:.3f}" if _finite(last.get(gain_key)) else ""
+    p_gain = _chart(gain_title + gain_value, AreaGraph([row.get(gain_key) for row in history], BLUE,
                     [row.get("ent") for row in history], NEUTRAL, fmt="{:.2f}"),
-                    "KL above · entropy below")
+                    ("Clipped fraction" if direct else "KL") + " above · entropy below")
     scores = _scores(last, bars=wide)
     score_rows = 1 + len(_score_pairs(last))  # the header and one row per reported matchup
     layout = Layout()

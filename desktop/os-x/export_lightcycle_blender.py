@@ -46,13 +46,13 @@ def arguments(argv=None):
     parser.add_argument("--dump-only", action="store_true", help="only compile/run the CPU mesh exporter")
     parser.add_argument("--skip-render", action="store_true", help="save the editable .blend without rendering images")
     parser.add_argument("--force", action="store_true", help="replace this utility's existing generated .blend and renders")
-    parser.add_argument("--color", default="0.01,0.86,1.0", help="linear team emission RGB, comma separated")
-    parser.add_argument("--world-scale", type=float, default=.5, help="root scale; .5 matches the native caller")
+    parser.add_argument("--color", default="0.0666667,0.8666667,1.0", help="native display RGB for team emission, comma separated")
+    parser.add_argument("--world-scale", type=float, default=.7, help="root scale; .7 matches the default Blacklight bike")
     parser.add_argument("--rear-angle", type=float, default=0, help="rear wheel angle in radians")
     parser.add_argument("--front-angle", type=float, default=0, help="front wheel angle in radians")
     parser.add_argument("--width", type=int, default=1440)
     parser.add_argument("--height", type=int, default=960)
-    parser.add_argument("--samples", type=int, default=32, help="Cycles CPU samples per studio render")
+    parser.add_argument("--samples", type=int, default=64, help="Cycles CPU samples per studio render")
     parser.add_argument("--threads", type=int, default=min(8, os.cpu_count() or 1))
     parser.add_argument("--blender-stage", action="store_true", help=argparse.SUPPRESS)
     args = parser.parse_args(argv)
@@ -145,16 +145,17 @@ def export_native(args):
 
 
 def studio_materials(bpy, names, color):
-    # All ten native groups stay separate, with dark polished fairings, readable
-    # machined silver, fabric suit and exact-hue emission without compositor glow.
+    # Match the native material hierarchy: clear-coated black fairings, dark
+    # polished metal, woven suit and bright inlays. Colour inputs come from the
+    # game in display RGB, so emission is decoded before Cycles light transport.
     specification = {
-        "Shell": ((.025, .033, .043), .68, .22),
-        "Armour": ((.055, .071, .088), .55, .32),
-        "Metal": ((.34, .39, .45), .88, .26),
+        "Shell": ((.010, .015, .020), .12, .18),
+        "Armour": ((.012, .017, .023), .12, .22),
+        "Metal": ((.13, .16, .20), 1.0, .22),
         "Rubber": ((.009, .012, .016), 0, .54),
         "Recess": ((.005, .007, .010), .20, .55),
-        "Suit": ((.017, .022, .030), 0, .77),
-        "Visor": ((.008, .020, .029), .62, .12),
+        "Suit": ((.003, .0045, .006), 0, .42),
+        "Visor": ((.004, .012, .019), .25, .10),
     }
     materials = []
     for index, name in enumerate(names):
@@ -163,7 +164,23 @@ def studio_materials(bpy, names, color):
         shader = material.node_tree.nodes.get("Principled BSDF")
         if name in ("Light", "SubtleLight", "Headlight"):
             hue = (.77, .87, .95) if name == "Headlight" else color
-            power = .35 if name == "SubtleLight" else 1.0
+            if name == "Light":
+                # Match gLightColour.h: white-hot cyan, saturated blue and warm
+                # inlays. Blue dominance alone does not identify a cyan light.
+                peak = max(max(hue), .00001)
+                def smooth(edge0, edge1, value):
+                    t = min(1, max(0, (value - edge0) / (edge1 - edge0)))
+                    return t * t * (3 - 2 * t)
+                cyan = smooth(.35, .70, (min(hue[1:]) - hue[0]) / peak)
+                warm = smooth(.35, .65, (hue[0] - hue[2]) / peak)
+                hot = .08 + .60 * cyan
+                warm_core = (peak, min(peak, hue[1] + peak * .12), hue[2])
+                core = tuple(peak * (1 - warm) + value * warm for value in warm_core)
+                hue = tuple(value * (1 - hot) + target * hot for value, target in zip(hue, core))
+            hue = tuple(value / 12.92 if value <= .04045 else ((value + .055) / 1.055) ** 2.4 for value in hue)
+            # AgX desaturates highly overexposed light sources. Retain coloured
+            # rims and suit strips instead of making amber inlays cream-white.
+            power = 1.2 if name == "SubtleLight" else 9.0 if name == "Headlight" else 2.0 + 3.0 * cyan
             shader.inputs["Base Color"].default_value = (0, 0, 0, 1)
             shader.inputs["Roughness"].default_value = .30
             shader.inputs["Emission Color"].default_value = (*hue, 1)
@@ -176,10 +193,31 @@ def studio_materials(bpy, names, color):
             shader.inputs["Roughness"].default_value = roughness
             material.diffuse_color = (*base, 1)
             if name in ("Shell", "Visor"):
-                shader.inputs["Coat Weight"].default_value = .45
-                shader.inputs["Coat Roughness"].default_value = .16
+                shader.inputs["Coat Weight"].default_value = .80
+                shader.inputs["Coat Roughness"].default_value = .09
+            if name == "Metal":
+                shader.inputs["Anisotropic"].default_value = .42
+            if name in ("Shell", "Armour", "Metal", "Suit"):
+                nodes, links = material.node_tree.nodes, material.node_tree.links
+                coord = nodes.new("ShaderNodeTexCoord")
+                texture = nodes.new("ShaderNodeTexNoise")
+                texture.inputs["Scale"].default_value = 280 if name != "Suit" else 180
+                texture.inputs["Detail"].default_value = 2
+                links.new(coord.outputs["Object"], texture.inputs["Vector"])
+                finish = nodes.new("ShaderNodeMapRange")
+                finish.inputs["To Min"].default_value = roughness * .86
+                finish.inputs["To Max"].default_value = roughness * 1.14
+                links.new(texture.outputs["Fac"], finish.inputs["Value"])
+                links.new(finish.outputs["Result"], shader.inputs["Roughness"])
             if name == "Suit":
-                shader.inputs["Sheen Weight"].default_value = .32
+                shader.inputs["Sheen Weight"].default_value = .06
+                shader.inputs["Sheen Tint"].default_value = (.025, .035, .045, 1)
+                shader.inputs["Specular IOR Level"].default_value = .25
+                bump = material.node_tree.nodes.new("ShaderNodeBump")
+                bump.inputs["Strength"].default_value = .12
+                bump.inputs["Distance"].default_value = .001
+                material.node_tree.links.new(texture.outputs["Fac"], bump.inputs["Height"])
+                material.node_tree.links.new(bump.outputs["Normal"], shader.inputs["Normal"])
         material["native_material_index"] = index
         material["native_material_name"] = name
         materials.append(material)
@@ -245,6 +283,7 @@ def blender_scene(args):
     root["native_mesh_sha256"] = manifest["mesh_sha256"]
     root["export_note"] = "Exact native triangles; saving edits here does not modify C++ source."
     body = empty("Body", root)
+    rider = empty("Rider", root)
     constants = data["constants"]
     rear = empty("Rear wheel pivot", root, (constants["rear_axle"], 0, constants["wheel_radius"]))
     front = empty("Front wheel pivot", root, (constants["front_axle"], 0, constants["wheel_radius"]))
@@ -252,7 +291,7 @@ def blender_scene(args):
     front.rotation_euler.y = -args.front_angle
     native_objects = []
     source_triangles = 0
-    for kind, parents in (("body", (body,)), ("wheel", (rear, front))):
+    for kind, parents in (("body", (body,)), ("rider", (rider,)), ("wheel", (rear, front))):
         for group in data["parts"][kind]:
             if not group["vertices"]:
                 continue
@@ -275,24 +314,26 @@ def blender_scene(args):
     size = high - low
     extent = max(size)
 
-    # Neutral, physical studio lighting. No arena, native post-processing, glare,
-    # perspective distortion or camera tuning is carried into the review scene.
-    world = bpy.data.worlds.new("Neutral studio world")
+    # A dark material-review stage uses the film's black glass and strip lights.
+    # These Blender-only cameras and lights never modify the game configuration.
+    world = bpy.data.worlds.new("Legacy material studio")
     world.use_nodes = True
-    world.node_tree.nodes["Background"].inputs["Color"].default_value = (.18, .18, .18, 1)
-    world.node_tree.nodes["Background"].inputs["Strength"].default_value = .45
+    world.node_tree.nodes["Background"].inputs["Color"].default_value = (.008, .015, .025, 1)
+    world.node_tree.nodes["Background"].inputs["Strength"].default_value = .30
     scene.world = world
     ground = bpy.data.meshes.new("Studio ground mesh")
     half = extent * 5
     ground.from_pydata([(-half, -half, low.z - .005), (half, -half, low.z - .005),
                        (half, half, low.z - .005), (-half, half, low.z - .005)], [], [(0, 1, 2, 3)])
-    floor = bpy.data.objects.new("Neutral ground", ground)
+    floor = bpy.data.objects.new("Black glass ground", ground)
     studio_collection.objects.link(floor)
-    floor_material = bpy.data.materials.new("Studio matte grey")
+    floor_material = bpy.data.materials.new("Studio black glass")
     floor_material.use_nodes = True
     floor_shader = floor_material.node_tree.nodes.get("Principled BSDF")
-    floor_shader.inputs["Base Color"].default_value = (.16, .16, .16, 1)
-    floor_shader.inputs["Roughness"].default_value = .64
+    floor_shader.inputs["Base Color"].default_value = (.006, .009, .014, 1)
+    floor_shader.inputs["Roughness"].default_value = .17
+    floor_shader.inputs["Metallic"].default_value = .25
+    floor_shader.inputs["Coat Weight"].default_value = .45
     ground.materials.append(floor_material)
 
     def area(name, offset, energy, width, height=None):
@@ -307,10 +348,10 @@ def blender_scene(args):
         obj.location = center + Vector(offset) * extent
         obj.rotation_euler = (center - obj.location).to_track_quat("-Z", "Y").to_euler()
 
-    area("Key softbox", (.1, -1.25, 1.7), 850, extent * 1.3, extent * .65)
-    area("Fill softbox", (.9, 1.0, .9), 550, extent * 1.2, extent)
-    area("Rear edge softbox", (-1.2, .7, 1.2), 750, extent * .75, extent * 1.2)
-    area("Top strip", (0, 0, 2.0), 450, extent * 1.6, extent * .3)
+    area("Key softbox", (.1, -1.25, 1.7), 420, extent * 1.3, extent * .16)
+    area("Fill softbox", (.9, 1.0, .9), 110, extent * 1.2, extent * .5)
+    area("Rear edge softbox", (-1.2, .7, 1.2), 650, extent * .18, extent * 1.2)
+    area("Top strip", (0, 0, 2.0), 300, extent * 1.6, extent * .08)
     scene.render.resolution_x = args.width
     scene.render.resolution_y = args.height
     scene.render.resolution_percentage = 100
@@ -367,7 +408,19 @@ def blender_scene(args):
     scene.view_settings.view_transform = "AgX"
     scene.view_settings.exposure = 0
     scene.view_settings.gamma = 1
-    scene.use_nodes = False
+    optics = bpy.data.node_groups.new("Optical bloom", "CompositorNodeTree")
+    optics.interface.new_socket(name="Image", in_out="OUTPUT", socket_type="NodeSocketColor")
+    scene.compositing_node_group = optics
+    render_layer = optics.nodes.new("CompositorNodeRLayers")
+    glow = optics.nodes.new("CompositorNodeGlare")
+    glow.inputs["Type"].default_value = "Fog Glow"
+    glow.inputs["Quality"].default_value = "High"
+    glow.inputs["Threshold"].default_value = 1.2
+    glow.inputs["Strength"].default_value = .22
+    glow.inputs["Size"].default_value = .30
+    output = optics.nodes.new("NodeGroupOutput")
+    optics.links.new(render_layer.outputs["Image"], glow.inputs["Image"])
+    optics.links.new(glow.outputs["Image"], output.inputs["Image"])
     scene.unit_settings.system = "METRIC"
     for screen in bpy.data.screens:
         for space in screen.areas:
@@ -377,8 +430,8 @@ def blender_scene(args):
     note = bpy.data.texts.new("NATIVE EXPORT — provenance and limits")
     note.write(json.dumps(manifest, indent=2) + "\n\n"
                "Editable exact native triangles, with source normals and linked wheels.\n"
-               "Materials and neutral studio lighting are Blender approximations, not the native GLSL shader.\n"
-               "No compositor glow. Side and three-quarter cameras are orthographic.\n"
+               "Physical materials and strip lighting approximate the native GLSL treatment.\n"
+               "Subtle optical bloom. Side and three-quarter studio cameras are orthographic.\n"
                "Saving this file does not update the game; edit a copy to preserve future exports.\n")
     blend_path = args.output / "lightcycle-native.blend"
     bpy.ops.wm.save_as_mainfile(filepath=str(blend_path), compress=True)

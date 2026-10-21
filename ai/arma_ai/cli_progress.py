@@ -95,8 +95,7 @@ def report_lines(progress: dict, records: list[dict], status, *, width: int, now
                  started: float | None = None) -> list[Text]:
     """The latest saved report under the activity line: what training is doing to the policy.
 
-    Gain is the KL between the search's target and the network's policy, the one number that
-    says whether self-play is teaching anything; the match scores carry their counts."""
+    The match scores carry their counts; losses describe the learning objectives."""
     def line(value: str, style: str = DIM) -> Text:
         return Text(value, style=style, no_wrap=True, overflow="ellipsis")
 
@@ -110,7 +109,8 @@ def report_lines(progress: dict, records: list[dict], status, *, width: int, now
     head = [f"Report u{last.get('update', 0):,}", age(last.get("time", now), now)]
     if started and last.get("time", 0) < started:
         head.append("previous session")
-    numbers = [("gain", last.get("search_kl"), 3), ("policy", last.get("pg"), 3), ("value", last.get("vf"), 3)]
+    numbers = [("clip", last.get("clip_fraction"), 3), ("gain", last.get("search_kl"), 3),
+               ("policy", last.get("pg"), 3), ("value", last.get("vf"), 3)]
     if not narrow:
         numbers += [("entropy", last.get("ent"), 2), ("value EV", last.get("value_explained"), 2)]
     shown = [f"{label} {value:.{decimals}f}" for label, value, decimals in numbers
@@ -283,9 +283,9 @@ def build(run_dir: Path, progress: dict, records: list[dict], status, *, width: 
         totals_line = line("  ·  ".join(totals))
         body.append(totals_line)
     if "ready_samples" in current:
-        searched = (f"{current['searched_samples']:,} searched" if "searched_samples" in current
-                    else "searched count unavailable")
-        body.append(line(f"Replay {current['ready_samples']:,} ready  ·  {searched}"))
+        searched = (f"  ·  {current['searched_samples']:,} searched" if
+                    current.get("warmup_searched_target", current.get("searched_samples", 0)) > 0 else "")
+        body.append(line(f"Replay {current['ready_samples']:,} ready{searched}"))
     else:
         body.append(line("Replay not reported"))
 
@@ -293,9 +293,13 @@ def build(run_dir: Path, progress: dict, records: list[dict], status, *, width: 
         readiness = warmup_state(current)
         if readiness["fraction"] is not None:
             body.extend(progress_rows("WARMUP", readiness["fraction"], 1, width, detail="readiness"))
-            collected, ready, searched = readiness["gates"]
+            collected, ready, *extra = readiness["gates"]
             body.append(line(f"Positions {collected['current']:,}/{collected['target']:,}"))
-            body.append(line(f"Targets {ready['current']:,}/{ready['target']:,}  ·  searched {searched['current']:,}/{searched['target']:,}"))
+            targets = f"Targets {ready['current']:,}/{ready['target']:,}"
+            if extra:
+                searched = extra[0]
+                targets += f"  ·  searched {searched['current']:,}/{searched['target']:,}"
+            body.append(line(targets))
             if readiness["complete"]:
                 body.append(line("Ready; waiting for the first update."))
         else:

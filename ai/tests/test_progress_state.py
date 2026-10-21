@@ -48,13 +48,14 @@ def test_missing_or_invalid_counts_do_not_invent_readiness(bad):
 
 
 def test_requirements_match_odd_batches_and_small_warmup():
-    assert replay_requirements(20000, 511) == (20000, 10000, 255)
-    assert replay_requirements(16, 31) == (16, 16, 15)
-    assert replay_requirements(0, 3) == (0, 2, 1)
+    assert replay_requirements(20000, 511) == (20000, 10000, 0)
+    assert replay_requirements(16, 31) == (16, 31, 0)
+    assert replay_requirements(0, 3) == (0, 3, 0)
+    assert replay_requirements(20000, 511, search=True) == (20000, 10000, 255)
 
 
-@pytest.mark.parametrize("ready,searched,allowed", [(7193, 1614, False), (10000, 255, False),
-                                                     (10000, 256, True)])
+@pytest.mark.parametrize("ready,searched,allowed", [(7193, 0, False), (10000, 1, False),
+                                                     (10000, 0, True)])
 def test_display_requirements_agree_with_the_real_batch_gate(ready, searched, allowed):
     from arma_ai.teach import Config, Learner
 
@@ -65,6 +66,7 @@ def test_display_requirements_agree_with_the_real_batch_gate(ready, searched, al
         maps = np.zeros((ready, 1), np.uint8)
         gen = np.arange(ready)
         has_policy = (np.arange(ready) < searched).astype(np.uint8)
+        policy_update = np.zeros(ready, np.int64)
 
         def window(self):
             return np.arange(ready)
@@ -77,10 +79,13 @@ def test_display_requirements_agree_with_the_real_batch_gate(ready, searched, al
 
     learner = Learner.__new__(Learner)
     learner.cfg = Config(warmup=20000, batch=512)
+    ring = Ring()
+    learner.rings, learner.update = [ring], 0
     learner.rng = np.random.default_rng(0)
-    assert warmup_state(progress(ready_samples=ready, searched_samples=searched))["complete"] == allowed
+    assert warmup_state(progress(ready_samples=ready-searched, searched_samples=0,
+                                 warmup_searched_target=0))["complete"] == allowed
     if allowed:
         with pytest.raises(BatchAccepted):
-            learner.batch(Ring(), 512)
+            learner.batch(ring, 512)
     else:
-        assert learner.batch(Ring(), 512) is None
+        assert learner.batch(ring, 512) is None

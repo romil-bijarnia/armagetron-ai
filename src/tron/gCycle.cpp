@@ -72,6 +72,7 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 #include "rRender.h"
 #include "gLightcycleModel.h"
 #include "gLightcycleMaterial.h"
+#include "gLightcycleEffects.h"
 #include "gLightwallMaterial.h"
 #endif
 
@@ -2341,6 +2342,7 @@ static eCallbackPlayerColor sg_playerCycleColorChanged(&sg_RefreshPlayerCycleCol
 
 void gCycle::MyInitAfterCreation(){
     renderMotion_.Reset();
+    renderAssembly_.Reset();
 #ifndef DEDICATED
     joystick_ = tNEW( gJoystick( this ) );
 #else
@@ -4796,7 +4798,7 @@ void gCycle::Render(const eCamera *cam){
         REAL modelSkew = skew;
         if (blacklightCycle)
         {
-            renderMotion_.Update(se_GameTime(), std::atan2(dirDrive.y, dirDrive.x), GetLastTurnTime());
+            renderMotion_.Update(se_GameTime(), std::atan2(dirDrive.y, dirDrive.x), GetLastTurnTime(), Speed());
             modelDirection = eCoord(std::cos(renderMotion_.Yaw()), std::sin(renderMotion_.Yaw()));
             modelSkew = std::tan(renderMotion_.Bank());
         }
@@ -4820,8 +4822,12 @@ void gCycle::Render(const eCamera *cam){
 
 
         ModelMatrix();
+        GLfloat cycleWorldToView[16];
+        glGetFloatv(GL_MODELVIEW_MATRIX,cycleWorldToView);
         glPushMatrix();
         eCoord p = PredictPosition();
+        if (blacklightCycle)
+            p+=eCoord(renderMotion_.VisualOffsetX(),renderMotion_.VisualOffsetY());
         glTranslatef(p.x,p.y,0);
         REAL const modelScale = .5f * (blacklightCycle ? sg_LightcycleScale() : 1);
         glScalef(modelScale,modelScale,modelScale);
@@ -4841,8 +4847,16 @@ void gCycle::Render(const eCamera *cam){
         if (!mp)
             glTranslatef(-1.5,0,0);
 
-        if (blacklightCycle && !blinking)
+        // Round countdown assembles the first bike; later respawns use their own
+        // age. First-spawn invulnerability uses a sentinel and is not an age.
+        REAL const actualBirthAge=std::min(REAL(se_GameTime()+1.25f),REAL(se_GameTime()-spawnTime_));
+        REAL const visualBirthAge=renderAssembly_.Sample(se_GameTime(),actualBirthAge);
+        if (blacklightCycle && !blinking && visualBirthAge>=0)
+        {
             LightcycleGroundLight(color_);
+            gLightcycleEffects::Render(color_.r_,color_.g_,color_.b_,se_GameTime(),Speed(),
+                GetBraking()!=0,renderMotion_.Bank(),visualBirthAge);
+        }
 
         glPushMatrix();
 
@@ -4889,8 +4903,11 @@ void gCycle::Render(const eCamera *cam){
                 {
                     RenderEnd();
                     gLightcycleMaterial::Scope material(color_.r_,color_.g_,color_.b_,
-                        gLightcycleModel::RearAxle,gLightcycleModel::FrontAxle,gLightcycleModel::WheelRadius);
-                    REAL wheelAngle = gLightcycleMotion::WheelAngle(GetDistance(), gLightcycleModel::WheelRadius);
+                        gLightcycleModel::RearAxle,gLightcycleModel::FrontAxle,gLightcycleModel::WheelRadius,
+                        se_GameTime(),std::max(REAL(0),std::min(REAL(1),Speed()/60.f)),
+                        std::max(REAL(0),std::min(REAL(1),visualBirthAge/1.25f)),cycleWorldToView);
+                    REAL wheelAngle = gLightcycleMotion::WheelAngle(GetDistance(),
+                        gLightcycleModel::WheelRadius,sg_LightcycleScale());
                     gLightcycleModel::Render(color_.r_, color_.g_, color_.b_, wheelAngle, wheelAngle);
                 }
                 else
@@ -5515,6 +5532,15 @@ eCoord gCycle::CamDir() const
     {
         return dir;
     }
+}
+
+eCoord gCycle::CamDirTarget() const
+{
+    // Cameras that own their smoothing follow this stable heading, without
+    // inheriting the speed-dependent visual direction used by older modes.
+    if (joystick_ && joystick_->cameraDirection_.NormSquared()>.25)
+        return joystick_->cameraDirection_;
+    return dirDrive;
 }
 
 eCoord gCycle::Direction() const

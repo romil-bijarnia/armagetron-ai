@@ -203,6 +203,7 @@ public:
 
     REAL skew,skewDot;						// leaning to the side
     gLightcycleMotion::State renderMotion_; // model-only pose; never used by the camera
+    gLightcycleMotion::AssemblyClock renderAssembly_;
 
     bool 				mp; 				// use moviepack or not?
 
@@ -367,6 +368,7 @@ public:
     eCoord PredictPosition() const override;
     eCoord  CamTop() const override;
     eCoord CamDir() const override;
+    eCoord CamDirTarget() const override;
     eCoord Direction() const override;
 
     void RightBeforeDeath( int numTries ) override;

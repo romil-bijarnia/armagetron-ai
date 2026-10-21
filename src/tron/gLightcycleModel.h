@@ -57,7 +57,10 @@ inline Vec Cross(Vec const & a, Vec const & b)
 inline Vec Unit(Vec const & v)
 {
     float length = std::sqrt(Dot(v, v));
-    return length > .000001f ? v * (1.f / length) : Vec(0, 0, 1);
+    // Finite-difference surface normals can be much smaller than a position
+    // vector. Keep their direction instead of replacing valid small normals
+    // with world-up; reserve the fallback for degenerate/nonfinite input.
+    return std::isfinite(length) && length > 1.e-12f ? v * (1.f / length) : Vec(0, 0, 1);
 }
 inline Vec Catmull(Vec const & a, Vec const & b, Vec const & c, Vec const & d, float t)
 {
@@ -378,8 +381,13 @@ inline void FairingBand(Mesh & mesh, std::vector<Section> const & sections,
         float a=angle+(v-.5f)*width;
         Vec along=LoftPoint(sections,std::min(1.f,u+.001f),a)-LoftPoint(sections,std::max(0.f,u-.001f),a);
         Vec around=LoftPoint(sections,u,a+.001f)-LoftPoint(sections,u,a-.001f);
-        Vec n=Unit(Cross(around,along));
-        return Vertex(LoftPoint(sections,u,a)+n*offset,n);
+        Vec cross=Cross(around,along);
+        Vec n=Unit(cross);
+        // Preserve the authored inlay position while correcting its lighting
+        // normal; these bands previously used a 1e-6 placement threshold.
+        float placementLength=std::sqrt(Dot(cross,cross));
+        Vec placement=placementLength>.000001f ? n : Vec(0,0,1);
+        return Vertex(LoftPoint(sections,u,a)+placement*offset,n);
     });
 }
 
@@ -397,9 +405,81 @@ inline void CrownBand(Mesh & mesh,Vec const & center,float y0,float y1,
     });
 }
 
+// A curved, elliptic volume with independently shaped cross-sections. The
+// rider uses these for actual upper/lower limbs: muscle bellies, narrowed joints,
+// and a stable lateral axis, rather than straight constant-radius frame tubes.
+struct BodySection
+{
+    Vec center;
+    float width, depth;
+};
+
+inline BodySection BodySample(std::vector<BodySection> const & sections,float t)
+{
+    float scaled=std::max(0.f,std::min(1.f,t))*(sections.size()-1);
+    int i=std::min(static_cast<int>(sections.size())-2,static_cast<int>(scaled));
+    BodySection const & a=sections[std::max(0,i-1)], &b=sections[i], &c=sections[i+1];
+    BodySection const & d=sections[std::min(static_cast<int>(sections.size())-1,i+2)];
+    float u=scaled-i;
+    Vec size=Catmull(Vec(a.width,a.depth,0),Vec(b.width,b.depth,0),
+                    Vec(c.width,c.depth,0),Vec(d.width,d.depth,0),u);
+    return {Catmull(a.center,b.center,c.center,d.center,u),
+            std::max(.002f,size.x),std::max(.002f,size.y)};
+}
+
+inline Vec BodyPoint(std::vector<BodySection> const & sections,float t,float angle)
+{
+    BodySection section=BodySample(sections,t);
+    Vec tangent=Unit(BodySample(sections,std::min(1.f,t+.001f)).center
+                    -BodySample(sections,std::max(0.f,t-.001f)).center);
+    Vec lateral=Vec(0,1,0)-tangent*Dot(Vec(0,1,0),tangent);
+    lateral=Unit(lateral);
+    Vec depth=Cross(tangent,lateral);
+    return section.center+lateral*(section.width*std::cos(angle))
+        +depth*(section.depth*std::sin(angle));
+}
+
+inline Vertex BodyVertex(std::vector<BodySection> const & sections,float t,float angle,float offset=0)
+{
+    Vec along=BodyPoint(sections,std::min(1.f,t+.001f),angle)
+             -BodyPoint(sections,std::max(0.f,t-.001f),angle);
+    Vec around=BodyPoint(sections,t,angle+.001f)-BodyPoint(sections,t,angle-.001f);
+    // Normalize the tangents before crossing: raw finite differences on a
+    // human-sized hand can be below Unit's position-vector epsilon.
+    Vec n=Unit(Cross(Unit(around),Unit(along)));
+    return Vertex(BodyPoint(sections,t,angle)+n*offset,n);
+}
+
+inline void BodyVolume(Mesh & mesh,std::vector<BodySection> const & sections)
+{
+    Surface(mesh,static_cast<int>(sections.size()-1)*9,28,[&](float u,float v)
+    {
+        return BodyVertex(sections,u,2*Pi*v);
+    });
+    for (int end=0;end<2;++end)
+    {
+        float t=float(end);
+        Vec n=Unit(BodySample(sections,std::min(1.f,t+.001f)).center
+                  -BodySample(sections,std::max(0.f,t-.001f)).center)*(end ? 1.f : -1.f);
+        Vec center=BodySample(sections,t).center;
+        for (int i=0;i<28;++i)
+            mesh.Triangle(Vertex(center,n),Vertex(BodyPoint(sections,t,2*Pi*i/28),n),
+                          Vertex(BodyPoint(sections,t,2*Pi*(i+1)/28),n));
+    }
+}
+
+inline void BodyPanel(Mesh & mesh,std::vector<BodySection> const & sections,
+                      float start,float finish,float angle,float width,float offset=.003f)
+{
+    Surface(mesh,24,8,[&](float u,float v)
+    {
+        return BodyVertex(sections,start+(finish-start)*u,angle+(v-.5f)*width,offset);
+    });
+}
+
 struct Cache
 {
-    Parts body, wheel;
+    Parts body, wheel, rider;
 
     Cache()
     {
@@ -425,9 +505,12 @@ struct Cache
             float s=float(side);
             Annulus(wheel[Shell],.492f,.568f,s*.443f,Vec(),0,2*Pi,112);
             Annulus(wheel[Light],.574f,.640f,s*.446f,Vec(),0,2*Pi,144);
+            // The optical core shares the rider's hue. Using Headlight here
+            // overrode every colour with a white stripe, even on blue/amber bikes.
+            Annulus(wheel[Light],.600f,.612f,s*.4475f,Vec(),0,2*Pi,144);
             Annulus(wheel[SubtleLight],.565f,.573f,s*.447f,Vec(),0,2*Pi,144);
             Annulus(wheel[Armour],.642f,.661f,s*.435f,Vec(),0,2*Pi,112);
-            Annulus(wheel[SubtleLight],.491f,.500f,s*.407f,Vec(),0,2*Pi,112);
+            Annulus(wheel[Recess],.491f,.500f,s*.407f,Vec(),0,2*Pi,112);
             // Recessed register marks stay on the annular lip, never across the
             // opening. They give scale without reconstructing a spoked wheel.
             for(int i=0;i<32;++i)
@@ -435,10 +518,21 @@ struct Cache
                 float a=2*Pi*i/32;
                 Annulus(wheel[Armour],.514f,.535f,s*.445f,Vec(),a,a+.018f,2);
             }
+            // Unequal optical registers make actual distance-driven rotation
+            // visible without adding spokes to the film's hubless wheels.
+            for(int i=0;i<3;++i)
+            {
+                float a=2*Pi*i/3+.17f;
+                Annulus(wheel[Metal],.522f,.549f,s*.446f,Vec(),a,a+.34f,12);
+                Annulus(wheel[Headlight],.525f,.546f,s*.447f,Vec(),a,a+.065f,4);
+            }
         }
         // Twin luminous tread inlays remain visible in the unchanged rear view.
         for(int side=-1;side<=1;side+=2)
-            CrownBand(wheel[Light],Vec(),side*.12f-.013f,side*.12f+.013f,.723f,0,2*Pi);
+        {
+            CrownBand(wheel[SubtleLight],Vec(),side*.12f-.013f,side*.12f+.013f,.723f,0,2*Pi);
+            CrownBand(wheel[Light],Vec(),side*.12f-.003f,side*.12f+.003f,.724f,0,2*Pi);
+        }
         for(int i=0;i<40;++i)
         {
             float center=2*Pi*i/40;
@@ -496,6 +590,13 @@ struct Cache
             // A recessed, longitudinal power unit, framed by a dark side housing.
             Rod(body[Armour],Vec(-.45f,s*.28f,.73f),Vec(.32f,s*.28f,.73f),.15f,.15f,36);
             Rod(body[Metal],Vec(-.35f,s*.28f,.73f),Vec(.23f,s*.28f,.73f),.145f,.145f,36);
+            // Fine heat-exchanger fins give the power unit real depth between
+            // its luminous collars, especially under the side light.
+            for(int fin=0;fin<9;++fin)
+            {
+                float x=-.32f+.064f*fin;
+                Rod(body[Armour],Vec(x,s*.28f,.73f),Vec(x+.018f,s*.28f,.73f),.151f,.151f,24);
+            }
             for(int band=0;band<4;++band)
             {
                 float x=-.31f+.16f*band;
@@ -552,69 +653,182 @@ struct Cache
 
     void BuildRider()
     {
-        // An elongated racing tuck fills the long saddle. The shoulder, back
-        // and pelvis share one continuous surface instead of separate spheres.
+        // An adult rider seated on the saddle, with a human chest, narrow waist
+        // and pelvis. The shoulder girdle and helmet rise above the front shell
+        // so the person remains legible in both the chase view and side profile.
         std::vector<Section> torso={
-            {-.60f,1.18f,.11f,.10f},{-.43f,1.25f,.17f,.13f},
-            {-.14f,1.35f,.19f,.14f},{.16f,1.43f,.215f,.15f},
-            {.43f,1.47f,.22f,.14f},{.61f,1.46f,.135f,.09f}
+            {-.66f,1.32f,.105f,.10f},{-.54f,1.37f,.195f,.16f},
+            {-.34f,1.45f,.205f,.16f},{-.15f,1.54f,.184f,.155f},
+            {.07f,1.65f,.232f,.185f},{.29f,1.73f,.274f,.20f},
+            {.46f,1.76f,.260f,.175f},{.59f,1.77f,.125f,.095f}
         };
-        Loft(body[Suit],torso);
-        Rod(body[Suit],Vec(.58f,0,1.48f),Vec(.73f,0,1.53f),.075f,.065f,20);
-        Vec helmet(.84f,0,1.58f),radii(.245f,.151f,.168f);
-        Ellipsoid(body[Shell],helmet,radii,48,24);
-        Ellipsoid(body[Shell],Vec(.97f,0,1.49f),Vec(.17f,.125f,.08f),32,16);
-        Surface(body[Visor],36,14,[&](float u,float v)
+        std::vector<BodySection> torsoBody;
+        for (Section const & section : torso)
+            torsoBody.push_back({Vec(section.x,0,section.z),section.width,section.height});
+        BodyVolume(rider[Suit],torsoBody);
+        std::vector<BodySection> neck={
+            {Vec(.53f,0,1.76f),.092f,.075f},
+            {Vec(.61f,0,1.82f),.087f,.072f},
+            {Vec(.69f,0,1.88f),.079f,.070f}
+        };
+        BodyVolume(rider[Suit],neck);
+        BodyPanel(rider[Armour],neck,0,.22f,Pi/2,2.6f,.004f);
+
+        // One helmet shell has a taller cranium, narrowed jaw, and integrated
+        // chin bar. The lower half is shorter than the crown; there is no second
+        // sphere projecting from the face like a beak.
+        Vec helmet(.79f,0,1.94f);
+        auto helmetPoint=[&](float angle,float latitude)
         {
-            float a=-1.38f+2.76f*u,b=-.50f+.75f*v;
-            Vec n(std::cos(b)*std::cos(a),std::cos(b)*std::sin(a),std::sin(b));
-            return Vertex(helmet+Vec(n.x*radii.x*1.012f,n.y*radii.y*1.012f,n.z*radii.z*1.012f),
-                          Unit(Vec(n.x/radii.x,n.y/radii.y,n.z/radii.z)));
+            float x=std::cos(latitude)*std::cos(angle);
+            float y=std::cos(latitude)*std::sin(angle);
+            float z=std::sin(latitude);
+            float jaw=std::max(0.f,-z), crown=std::max(0.f,z);
+            Vec p(x*(.207f-.020f*jaw)+.014f*jaw-.013f*crown,
+                  y*(.166f-.030f*jaw),z*(z<0 ? .174f : .229f));
+            // A slight downward head pitch preserves a forward-looking visor.
+            float pitch=.10f;
+            return helmet+Vec(p.x*std::cos(pitch)+p.z*std::sin(pitch),p.y,
+                              -p.x*std::sin(pitch)+p.z*std::cos(pitch));
+        };
+        auto helmetVertex=[&](float angle,float latitude,float offset)
+        {
+            float normalLatitude=std::max(-Pi/2+.015f,std::min(Pi/2-.015f,latitude));
+            Vec along=helmetPoint(angle+.001f,normalLatitude)-helmetPoint(angle-.001f,normalLatitude);
+            Vec upward=helmetPoint(angle,normalLatitude+.001f)-helmetPoint(angle,normalLatitude-.001f);
+            Vec normal=Unit(Cross(Unit(along),Unit(upward)));
+            return Vertex(helmetPoint(angle,latitude)+normal*offset,normal);
+        };
+        Surface(rider[Shell],56,32,[&](float u,float v)
+        {
+            return helmetVertex(2*Pi*u,Pi*(v-.5f),0);
         });
-        std::vector<Vec> brow;
-        for(int i=0;i<=28;++i)
+        Surface(rider[Visor],40,16,[&](float u,float v)
         {
-            float a=-1.33f+2.66f*i/28;
-            brow.push_back(helmet+Vec(radii.x*1.023f*std::cos(.25f)*std::cos(a),
-                radii.y*1.023f*std::cos(.25f)*std::sin(a),radii.z*std::sin(.25f)));
+            return helmetVertex(-1.38f+2.76f*u,-.42f+.77f*v,.004f);
+        });
+        std::vector<Vec> brow,jawLine;
+        for(int i=0;i<=36;++i)
+        {
+            float a=-1.36f+2.72f*i/36;
+            brow.push_back(helmetVertex(a,.36f,.006f).position);
+            jawLine.push_back(helmetVertex(a,-.47f,.004f).position);
         }
-        Tube(body[SubtleLight],brow,.0055f,8);
+        Tube(rider[Light],brow,.008f,8);
+        Tube(rider[Light],jawLine,.007f,8);
+
         for(int side=-1;side<=1;side+=2)
         {
-            float s=float(side);
-            FairingBand(body[Light],torso,side>0 ? .30f : Pi-.30f,.12f);
-            Vec shoulder(.43f,s*.19f,1.46f),elbow(.75f,s*.29f,1.19f),wrist(1.12f,s*.32f,1.12f);
-            Rod(body[Suit],shoulder,elbow,.089f,.072f,22);
-            Rod(body[Suit],elbow,wrist,.073f,.055f,22);
-            Ellipsoid(body[Suit],shoulder,Vec(.105f,.095f,.095f),24,14);
-            Ellipsoid(body[Suit],elbow,Vec(.077f,.077f,.076f),24,14);
-            Ellipsoid(body[Rubber],Vec(1.15f,s*.32f,1.11f),Vec(.086f,.062f,.056f),24,14);
-            Tube(body[Light],{{.35f,s*.26f,1.49f},{.47f,s*.28f,1.45f},
-                {.63f,s*.34f,1.31f},{.76f,s*.36f,1.21f},
-                {.95f,s*.37f,1.17f},{1.13f,s*.37f,1.12f}},.008f);
-            Vec hip(-.43f,s*.15f,1.19f),knee(.12f,s*.32f,.79f),ankle(-.38f,s*.36f,.39f);
-            Rod(body[Suit],hip,knee,.115f,.097f,24);
-            Rod(body[Suit],knee,ankle,.086f,.064f,24);
-            Ellipsoid(body[Suit],knee,Vec(.11f,.098f,.105f),28,16);
-            Ellipsoid(body[Rubber],Vec(-.25f,s*.36f,.33f),Vec(.20f,.09f,.075f),32,16);
-            Tube(body[Light],{{-.43f,s*.235f,1.21f},{-.20f,s*.31f,1.04f},
-                {.08f,s*.413f,.84f},{.12f,s*.415f,.78f},
-                {-.12f,s*.425f,.58f},{-.35f,s*.425f,.41f},
-                {-.16f,s*.43f,.345f}},.009f);
-            // A broad curved suit panel connects the back stripe to the hips.
-            Tube(body[Light],{{-.52f,s*.175f,1.25f},{-.36f,s*.20f,1.36f},
-                {-.10f,s*.21f,1.46f},{.15f,s*.22f,1.54f},{.38f,s*.19f,1.58f}},.010f);
+            float s=float(side), outside=side>0 ? 0.f : Pi;
+            // Deltoid, biceps, elbow, forearm, wrist: the elbow sits outboard of
+            // the fairing and the forearm leads visibly to a grasped handlebar.
+            std::vector<BodySection> upperArm={
+                {Vec(.38f,s*.245f,1.76f),.105f,.106f},
+                {Vec(.43f,s*.310f,1.71f),.119f,.115f},
+                {Vec(.49f,s*.388f,1.61f),.111f,.102f},
+                {Vec(.55f,s*.445f,1.50f),.089f,.086f},
+                {Vec(.62f,s*.472f,1.435f),.077f,.075f}
+            };
+            std::vector<BodySection> forearm={
+                {Vec(.60f,s*.470f,1.445f),.078f,.078f},
+                {Vec(.70f,s*.478f,1.405f),.094f,.089f},
+                {Vec(.84f,s*.478f,1.365f),.077f,.074f},
+                {Vec(.98f,s*.468f,1.345f),.056f,.056f},
+                {Vec(1.045f,s*.458f,1.340f),.051f,.051f}
+            };
+            BodyVolume(rider[Suit],upperArm);
+            BodyVolume(rider[Suit],forearm);
+            BodyPanel(rider[Armour],upperArm,.02f,.39f,outside,1.65f,.004f);
+            BodyPanel(rider[Armour],forearm,.12f,.59f,outside,1.20f,.004f);
+            BodyPanel(rider[Light],upperArm,.12f,.84f,outside,.18f,.006f);
+            BodyPanel(rider[SubtleLight],forearm,.18f,.80f,outside,.15f,.006f);
+
+            // Raised grips sit just outside the upper shell. The gloved palm,
+            // curled fingers and thumb actually close around the control.
+            Rod(rider[Armour],Vec(1.12f,s*.34f,1.13f),Vec(1.105f,s*.425f,1.337f),.022f,.019f,16);
+            Rod(rider[Rubber],Vec(1.105f,s*.405f,1.337f),Vec(1.105f,s*.530f,1.337f),.027f,.027f,20);
+            std::vector<BodySection> hand={
+                {Vec(1.025f,s*.458f,1.340f),.051f,.048f},
+                {Vec(1.075f,s*.462f,1.353f),.062f,.044f},
+                {Vec(1.122f,s*.465f,1.352f),.063f,.034f},
+                {Vec(1.143f,s*.466f,1.333f),.052f,.025f}
+            };
+            BodyVolume(rider[Rubber],hand);
+            BodyPanel(rider[Armour],hand,.20f,.68f,Pi/2,1.4f,.003f);
+            for(int finger=0;finger<4;++finger)
+            {
+                float y=s*(.425f+.026f*finger);
+                Tube(rider[Suit],{{1.12f,y,1.369f},{1.143f,y,1.352f},
+                    {1.142f,y,1.324f},{1.12f,y,1.308f}},.012f,8);
+            }
+            Tube(rider[Suit],{{1.062f,s*.414f,1.342f},{1.085f,s*.408f,1.315f},
+                {1.112f,s*.423f,1.310f}},.018f,10);
+
+            // The femur slopes forward from a seated pelvis to an exposed knee;
+            // the shin folds back to the peg. Both legs sit outside the power
+            // unit instead of being swallowed by its luminous cylinders.
+            std::vector<BodySection> thigh={
+                {Vec(-.47f,s*.170f,1.345f),.139f,.150f},
+                {Vec(-.38f,s*.285f,1.305f),.150f,.157f},
+                {Vec(-.23f,s*.398f,1.225f),.141f,.144f},
+                {Vec(-.04f,s*.476f,1.110f),.117f,.126f},
+                {Vec(.105f,s*.500f,1.015f),.095f,.101f}
+            };
+            std::vector<BodySection> calf={
+                {Vec(.11f,s*.500f,1.015f),.095f,.102f},
+                {Vec(.065f,s*.510f,.930f),.106f,.118f},
+                {Vec(-.075f,s*.520f,.790f),.107f,.123f},
+                {Vec(-.225f,s*.505f,.615f),.080f,.093f},
+                {Vec(-.36f,s*.483f,.455f),.060f,.068f}
+            };
+            BodyVolume(rider[Suit],thigh);
+            BodyVolume(rider[Suit],calf);
+            // A compact knee protector follows the bend, not the reactor axis.
+            std::vector<BodySection> knee={
+                {Vec(.02f,s*.501f,1.085f),.098f,.094f},
+                {Vec(.12f,s*.506f,1.025f),.104f,.105f},
+                {Vec(.10f,s*.512f,.956f),.102f,.103f}
+            };
+            BodyPanel(rider[Armour],knee,0,1,outside,1.50f,.006f);
+            BodyPanel(rider[Armour],calf,.18f,.55f,outside,.95f,.004f);
+            BodyPanel(rider[Light],thigh,.13f,.82f,outside,.16f,.005f);
+            BodyPanel(rider[SubtleLight],calf,.19f,.88f,outside,.13f,.005f);
+
+            std::vector<BodySection> boot={
+                {Vec(-.50f,s*.483f,.379f),.064f,.066f},
+                {Vec(-.43f,s*.485f,.398f),.081f,.111f},
+                {Vec(-.34f,s*.487f,.390f),.086f,.107f},
+                {Vec(-.23f,s*.487f,.355f),.086f,.061f},
+                {Vec(-.115f,s*.481f,.346f),.075f,.046f},
+                {Vec(-.070f,s*.479f,.349f),.040f,.034f}
+            };
+            BodyVolume(rider[Rubber],boot);
+            BodyPanel(rider[Armour],boot,.24f,.67f,Pi/2,1.75f,.004f);
+            BodyPanel(rider[SubtleLight],boot,.17f,.82f,outside,.070f,.006f);
+            Rod(rider[Metal],Vec(-.29f,s*.36f,.315f),Vec(-.29f,s*.56f,.315f),.025f,.025f,16);
+
+            // Restrained inlays trace the anatomy of the back and side of the
+            // ribcage. They no longer form a second luminous motorcycle frame.
+            BodyPanel(rider[SubtleLight],torsoBody,.10f,.94f,side>0 ? .35f : Pi-.35f,.13f,.005f);
+            BodyPanel(rider[Light],torsoBody,.12f,.90f,side>0 ? .95f : Pi-.95f,.14f,.005f);
         }
-        Ellipsoid(body[Recess],Vec(-.07f,0,1.501f),Vec(.115f,.119f,.023f),28,12);
+        // The identity disc lies on the upper back, above the saddle. Its dark
+        // housing and small luminous ring read as equipment worn by the person.
+        Vertex back=BodyVertex(torsoBody,.40f,Pi/2,.018f);
+        Vec discCenter=back.position;
+        Vec discAxis=back.normal, discAcross(0,1,0);
+        Vec discAlong=Unit(Cross(discAcross,discAxis));
+        Rod(rider[Recess],discCenter-discAxis*.011f,discCenter+discAxis*.013f,.108f,.108f,40);
         std::vector<Vec> disc;
         for(int i=0;i<=48;++i)
         {
             float a=2*Pi*i/48;
-            disc.push_back(Vec(-.07f+.096f*std::cos(a),.096f*std::sin(a),
-                               1.526f+.026f*std::cos(a)));
+            disc.push_back(discCenter+discAxis*.017f+discAlong*(.090f*std::cos(a))
+                +discAcross*(.090f*std::sin(a)));
         }
-        Tube(body[Light],disc,.010f,10);
+        Tube(rider[Light],disc,.012f,10);
     }
+
 };
 
 inline void SetMaterial(Material material,float r,float g,float b)
@@ -624,7 +838,7 @@ inline void SetMaterial(Material material,float r,float g,float b)
     float shine=64;
     if(material==Light || material==SubtleLight || material==Headlight)
     {
-        float power=material==SubtleLight ? .35f : 1.f;
+        float power=material==SubtleLight ? .55f : 1.f;
         emission[0]=power*r; emission[1]=power*g; emission[2]=power*b;
         if(material==Headlight)
         {
@@ -637,11 +851,11 @@ inline void SetMaterial(Material material,float r,float g,float b)
         switch(material)
         {
         case Shell: base=Vec(.016f,.020f,.025f); highlight=Vec(.74f,.81f,.88f); shine=115; break;
-        case Armour: base=Vec(.035f,.042f,.050f); highlight=Vec(.55f,.63f,.70f); shine=90; break;
+        case Armour: base=Vec(.012f,.017f,.023f); highlight=Vec(.55f,.63f,.70f); shine=90; break;
         case Metal: base=Vec(.13f,.15f,.17f); highlight=Vec(.84f,.91f,.97f); shine=100; break;
         case Rubber: base=Vec(.016f,.019f,.024f); highlight=Vec(.21f,.25f,.30f); shine=31; break;
         case Recess: base=Vec(.005f,.008f,.011f); highlight=Vec(.07f,.10f,.13f); shine=24; break;
-        case Suit: base=Vec(.012f,.015f,.019f); highlight=Vec(.17f,.21f,.25f); shine=32; break;
+        case Suit: base=Vec(.003f,.0045f,.006f); highlight=Vec(.13f,.17f,.20f); shine=48; break;
         case Visor: base=Vec(.012f,.031f,.043f); highlight=Vec(.84f,.95f,1.f); shine=120; break;
         default: base=Vec(.04f,.05f,.06f); highlight=Vec(.4f,.4f,.4f); break;
         }
@@ -745,6 +959,9 @@ inline void Render(float r,float g,float b,float rearAngle,float frontAngle)
     glMatrixMode(GL_MODELVIEW);
     glPushMatrix();
 
+#ifdef HAVE_GLEW
+    if (GLEW_VERSION_1_3) glMultiTexCoord1f(GL_TEXTURE3,0.f);
+#endif
     Detail::Draw(cache.body,r,g,b);
     for(int wheel=0;wheel<2;++wheel)
     {
@@ -754,6 +971,14 @@ inline void Render(float r,float g,float b,float rearAngle,float frontAngle)
         Detail::Draw(cache.wheel,r,g,b);
         glPopMatrix();
     }
+
+#ifdef HAVE_GLEW
+    if (GLEW_VERSION_1_3) glMultiTexCoord1f(GL_TEXTURE3,1.f);
+#endif
+    Detail::Draw(cache.rider,r,g,b);
+#ifdef HAVE_GLEW
+    if (GLEW_VERSION_1_3) glMultiTexCoord1f(GL_TEXTURE3,0.f);
+#endif
 
     glPopMatrix();
     glMatrixMode(oldMatrixMode);

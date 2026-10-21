@@ -1,24 +1,21 @@
-"""Search-guided self-play and RL updates to the canonical V4 checkpoint.
+"""Direct self-play reinforcement learning for the canonical V4 checkpoint.
 
     arma-teach                         # train runs/blacklight, resuming where it stopped
-    arma-teach --games 128 --sims 24   # lighter
+    arma-teach --games 128             # fewer concurrent arenas
 
 How it works:
 
-* Hundreds of rounds run at once in the C++ simulator (ai/sim), which reproduces the engine's
-  physics and the network's view of the arena, checked against recorded engine rounds. On a quarter of the decisions every player
-  searches ahead (Gumbel tree search over 0.1 s steps, guided by the network), and the search's
-  improved move probabilities become the training target. Every decision also gets a discounted
-  n-step value target (or the outcome if the round ends first), and targets for territory, danger, and a
-  credited kill while staying alive over the next two seconds.
-* A quarter of duels begin in varied close encounters, alongside ordinary full-arena games.
-  The space fighter's search replies follow its known control until its next replan, where the
-  network value bootstraps the continuation. Network opponents retain full tree search.
+* The network samples its own legal moves in the C++ simulator, without a search teacher.
+  A clipped actor-critic loss reinforces executed actions whose discounted n-step returns
+  beat their recorded value estimates, and discourages actions with worse returns. Replay
+  records the actual sampling probability and rejects searched or stale-policy samples.
+  Value, territory, danger, ownership and safe-kill heads retain their existing targets.
+* Half of duels begin in varied close encounters, alongside ordinary full-arena games.
 * Most rounds are the network against itself: duels on three arena sizes and four-player
   free-for-alls. An exploiter trains against a frozen current-policy target and is refreshed
   after it solves that target or exhausts its update budget; in the other half of its rounds
   the main network plays the current exploiter and learns from it.
-* V4 guides its own search from the start, exploring all six steering/brake actions.
+* V4 explores all six steering/brake actions, with an entropy bonus for exploration.
 
 Two processes share the GPU: the actor (self-play) and the learner (this one), connected by
 shared-memory replay rings. latest.pt is the one checkpoint that is resumed; snapshots/ keeps a
@@ -61,6 +58,7 @@ ARENAS = ((-3.0, 2, 0.30), (-1.5, 2, 0.25), (0.0, 2, 0.15), (-1.0, 4, 0.20), (0.
 DUEL_SIZES = (-3.0, -1.5, 0.0)
 AGENT_MAIN, AGENT_EXPLOITER, AGENT_TARGET = 0, 1, 2
 FULL_SIM_THREADS = max(1, os.cpu_count() or 8)
+RL_OBJECTIVE = "clipped_actor_critic"
 
 
 @dataclass
@@ -68,12 +66,11 @@ class Config:
     run: str = "runs/blacklight"
     mode: str = "full"  # CLI presets: full or background; explicit flags always take precedence
     games: int = 256  # rounds played at once
-    sims: int = 24  # simulations per searched decision
-    macro: int = 2  # decisions per search step (0.1 s, the turn delay)
     gamma: float = 0.997  # discount per decision: a win 10 s away is worth 55% of one now, so it closes fights
-    search_prob: float = 0.25
-    gumbel: float = 1.0
     temperature: float = 1.0
+    policy_clip: float = 0.2
+    entropy_coef: float = 0.01
+    max_policy_lag: int = 64  # reject replay from older actor weight versions
     threads: int = FULL_SIM_THREADS
     torch_threads: int = 2  # CPU tensor workers per actor/learner; simulator workers are separate
     duty_cycle: float = 1.0  # work / (work + deliberate rest), independently for actor and learner
@@ -207,8 +204,8 @@ class Actor:
         self.device = torch.device(cfg.device)
         self.half = self.device.type == "mps"
         self.rng = random.Random(cfg.seed + 17)
-        self.sp = SelfPlay(cfg.games, sims=cfg.sims, macro=cfg.macro, gamma=cfg.gamma, search_prob=cfg.search_prob,
-                           temperature=cfg.temperature, gumbel=cfg.gumbel, threads=cfg.threads,
+        self.sp = SelfPlay(cfg.games, sims=0, macro=1, gamma=cfg.gamma, search_prob=0,
+                           temperature=cfg.temperature, gumbel=0, threads=cfg.threads,
                            value_steps=cfg.value_steps, hunter_depth=cfg.hunter_depth, recurrent=True)
         self.sp.set_ring(AGENT_MAIN, rings[0])
         self.sp.set_ring(AGENT_EXPLOITER, rings[1])
@@ -321,7 +318,7 @@ class Actor:
         self.start_kinds[g] = "standard"
         if len(agents) == 2 and cfg.combat_prob > 0 and r.random() < cfg.combat_prob:
             self.start_kinds[g], placements = combat_start(size, r)
-        # A life and all of its search branches keep one immutable weight generation.
+        # A life keeps one immutable weight generation for its recurrent state.
         # Old in-memory modules disappear when their last game finishes; no disk snapshots.
         self.game_models[g] = {agent: (self.nets[agent], self.model_updates[agent], self.model_generations[agent])
                                for agent in set(agents) if agent >= 0}
@@ -438,6 +435,12 @@ class Learner:
             raise ValueError("snapshot_every must be zero (never) or a positive update interval")
         if not (math.isfinite(cfg.gamma) and 0 < cfg.gamma <= 1):
             raise ValueError("gamma must be a discount in (0, 1]")
+        if not math.isfinite(cfg.temperature) or cfg.temperature <= 0:
+            raise ValueError("temperature must be positive for policy exploration")
+        if not math.isfinite(cfg.policy_clip) or not 0 < cfg.policy_clip < 1:
+            raise ValueError("policy_clip must be in (0, 1)")
+        if not math.isfinite(cfg.entropy_coef) or cfg.entropy_coef < 0 or cfg.max_policy_lag < 1:
+            raise ValueError("entropy_coef must be nonnegative and max_policy_lag must be positive")
         if not math.isfinite(cfg.combat_prob) or not 0 <= cfg.combat_prob <= 1:
             raise ValueError("combat_prob must be between zero and one")
         if not math.isfinite(cfg.exploiter_train_share) or not 0 <= cfg.exploiter_train_share <= 1:
@@ -507,11 +510,12 @@ class Learner:
         self.saved_at = saved.stat().st_mtime if saved else None
         self.last_training_method = (ck or {}).get("last_training_method", "rl")
         after_imitation = self.last_training_method == "imitation"
+        changed_objective = ck is not None and ck.get("rl_objective") != RL_OBJECTIVE
         if saved:
             # Configuration from an older V4 checkpoint is metadata only. Current CLI settings
             # govern this session; model weights, optimiser moments and counters resume exactly.
             self.main.load_state_dict(ck["model"])
-            if after_imitation:
+            if after_imitation or changed_objective:
                 # Imitation changed the shared weights under a different objective. Fresh
                 # moments and a current-policy opponent avoid carrying stale RL momentum.
                 self.exploiter.load_state_dict(self.main.state_dict())
@@ -524,7 +528,7 @@ class Learner:
                     group["lr"] = cfg.lr
                     group["weight_decay"] = cfg.weight_decay
             self.update = ck["update"]
-            self.xupdates = 0 if after_imitation else ck.get("xupdates", 0)
+            self.xupdates = 0 if after_imitation or changed_objective else ck.get("xupdates", 0)
             self.generation = ck.get("generation", 0)
             self.trained = ck.get("trained", [0, 0])
             self.generated = ck.get("generated", [0, 0])
@@ -532,6 +536,8 @@ class Learner:
             self.decisions = ck.get("decisions", 0)
             self.games = ck.get("games", 0)
             print(f"resumed {self.run_dir.name} (V4) at update {self.update} ({self.decisions:,} decisions)", flush=True)
+            if changed_objective:
+                print("search teacher removed; retained policy weights and counters, reset optimizer moments", flush=True)
         else:
             self.exploiter.load_state_dict(self.main.state_dict())
             print(f"new run in {self.run_dir.name} (V4, {sum(p.numel() for p in self.main.parameters()) / 1e6:.1f} M parameters)",
@@ -562,12 +568,13 @@ class Learner:
         """Small atomic heartbeat for the terminal monitor, including replay warmup."""
         ring = self.rings[0]
         written = ring.written()
-        ready = ring.window()
+        ready = self.ready_samples(ring, update=self.update)
         _, ready_target, searched_target = replay_requirements(self.cfg.warmup, self.cfg.batch)
         if phase is None:
             phase = "learning" if self.session_trained[0] else "warming_up"
         rec = {"trainer": "teach", "run": str(self.run_dir), "pid": os.getpid(), "time": time.time(),
                "mode": self.cfg.mode, "config": asdict(self.cfg), "started_at": self.started_at,
+               "rl_objective": RL_OBJECTIVE,
                "hyperparameters": self.hyperparameters(),
                "resources": {"duty_cycle": self.cfg.duty_cycle, "scope": "per_process",
                              "torch_threads": self.cfg.torch_threads,
@@ -579,7 +586,7 @@ class Learner:
                "samples": self.base[0] + written, "trained": self.trained[0],
                "warmup_samples": written, "warmup_target": self.cfg.warmup,
                "warmup_ready_target": ready_target, "warmup_searched_target": searched_target,
-               "ready_samples": len(ready), "searched_samples": int(np.count_nonzero(ring.has_policy[ready])),
+               "ready_samples": len(ready), "searched_samples": 0,
                "batch": self.cfg.batch, "actions": self.main.n_actions, "net": self.main.version,
                "sps": round(self.sps), "evals_s": round(self.evals_s),
                "exploiter": self.exploiter_readiness()}
@@ -595,27 +602,24 @@ class Learner:
 
     def exploiter_readiness(self) -> dict:
         """Whether the exploiter can learn right now and how much it has: the samples of its own
-        generation that are ready and searched against what a batch needs, its updates against its
+        generation that are ready against what a batch needs, its updates against its
         patience, and what its learning loop did last. A stalled exploiter is visible here."""
         ring, boundary = self.rings[1], self.boundary[1]
-        ready = ring.window()
-        if boundary:
-            ready = ready[ring.gen[ready] >= boundary]
-        ready = ready[ring.generation[ready] == self.generation]
+        ready = self.ready_samples(ring, boundary, self.generation, self.xupdates)
         _, ready_target, searched_target = replay_requirements(self.cfg.warmup, self.cfg.batch)
         return {"generation": self.generation, "phase": self.exploiter_phase,
                 "updates": self.xupdates, "patience": self.cfg.exploiter_patience,
                 "session_updates": self.session_xupdates,
                 "fresh_samples": ring.written() - boundary, "warmup_target": self.cfg.warmup,
                 "ready_samples": int(len(ready)), "ready_target": ready_target,
-                "searched_samples": int(np.count_nonzero(ring.has_policy[ready])), "searched_target": searched_target,
+                "searched_samples": 0, "searched_target": searched_target,
                 "trained": self.trained[1], "session_trained": self.session_trained[1]}
 
     def hyperparameters(self) -> dict:
         """Resolved settings for the live viewer, including the actual optimiser values."""
         names = ("batch", "weight_decay", "value_coef", "aux_coef", "own_coef", "max_grad_norm", "bf16",
-                 "replay_ratio", "warmup", "sequence_burn_in", "sequence_unroll", "ring", "exploiter_ring", "sims", "macro", "gamma",
-                 "search_prob", "gumbel",
+                 "replay_ratio", "warmup", "sequence_burn_in", "sequence_unroll", "ring", "exploiter_ring", "gamma",
+                 "policy_clip", "entropy_coef", "max_policy_lag",
                  "temperature", "value_steps", "hunter_prob", "hunter_depth", "combat_prob", "exploiter_prob",
                  "exploiter_train_share", "exploiter_win", "exploiter_games",
                  "exploiter_patience", "publish_seconds", "save_seconds", "seed")
@@ -629,7 +633,7 @@ class Learner:
         if main:
             _atomic_save({"model": _half(self.main.state_dict()), "update": self.update}, self.run_dir / "actor.pt")
         if exploiter:
-            _atomic_save({"model": _half(self.exploiter.state_dict()), "update": self.update,
+            _atomic_save({"model": _half(self.exploiter.state_dict()), "update": self.xupdates,
                           "generation": self.generation}, self.run_dir / "exploiter.pt")
         if target:
             _atomic_save({"model": _half(self.main.state_dict()), "update": self.update,
@@ -637,6 +641,7 @@ class Learner:
 
     def save(self) -> None:
         ck = {"trainer": "teach", "model": self.main.state_dict(), "opt": self.opt.state_dict(),
+              "rl_objective": RL_OBJECTIVE,
               "last_training_method": self.last_training_method, "imitation_state": self.imitation_state,
               "exploiter": self.exploiter.state_dict(), "exploiter_opt": self.xopt.state_dict(),
               "update": self.update, "xupdates": self.xupdates, "generation": self.generation,
@@ -682,17 +687,23 @@ class Learner:
         self.publish(main=False, exploiter=True, target=True)
 
     # ---------------------------------------------------------------- learning
-    def batch(self, ring, n: int, boundary: int = 0, generation: int | None = None):
+    def ready_samples(self, ring, boundary=0, generation=None, update=0):
         ready = ring.window()
-        if boundary:
-            ready = ready[ring.gen[ready] >= boundary]
+        keep = (ring.gen[ready] >= boundary) & (ring.has_policy[ready] == 0)
+        keep &= ring.policy_update[ready] >= max(0, update - self.cfg.max_policy_lag)
         if generation is not None:
-            ready = ready[ring.generation[ready] == generation]
-        _, ready_target, searched_target = replay_requirements(self.cfg.warmup, n)
-        if len(ready) < ready_target or np.count_nonzero(ring.has_policy[ready]) < searched_target:
+            keep &= ring.generation[ready] == generation
+        return ready[keep]
+
+    def batch(self, ring, n: int, boundary: int = 0, generation: int | None = None):
+        update = self.update if ring is self.rings[0] else self.xupdates
+        ready = self.ready_samples(ring, boundary, generation, update)
+        _, ready_target, _ = replay_requirements(self.cfg.warmup, n)
+        if len(ready) < ready_target:
             return None
         data = ring.sequences(n, self.rng, self.cfg.sequence_burn_in, self.cfg.sequence_unroll,
-                              boundary=boundary, generation=generation)
+                              boundary=boundary, generation=generation, search_targets=False,
+                              min_policy_update=max(0, update - self.cfg.max_policy_lag))
         if data is None:
             return None
         return {key: torch.from_numpy(np.ascontiguousarray(value)).to(self.device) for key, value in data.items()}
@@ -720,13 +731,21 @@ class Learner:
         else:
             logits, value, aux, own, _ = unroll()
         mask, learn = mask[:, burn:], data["learn"][:, burn:]
-        policy = data["policy"][:, burn:].masked_fill(~mask, 0)
-        mass = policy.sum(-1, keepdim=True)
-        has_policy = data["has_policy"][:, burn:] & learn & (mass[..., 0] > 1e-8)
-        policy = policy / mass.clamp_min(1e-8)
-        logp = torch.log_softmax(logits.masked_fill(~mask, -1e8), -1)
-        pl, target = logp[has_policy], policy[has_policy]
-        policy_loss = -(target * pl.clamp_min(-30)).sum(-1).mean() if len(target) else logits.sum() * 0
+        if data["has_policy"][:, burn:][learn].any():
+            raise ValueError("searched decisions cannot train the direct policy")
+        # Optimize the distribution actually sampled by the actor, including its temperature.
+        logp = torch.log_softmax((logits / cfg.temperature).masked_fill(~mask, -1e8), -1)
+        actions = data["action"][:, burn:]
+        if not mask.gather(-1, actions.unsqueeze(-1)).squeeze(-1)[learn].all():
+            raise ValueError("replay contains an illegal executed action")
+        selected = logp.gather(-1, actions.unsqueeze(-1)).squeeze(-1)[learn]
+        old_logp = data["behavior_logp"][:, burn:][learn]
+        advantage = (data["value"][:, burn:] - data["behavior_value"][:, burn:])[learn].detach()
+        ratio = (selected - old_logp).clamp(-20, 20).exp()
+        policy_loss = -torch.minimum(ratio * advantage,
+                                    ratio.clamp(1 - cfg.policy_clip, 1 + cfg.policy_clip) * advantage).mean()
+        pl = logp[learn]
+        entropy = -(pl.exp() * pl).sum(-1).mean()
         z, v = data["value"][:, burn:][learn], value[learn]
         value_loss = F.mse_loss(v, z)
         aux_target, aux = data["aux"][:, burn:][learn], aux[learn]
@@ -737,9 +756,10 @@ class Learner:
         own_ok = data["own_ok"][:, burn:] & learn
         own_loss = (F.cross_entropy(own[own_ok], data["own"][:, burn:][own_ok])
                     if own_ok.any() else own.sum() * 0)
-        loss = policy_loss + cfg.value_coef * value_loss + cfg.aux_coef * aux_loss + cfg.own_coef * own_loss
+        loss = (policy_loss - cfg.entropy_coef * entropy + cfg.value_coef * value_loss
+                + cfg.aux_coef * aux_loss + cfg.own_coef * own_loss)
         if not torch.isfinite(loss).item():
-            raise FloatingPointError("non-finite teacher loss; checkpoint weights were not updated")
+            raise FloatingPointError("non-finite actor-critic loss; checkpoint weights were not updated")
         opt.zero_grad(set_to_none=True)
         loss.backward()
         gn = torch.nn.utils.clip_grad_norm_(net.parameters(), cfg.max_grad_norm, error_if_nonfinite=True)
@@ -748,13 +768,13 @@ class Learner:
             self.imitation_state.pop("optimizer", None)
             self.last_training_method = "rl"
         with torch.no_grad():
-            entropy = -(pl.exp() * pl).sum(-1).mean() if len(target) else v.new_zeros(())
-            kl = ((target * (torch.log(target.clamp_min(1e-8)) - pl.clamp_min(-30))).sum(-1).mean()
-                  if len(target) else v.new_zeros(()))
+            policy_kl = ((ratio - 1) - (selected - old_logp)).mean()
+            clip_fraction = ((ratio - 1).abs() > cfg.policy_clip).float().mean()
             explained = 1 - torch.var(z - v, correction=0) / (torch.var(z, correction=0) + 1e-8)
         return {"pg": policy_loss.detach(), "vf": value_loss.detach(), "aux": aux_loss.detach(),
                 "territory": territory_loss.detach(), "danger": danger_loss.detach(), "safe_kill": safe_kill_loss.detach(),
-                "own": own_loss.detach(), "ent": entropy, "search_kl": kl, "grad_norm": gn.detach(),
+                "own": own_loss.detach(), "ent": entropy.detach(), "policy_kl": policy_kl,
+                "clip_fraction": clip_fraction, "grad_norm": gn.detach(),
                 "value_explained": explained, "n": int(learn.sum())}
 
     def drain(self, q) -> None:
@@ -784,7 +804,7 @@ class Learner:
                             args=(asdict(cfg), str(self.run_dir), [r.name for r in self.rings],
                                   [r.cap for r in self.rings], q, stop))
         actor.start()
-        print(f"actor started: {cfg.games} rounds at once, {cfg.sims} simulations per searched decision; "
+        print(f"actor started: {cfg.games} rounds at once, direct policy moves, no search teacher; "
               f"learning on {self.device}", flush=True)
         print(f"mode {cfg.mode}: {cfg.threads} simulator workers, batch {cfg.batch}, "
               f"{cfg.torch_threads} CPU tensor workers per process; "
@@ -894,6 +914,7 @@ class Learner:
         n = max(self.acc_n, 1)
         helper = self.exploiter_readiness()
         rec = {"trainer": "teach", "net": self.main.version, "actions": self.main.n_actions,
+               "rl_objective": RL_OBJECTIVE,
                "mode": self.cfg.mode,
                "update": self.update, "steps": self.decisions, "sps": round(self.sps), "evals_s": round(self.evals_s),
                "lr": self.opt.param_groups[0]["lr"], "games": self.games,
@@ -915,7 +936,7 @@ class Learner:
         self.acc_n = 0
         wins = " ".join(f"{k[4:]}={v:.2f}" for k, v in rec.items() if k.startswith("win_"))
         print(f"u{self.update} {self.decisions:,} decisions {rec['sps']:,}/s {rec['evals_s']:,} evals/s "
-              f"len={rec['ep_len']:.0f} pg={rec.get('pg', 0):.3f} vf={rec.get('vf', 0):.3f} gain={rec.get('search_kl', 0):.3f} "
+              f"len={rec['ep_len']:.0f} pg={rec.get('pg', 0):.3f} vf={rec.get('vf', 0):.3f} clip={rec.get('clip_fraction', 0):.1%} "
               f"replay={rec['replay']} {wins}", flush=True)
 
 
