@@ -56,23 +56,23 @@ def test_v4_teacher_actor_learner_checkpoint_resume(tmp_path: Path, device: str)
     old_threads = torch.get_num_threads()
     torch.set_num_threads(2)
     try:
-        kwargs = dict(run=str(tmp_path / "v4"), games=2, sims=2, macro=2, search_prob=1.0,
+        kwargs = dict(run=str(tmp_path / "v4"), games=2,
                       threads=2, ring=8192, exploiter_ring=8192, batch=8, warmup=16,
                       replay_ratio=1.0, hunter_prob=0.0, exploiter_prob=0.0,
                       sequence_burn_in=2, sequence_unroll=4,
-                      value_steps=4, combat_prob=1, device=device, bf16=device == "mps", log_every=1)
+                      value_steps=4, combat_prob=1, seed=8, device=device, bf16=device == "mps", log_every=1)
         first = RecordingLearner(Config(**kwargs, max_updates=2, resume=False))
         assert first.main.version == 4
         progress_path = tmp_path / "v4" / "progress.json"
         starting = json.loads(progress_path.read_text())
         assert starting["phase"] == "starting" and starting["warmup_samples"] == 0
         assert starting["warmup_target"] == kwargs["warmup"] and starting["actions"] == 6
-        assert starting["warmup_ready_target"] == 8 and starting["warmup_searched_target"] == 4
+        assert starting["warmup_ready_target"] == 8 and starting["warmup_searched_target"] == 0
         assert 0 < starting["started_at"] <= starting["time"]
         helper = starting["exploiter"]
         assert helper["phase"] == "warming_up" and helper["generation"] == 0
         assert helper["updates"] == helper["session_updates"] == helper["fresh_samples"] == 0
-        assert helper["ready_target"] == 8 and helper["searched_target"] == 4
+        assert helper["ready_target"] == 8 and helper["searched_target"] == 0
         first.run()
         assert first.update == 2
         assert first.generated[0] > 0 and first.decisions > 0
@@ -93,12 +93,16 @@ def test_v4_teacher_actor_learner_checkpoint_resume(tmp_path: Path, device: str)
         path = tmp_path / "v4" / "latest.pt"
         ck = torch.load(path, map_location="cpu", weights_only=True)
         assert net_version(ck["model"]) == 4 and ck["update"] == 2
-        assert set(ck) == {"trainer", "model", "opt", "last_training_method", "imitation_state", "exploiter",
+        assert set(ck) == {"trainer", "model", "opt", "rl_objective", "last_training_method", "imitation_state", "exploiter",
                            "exploiter_opt", "update", "xupdates", "generation", "trained", "generated",
                            "decisions", "games", "config"}  # the canonical checkpoint's keys, unchanged
         assert not {"net", "bootstrap", "bootstrap_trained", "warm_value_every"} & ck["config"].keys()
         assert "bootstrapping" not in ck
         assert ck["last_training_method"] == "rl"
+        assert ck["rl_objective"] == "clipped_actor_critic"
+        assert stopped["searched_samples"] == 0
+        watch = json.loads((first.run_dir / "watch.json").read_text())
+        assert watch["source_counts"]["search"] == 0 and not watch["searching"]
         assert sorted(path.name for path in first.run_dir.glob("*.pt")) == ["latest.pt"]
         assert not (first.run_dir / "pool").exists()
         assert ck["opt"]["state"]  # the checkpoint includes resumable optimiser moments
@@ -149,7 +153,7 @@ def test_main_network_learns_from_rounds_against_the_exploiter(tmp_path: Path):
     old_threads = torch.get_num_threads()
     torch.set_num_threads(2)
     try:
-        learner = Learner(Config(run=str(tmp_path / "vs"), games=2, sims=2, macro=2, search_prob=1.0, threads=2,
+        learner = Learner(Config(run=str(tmp_path / "vs"), games=2, threads=2,
                                  ring=8192, exploiter_ring=8192, batch=8, warmup=16, replay_ratio=1.0,
                                  hunter_prob=0.0, exploiter_prob=1.0, exploiter_train_share=0.0,
                                  sequence_burn_in=2, sequence_unroll=4, value_steps=4, combat_prob=1,

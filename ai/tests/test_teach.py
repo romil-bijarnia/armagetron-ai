@@ -257,6 +257,7 @@ def test_exploiter_readiness_counts_its_own_generation_against_what_a_batch_need
             self.gen = np.arange(80)  # write index per slot
             self.generation = np.where(self.gen >= 30, 3, 2)  # exploiter generation per slot
             self.has_policy = self.gen % 2 == 0
+            self.policy_update = np.zeros(80, np.int64)
 
         def written(self):
             return 80
@@ -274,7 +275,7 @@ def test_exploiter_readiness_counts_its_own_generation_against_what_a_batch_need
     assert learner.exploiter_readiness() == {
         "generation": 3, "phase": "caught_up", "updates": 5, "patience": 30, "session_updates": 2,
         "fresh_samples": 60, "warmup_target": 16,
-        "ready_samples": 40, "ready_target": 8, "searched_samples": 20, "searched_target": 4,
+        "ready_samples": 20, "ready_target": 8, "searched_samples": 0, "searched_target": 0,
         "trained": 400, "session_trained": 64}
 
 

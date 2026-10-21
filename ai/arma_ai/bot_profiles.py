@@ -52,6 +52,8 @@ _profiles = (
     # Cold combat/path starts fell into target-less survival and produced straight-only
     # teacher lives. Native screening found trace entry acquires a target while turning;
     # the short state timer and preferences still distinguish these combat candidates.
+   # reaction, emergency, range, trace, close_combat, path, loop, enemy, tunnel, detect_trace, start_state,
+   # start_straight, state_change)
     BotProfile("fighter_rush", (10, 10, 10, 4, 10, 6, 10, 10, 10, 9, 1, 0, 1)),
     BotProfile("fighter_cutter", (10, 10, 12, 6, 10, 8, 10, 10, 10, 10, 1, 1, 2)),
     BotProfile("fighter_trapper", (9, 10, 12, 8, 10, 9, 10, 9, 10, 10, 1, 3, 5)),

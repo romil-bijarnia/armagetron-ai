@@ -2,7 +2,7 @@
 
 Blacklight is our AI for Armagetron Advanced, with a policy that can run inside the game without Python.
 
-The trainer (`arma-teach`) uses search-guided self-play in the C++ simulator in `sim/`, a league and a learner on the GPU. The simulator has recorded-engine parity tests; the real-engine ladder measures the deployed policy without search. The implemented combat architecture is documented in [docs/V4.md](docs/V4.md).
+The trainer (`arma-teach`) uses direct self-play reinforcement learning in the C++ simulator in `sim/`, an adaptive exploiter and a learner on the GPU. Blacklight chooses its own moves; there is no search teacher. The simulator has recorded-engine parity tests; the real-engine ladder measures the deployed policy. The implemented combat architecture is documented in [docs/V4.md](docs/V4.md).
 
 ## What the network sees
 
@@ -40,7 +40,7 @@ Both modes use the Apple GPU for batched inference and learning. The background
 mode adds deliberate, interruptible rest to both workers; it is a work/rest
 budget, not a GPU-utilization percentage or temperature limit. Full mode runs
 without that rest and keeps the Mac awake. Actual utilization depends on the
-balance of simulation, search and learning; more arenas alone do not guarantee
+balance of simulation and learning; more arenas alone do not guarantee
 higher throughput. The architecture and replay capacities are the same.
 
 Each command starts one trainer in the background and resumes `runs/blacklight/latest.pt`.
@@ -50,10 +50,9 @@ The older `trainctl` script remains available for existing launchers.
 
 After each restart, the saved network resumes while its temporary replay buffer
 refills. With the default settings, learning waits for 20,000 collected positions,
-10,000 positions with ready training targets, and enough searched targets for half
-a learning batch. Surviving positions normally need another 60 decisions in their
+10,000 positions with ready training targets. Surviving positions normally need another 60 decisions in their
 own arena (three simulated seconds) before their targets are ready. The views show
-all three requirements; overall warmup readiness follows the slowest one.
+both requirements; overall warmup readiness follows the slower one.
 
 The viewer stays open across `stop` and mode changes: it clears the old game when
 training stops and follows fresh actor samples when the next run resumes.
@@ -71,8 +70,13 @@ Explicit trainer flags override a mode's defaults, for example
 lists the controls. The viewer shows the actual resolved configuration and
 optimizer hyperparameters, including overrides.
 
-The actor plays concurrent simulator rounds, searches on selected decisions and
-trains policy, value and auxiliary targets from replay. It mixes self-play,
+The actor plays concurrent simulator rounds and samples legal moves directly from
+the policy. A clipped actor-critic loss reinforces executed actions whose returns
+beat their recorded value estimates and discourages worse actions. Replay stores
+each action's sampling probability, rejects searched decisions and limits policy
+age with `--max-policy-lag` (default 64 updates). `--policy-clip` defaults to 0.2
+and `--entropy-coef` to 0.01. Value and auxiliary heads still learn from replay.
+It mixes self-play,
 a live exploiter and the simulator's space fighter. V4 explores all
 six actions. Temporary worker weights are published while RL runs; the saved
 checkpoint is `latest.pt`, and `snapshots/` keeps a copy of it once per
@@ -90,12 +94,16 @@ fraction up to 1. Three rounds in ten are against the space fighter
 (`--gamma`), so a win ten seconds away is worth 55% of an immediate one and the
 fighter is paid for finishing, not for surviving.
 
-Search against the space fighter follows its actual cached move and brake hold
-until its next replan (normally 0.05–0.10 s), then uses the network's value for
-the continuation. It does not invent different hunter moves or run the hunter's
-expensive planner recursively. Search against network opponents keeps its normal
-depth. These changes improve the training setup; stronger play must be measured
-after training.
+The space fighter retains its own built-in opponent logic; it never supplies
+Blacklight's action labels. The old search flags (`--sims`, `--macro`,
+`--search-prob`, `--gumbel`) are removed from the trainer. Resuming an older
+search-trained checkpoint preserves its weights and counters and resets optimizer
+moments for the new objective. Subsequent direct-RL sessions resume those moments.
+
+The simulator's standalone tree inspection remains available for algorithm studies:
+`uv run python -m arma_ai.search_trace --output runtime/search-trace.json` records
+one isolated search using the current checkpoint. It writes no replay or weights
+and is separate from training.
 
 ## One Blacklight checkpoint, every training session
 

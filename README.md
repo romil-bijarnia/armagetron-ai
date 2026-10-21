@@ -1,6 +1,6 @@
 # Armagetron AI
 
-Armagetron Advanced with a V4 combat policy trained through search-guided self-play.
+Armagetron Advanced with a V4 combat policy trained through direct self-play reinforcement learning.
 
 The engine's neural bridge (`src/tron/gNeural.cpp`) controls AI cycles through normal steering and braking commands. The `ai/` folder contains the single supported network (`PolicyNet` in `arma_ai/model.py`), the GPU learner, a C++ self-play simulator, evaluation tools, and a play server for racing the trained policy from the normal game client.
 

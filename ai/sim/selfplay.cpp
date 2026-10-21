@@ -231,7 +231,7 @@ void SelfPlay::BeginDecision( Game & g )
     g.stage = 1;
 }
 
-void SelfPlay::Record( Game & g, int p, bool searched, float const * policy )
+void SelfPlay::Record( Game & g, int p, bool searched, float const * policy, int action )
 {
     if ( !g.learn[p] || g.agents[p] < 0 || g.agents[p] > 3 )
         return;
@@ -249,6 +249,18 @@ void SelfPlay::Record( Game & g, int p, bool searched, float const * policy )
     for ( int a = 0; a < kActions; ++a )
         R.policy[slot * kActions + a] = searched ? policy[a] : 0.f;
     R.hasPolicy[slot] = searched ? 1 : 0;
+    if (R.action) R.action[slot] = uint8_t(action);
+    if (R.behaviorValue) R.behaviorValue[slot] = g.rootValue[p];
+    if (R.policyUpdate) R.policyUpdate[slot] = g.rootUpdate[p];
+    if (R.behaviorLogp) {
+        float behavior[kActions] = {};
+        if (cfg.temperature > 0)
+            MaskedSoftmax(g.rootLogits[p], g.world.ActionMask(p), behavior, cfg.temperature);
+        else
+            behavior[action] = 1.f;
+        // Search moves are not samples from this behavior policy. The RL reader rejects them.
+        R.behaviorLogp[slot] = searched ? 0.f : std::log(std::max(behavior[action], 1e-30f));
+    }
     R.value[slot] = 0;
     for ( int a = 0; a < kAux; ++a )
         R.aux[slot * kAux + a] = 0;
@@ -799,7 +811,7 @@ void SelfPlay::RunSimulations( Game & g )
             if ( RootScore( g, p, c[k] ) > RootScore( g, p, best ) )
                 best = c[k];
         acts[p] = best;
-        Record( g, p, true, pol );
+        Record( g, p, true, pol, acts[p] );
         WatchDecision( g, p, acts[p], WATCH_SEARCH, pol );
     }
     FinishDecision( g, acts );
@@ -907,7 +919,7 @@ void SelfPlay::Decide( Game & g )
                 }
             }
         }
-        Record( g, p, false, 0 );
+        Record( g, p, false, 0, acts[p] );
         WatchDecision( g, p, acts[p], cfg.temperature <= 0 ? WATCH_GREEDY : WATCH_SAMPLED );
     }
     FinishDecision( g, acts );

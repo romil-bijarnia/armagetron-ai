@@ -574,7 +574,7 @@ function renderBenchmarks() {
 const METRICS = [
   ['sps', 'Decisions per second', 0], ['evals_s', 'Network evaluations per second', 0], ['ep_len', 'Round length · decisions', 1],
   ['pg', 'Policy cross-entropy', 4], ['vf', 'Value loss', 4], ['aux', 'Auxiliary loss', 4], ['safe_kill', 'Kill + survive prediction loss', 4], ['own', 'Ownership loss', 4],
-  ['search_kl', 'Search → policy KL', 4], ['ent', 'Policy entropy · nats', 4], ['value_explained', 'Value explained variance', 4],
+  ['clip_fraction', 'Clipped fraction', 4], ['policy_kl', 'Policy change KL', 4], ['ent', 'Policy entropy · nats', 4], ['value_explained', 'Value explained variance', 4],
   ['grad_norm', 'Gradient norm · before clipping', 3], ['lr', 'Learning rate', 7], ['replay', 'Replay ratio', 2]
 ];
 function metricRow(key, name, digits, ratio) {
@@ -595,7 +595,7 @@ function renderMetrics() {
     const wins = Object.keys(m).filter(k => k.startsWith('win_')).sort();
     if (wins.length) {
       root.append(el('h3', 'metric-group', `Training matches · latest up to ${m.match_window || 400} per matchup`));
-      root.append(el('p', 'note', 'Scores count draws as half a win. These matches include training search and exploration.'));
+      root.append(el('p', 'note', 'Scores count draws as half a win. These matches include policy exploration.'));
       const names = {win_vs_hunter: 'Current policy vs space fighter', win_vs_past: 'Current policy vs frozen pool', win_exploiter: 'Exploiter vs frozen target'};
       for (const key of wins) {
         root.append(metricRow(key, names[key] || key.slice(4).replaceAll('_', ' '), 1, true));
