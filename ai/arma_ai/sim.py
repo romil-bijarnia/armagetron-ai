@@ -77,12 +77,14 @@ def lib() -> ctypes.CDLL:
             "tr_observe": ([vp, i32, u8p, fp], None), "tr_state": ([vp, fp], i32), "tr_time": ([vp], f32),
             "tr_over": ([vp], i32), "tr_bounds": ([vp, fp], None),
             "tr_fighter_move": ([vp, i32, i32, i32, i32], i32),
+            "tr_set_turn": ([vp, f32, f32, f32], None), "tr_trail": ([vp, i32, fp, i32], i32),
         }
         i64p = ctypes.POINTER(ctypes.c_int64)
         sig.update({
             "sp_new": ([i32], vp), "sp_free": ([vp], None),
             "sp_config": ([vp, i32, i32, f32, f32, f32, f32, f32, f32, i32, i32, i32, i32, i32, i32, i32, i32], None),
-            "sp_set_ring": ([vp, i32, u8p, fp, u8p, fp, u8p, fp, fp, i64p, i64p, u8p, i64p, ctypes.c_int64, i64p, u8p, i64p, fp], None),
+            "sp_set_ring": ([vp, i32, u8p, fp, u8p, fp, u8p, fp, fp, i64p, i64p, u8p, i64p, ctypes.c_int64, i64p, u8p, i64p, fp,
+                             u8p, fp, fp, i64p], None),
             "sp_set_generations": ([vp, i32, i64p], None),
             "sp_collect_recurrent": ([vp, u8p, fp, u8p, ip, ip, i32, u8p, fp, ip, u8p, fp, u8p, fp], i32),
             "sp_feed_recurrent": ([vp, fp, fp, i32, i64p, fp], None),
@@ -91,6 +93,7 @@ def lib() -> ctypes.CDLL:
             "sp_collect": ([vp, u8p, fp, u8p, ip, ip, i32, u8p], i32),
             "sp_feed": ([vp, fp, fp, i32, i64p], None),
             "sp_watch": ([vp, i32], ctypes.c_char_p),
+            "sp_search_tree": ([vp, i32], ctypes.c_char_p),
             "sp_game_info": ([vp, i32, fp], i32),
             "sp_stats": ([vp, ctypes.POINTER(ctypes.c_longlong)], None),
         })
@@ -185,6 +188,10 @@ RING_FIELDS = (
     ("generation", np.int64, ()),
     ("context", np.float32, (P.N_ACTIONS + 1,)),  # previous executed action and elapsed seconds / .05
     ("heading", np.uint8, ()),  # heading quadrant the sample's minimap and territory are drawn in
+    ("action", np.uint8, ()),
+    ("behavior_logp", np.float32, ()),
+    ("behavior_value", np.float32, ()),
+    ("policy_update", np.int64, ()),
 )
 
 AGENT_HUNTER = -1  # a seat played by the simulator's built-in space fighter (no network)
@@ -274,7 +281,7 @@ class Ring:
         return self.maps[slot]
 
     def sequences(self, n: int, rng, burn_in: int, unroll: int, *, boundary: int = 0,
-                  generation: int | None = None):
+                  generation: int | None = None, search_targets: bool = True, min_policy_update: int = 0):
         """Copy current raw-observation chains; never substitute stale actor hidden states.
 
         Missing overwritten predecessors reject a window. Only a real life boundary permits
@@ -287,15 +294,17 @@ class Ring:
         ready = ready[self.gen[ready] >= boundary]
         if generation is not None:
             ready = ready[self.generation[ready] == generation]
+        if not search_targets:
+            ready = ready[(self.has_policy[ready] == 0) & (self.policy_update[ready] >= min_policy_update)]
         searched = ready[self.has_policy[ready] == 1]
-        if not len(ready) or not len(searched):
+        if not len(ready) or (search_targets and not len(searched)):
             return None
         length = min(unroll, n)
         windows = max(1, n // length)
         width = burn_in + length
         selected = []
         for w in range(windows):
-            pool = searched if w < max(1, windows // 2) else ready
+            pool = searched if search_targets and w < max(1, windows // 2) else ready
             found = None
             for _ in range(64):
                 end = int(self.gen[int(rng.choice(pool))])
@@ -324,7 +333,10 @@ class Ring:
                 learn = np.arange(offset, width) >= burn_in
                 if not self.ready[slots[learn]].all() or np.any(self.gen[slots[learn]] < boundary):
                     continue
-                if not self.has_policy[slots[learn]].any() and w < max(1, windows // 2):
+                if search_targets and not self.has_policy[slots[learn]].any() and w < max(1, windows // 2):
+                    continue
+                if not search_targets and (self.has_policy[slots[learn]].any() or
+                                            np.any(self.policy_update[slots[learn]] < min_policy_update)):
                     continue
                 predecessors = self.prev[slots].copy()
                 previous_slots = np.where(predecessors >= 0, predecessors % self.cap, slots)
@@ -338,12 +350,14 @@ class Ring:
                 mask = self.mask[slots].copy()
                 policy, has_policy = self.policy[slots].copy(), self.has_policy[slots].copy()
                 value, aux = self.value[slots].copy(), self.aux[slots].copy()
+                actions = self.action[slots].copy().astype(np.int64)
+                behavior_logp, behavior_value = self.behavior_logp[slots].copy(), self.behavior_value[slots].copy()
                 own, own_ok = self.ownership(slots)
                 if not (np.array_equal(self.gen[slots], expected) and
                         np.array_equal(self.gen[previous_slots], old_expected) and self.ready[slots[learn]].all()):
                     continue
                 found = (offset, maps, scalars, context, mask, policy, has_policy, value, aux, own, own_ok,
-                         bool(predecessors[0] == -1))
+                         bool(predecessors[0] == -1), actions, behavior_logp, behavior_value)
                 break
             if found is None:
                 return None
@@ -356,10 +370,14 @@ class Ring:
                    value=np.zeros(shape, np.float32), aux=np.zeros((*shape, 3), np.float32),
                    own=np.zeros((*shape, P.GRID, P.GRID), np.int64), own_ok=np.zeros(shape, bool),
                    learn=np.zeros(shape, bool), reset=np.zeros(shape, bool))
-        for i, (offset, maps, scalars, context, masks, policy, has_policy, value, aux, own, own_ok, born) in enumerate(selected):
+        out.update(action=np.zeros(shape, np.int64), behavior_logp=np.zeros(shape, np.float32),
+                   behavior_value=np.zeros(shape, np.float32))
+        for i, (offset, maps, scalars, context, masks, policy, has_policy, value, aux, own, own_ok, born,
+                actions, behavior_logp, behavior_value) in enumerate(selected):
             where = (i, slice(offset, None))
             for key, data in (("maps", maps), ("scalars", scalars), ("context", context), ("policy", policy),
-                              ("has_policy", has_policy), ("value", value), ("aux", aux), ("own", own), ("own_ok", own_ok)):
+                              ("has_policy", has_policy), ("value", value), ("aux", aux), ("own", own), ("own_ok", own_ok),
+                              ("action", actions), ("behavior_logp", behavior_logp), ("behavior_value", behavior_value)):
                 out[key][where] = data
             out["mask"][where] = (masks[:, None] >> np.arange(P.N_ACTIONS) & 1).astype(bool)
             out["learn"][i, max(offset, burn_in):] = True
@@ -380,6 +398,10 @@ class SelfPlay:
     """Many self-play rounds with search, in the C++ engine (ai/sim/selfplay.cpp)."""
 
     INFO = 3 + 4 * 8
+
+    def search_tree(self, game: int = 0) -> dict | None:
+        """Read the current/last tree between collect/feed calls; no inference or mutation."""
+        return json.loads(self.L.sp_search_tree(self.h, game))
 
     def __init__(self, games: int, *, sims: int = 32, macro: int = 2, gamma: float = 0.999, c_visit: float = 50,
                  c_scale: float = 0.1, search_prob: float = 0.25, temperature: float = 1.0, gumbel: float = 1.0,
@@ -423,7 +445,8 @@ class SelfPlay:
                            _ptr(ring.policy, f), _ptr(ring.has_policy, u8), _ptr(ring.value, f), _ptr(ring.aux, f),
                            _ptr(ring.prev, i64), _ptr(ring.gen, i64), _ptr(ring.ready, u8), _ptr(ring.counter, i64),
                            ring.cap, _ptr(ring.future, i64), _ptr(ring.heading, u8), _ptr(ring.generation, i64),
-                           _ptr(ring.context, f))
+                           _ptr(ring.context, f), _ptr(ring.action, u8), _ptr(ring.behavior_logp, f),
+                           _ptr(ring.behavior_value, f), _ptr(ring.policy_update, i64))
 
     def start(self, g: int, size: float, agents, learn, rotate: int = 0, seed: int = 0,
               placements=None, generations=None) -> None:

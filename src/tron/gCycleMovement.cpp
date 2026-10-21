@@ -223,6 +223,17 @@ static nSettingItemWatched<REAL> c_ctf("CYCLE_TURN_SPEED_FACTOR",
                                        nConfItemVersionWatcher::Group_Bumpy,
                                        7);
 
+// a turn as a sweep: the radius (m) of the arc a cycle drives through a 90 degree turn; 0 is
+// the classic instant turn. The arc shrinks to the room ahead, so a cut right at a wall stays
+// a cut, and below the minimum radius the turn is instant.
+REAL sg_cycleTurnRadius = 0;
+static nSettingItem<REAL> c_tr("CYCLE_TURN_RADIUS", sg_cycleTurnRadius);
+REAL sg_cycleTurnRadiusMin = .15;
+static nSettingItem<REAL> c_trm("CYCLE_TURN_RADIUS_MIN", sg_cycleTurnRadiusMin);
+// degrees of heading between the wall points laid along the arc
+REAL sg_cycleTurnWallStep = 15;
+static nSettingItem<REAL> c_tws("CYCLE_TURN_WALL_STEP", sg_cycleTurnWallStep);
+
 // wall acceleration
 static REAL sg_accelerationCycle=10;
 static nSettingItem<REAL> c_a("CYCLE_ACCEL",
@@ -1109,7 +1120,21 @@ bool gCycleMovement::CanMakeTurn( int direction ) const
 
 bool gCycleMovement::CanMakeTurn( REAL time, int direction ) const
 {
-    return time >= GetNextTurn(direction);
+    // a sweeping turn is taken whole: the next turn waits for it (a buffered press fires then)
+    return !arcActive_ && time >= GetNextTurn(direction);
+}
+
+gSweep gCycleMovement::GetSweep() const
+{
+    gSweep sweep;
+    sweep.active = arcActive_;
+    sweep.heading = arcHeading_;
+    sweep.target = arcTarget_;
+    sweep.radius = arcRadius_;
+    sweep.dropped = arcDropped_;
+    sweep.axis = arcAxis_;
+    sweep.dropPos = arcDropPos_;
+    return sweep;
 }
 
 // *******************************************************************************************
@@ -1156,7 +1181,75 @@ gCyclePhysics gCycleMovement::ExportPhysics()
     ph.rubberMinDistanceUnprepared = sg_rubberCycleMinDistanceUnprepared;
     ph.rubberMinDistancePreparation = sg_rubberCycleMinDistancePreparation;
     ph.rubberMinAdjust = sg_rubberCycleMinAdjust;
+    ph.turnRadius = sg_cycleTurnRadius;
+    ph.turnRadiusMin = sg_cycleTurnRadiusMin;
+    ph.turnWallStep = sg_cycleTurnWallStep;
     return ph;
+}
+
+REAL gCycleMovement::TurnRadius()
+{
+    return sg_cycleTurnRadius;
+}
+
+bool gCycleMovement::StartArc( eCoord const & axis )
+{
+    if ( sg_cycleTurnRadius <= 0 )
+        return false;
+    // the room ahead bounds the arc: a tight spot gets a tight turn, a wall right there the snap
+    REAL radius = sg_cycleTurnRadius;
+    REAL space = GetMaxSpaceAhead( radius * 2 );
+    if ( space < radius )
+        radius = space * .9f;
+    if ( !( radius >= sg_cycleTurnRadiusMin ) )
+        return false;
+    eCoord from = arcAxis_;
+    if ( !arcActive_ )
+    {
+        arcHeading_ = arcTarget_ = arcDropped_ = atan2( dirDrive.y, dirDrive.x );
+        from = dirDrive;
+        arcActive_ = true;
+    }
+    arcDropPos_ = pos; // the turn itself lays a wall point here
+    // which way round: the sign of the cross product of the axis we were on and the new one
+    REAL cross = from.x * axis.y - from.y * axis.x;
+    arcTarget_ += cross > 0 ? REAL( M_PI / 2 ) : REAL( -M_PI / 2 );
+    arcAxis_ = axis;
+    arcRadius_ = radius;
+    return true;
+}
+
+void gCycleMovement::AdvanceArc( REAL ts )
+{
+    if ( !arcActive_ )
+        return;
+    REAL remaining = arcTarget_ - arcHeading_;
+    REAL speed = verletSpeed_ > 0 ? verletSpeed_ : 0;
+    REAL maxStep = arcRadius_ > 0 ? speed * ts / arcRadius_ : fabs( remaining );
+    REAL step = remaining;
+    if ( step > maxStep ) step = maxStep;
+    if ( step < -maxStep ) step = -maxStep;
+    arcHeading_ += step;
+    bool done = fabs( arcTarget_ - arcHeading_ ) < 1e-4;
+    if ( done )
+    {
+        arcHeading_ = arcTarget_;
+        dirDrive = arcAxis_;
+        arcActive_ = false;
+    }
+    else
+        dirDrive = eCoord( cos( arcHeading_ ), sin( arcHeading_ ) );
+    dir = dirDrive;
+    refreshSpaceAhead_ = true;
+    // a wall point every few degrees, but never two at the same spot: a wall of no length
+    // would corrupt the grid. A point that is due waits for the cycle to move on.
+    if ( ( done || fabs( arcHeading_ - arcDropped_ ) >= sg_cycleTurnWallStep * REAL( M_PI / 180 ) ) &&
+         ( pos - arcDropPos_ ).NormSquared() > 1e-4 )
+    {
+        arcDropped_ = arcHeading_;
+        arcDropPos_ = pos;
+        ArcWall();
+    }
 }
 
 REAL gCycleMovement::GetTurnDelay( void ) const
@@ -2718,7 +2811,7 @@ bool gCycleMovement::Timestep( REAL currentTime )
     }
 
     // simulate exactly to the time of the next turn if it is in reach
-    if ( !pendingTurns.empty())
+    if ( !pendingTurns.empty() && !arcActive_ )
     {
         REAL nextTurn = GetNextTurn(pendingTurns.front());
         if(currentTime>nextTurn) {
@@ -2791,6 +2884,7 @@ gCycleMovement::gCycleMovement( eGrid * grid, const eCoord & pos, const eCoord &
         :eNetGameObject(grid, pos,dir,player,autodelete),
         destinationList(NULL),currentDestination(NULL),lastDestination(NULL),
         dirDrive(dir),
+        arcActive_(false), arcHeading_(0), arcTarget_(0), arcRadius_(0), arcDropped_(0), arcDropPos_(pos), arcAxis_(dir),
         acceleration(0),
         totalZoneAcceleration(0),
         lastTimestep_(0),
@@ -2816,6 +2910,7 @@ gCycleMovement::gCycleMovement( Game::CycleMovementSync const & sync, nSenderInf
         :eNetGameObject( sync.base(), sender ),
         destinationList(NULL),currentDestination(NULL),lastDestination(NULL),
         dirDrive(1,0),
+        arcActive_(false), arcHeading_(0), arcTarget_(0), arcRadius_(0), arcDropped_(0), arcDropPos_(0,0), arcAxis_(1,0),
         acceleration(0),
         totalZoneAcceleration(0),
         lastTimestep_(0),
@@ -2977,6 +3072,8 @@ void gCycleMovement::CopyFrom( const SyncData & sync, const gCycleMovement & oth
 {
     // fetch values from sync
     dir = dirDrive 	= sync.dir;
+    arcActive_ = false;
+    arcAxis_ = dirDrive;
     lastTimestep_   = 0;
     verletSpeed_ 	= sync.speed;
     rubber			= sync.rubber;
@@ -3471,7 +3568,8 @@ bool gCycleMovement::DoTurn( int dir )
     if (dir < -1) dir = -1;
 
     REAL nextTurnTime = GetNextTurn( dir );
-    if ( nextTurnTime <= lastTime )
+    // a sweeping turn is taken whole: a turn asked for during one waits (queued below)
+    if ( nextTurnTime <= lastTime && !arcActive_ )
     {
         // prepare for uncanny timing checks if the turn was user-controlled
         if( sn_GetNetState() == nSERVER && nextTurnTime + .05 < lastTime )
@@ -3634,14 +3732,15 @@ bool gCycleMovement::DoTurn( int dir )
         }
 
         // update driving directions
-        lastDirDrive = dirDrive;
+        lastDirDrive = arcActive_ ? arcAxis_ : dirDrive;
 
         if(dir == 1)
             lastTurnTimeRight_ = lastTime;
         else
             lastTurnTimeLeft_ = lastTime;
 
-        dirDrive = nextDirDrive;
+        if ( !StartArc( nextDirDrive ) )
+            dirDrive = nextDirDrive;
 
 #ifdef DEBUGOUTPUT
         if ( sg_cycleDebugPrintLevel > 0 )
@@ -4128,6 +4227,9 @@ bool gCycleMovement::TimestepCore( REAL currentTime, bool calculateAcceleration 
         }
     }
 
+    // a sweeping turn rotates the heading as it goes
+    AdvanceArc( ts );
+
     // move forward
     eCoord nextpos;
     if ( verletSpeed_ >0 )
@@ -4392,6 +4494,8 @@ void gCycleMovement::MyInitAfterCreation( void )
     dir=dirDrive;
     lastDirDrive=dirDrive;
     lastTurnPos_=pos;
+    arcActive_=false;
+    arcAxis_=dirDrive;
 
     distance=0;
     // wallContDistance = 5;

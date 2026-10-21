@@ -2749,8 +2749,8 @@ void gAIPlayer::RightBeforeDeath(int triesLeft) // is called right before the ve
     if ( nCLIENT == sn_GetNetState() )
         return;
 
-    // cycles driven by the neural network get no emergency help
-    if ( gNeural::Controls( this ) )
+    // cycles driven by the neural network or the space fighter get no emergency help
+    if ( gNeural::Controls( this ) || gFighter::Controls( this ) )
         return;
 
     if ( simpleAI_ )

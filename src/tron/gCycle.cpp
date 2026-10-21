@@ -4007,6 +4007,21 @@ namespace
     auto const cycleTurnSoundVolume = 1.0f;
 }
 
+void gCycle::ArcWall()
+{
+    if ( !Alive() )
+        return;
+    // as in DoTurn: turn dirDrive around while dropping the wall so FindCurrentFace works
+    FindCurrentFace();
+    REAL factor = -16;
+    eCoord dirDriveFake = dirDrive * factor;
+    eCoord lastDirDriveBack = lastDirDrive;
+    lastDirDrive = lastDirDrive * factor;
+    gFakeDirDriveSetter fakeSetter( dirDriveFake );
+    DropWall();
+    lastDirDrive = lastDirDriveBack;
+}
+
 bool gCycle::DoTurn(int d)
 {
 #ifdef DELAYEDTURN_DEBUG

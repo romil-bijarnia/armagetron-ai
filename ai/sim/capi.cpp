@@ -45,6 +45,25 @@ void tr_set_bounds( void * w, float minX, float minY, float maxX, float maxY )
     x->maxY = maxY;
 }
 
+void tr_set_turn( void * w, float radius, float minimum, float wallStep )
+{
+    World * x = static_cast< World * >( w );
+    x->s.turnRadius = radius;
+    x->s.turnRadiusMin = minimum;
+    x->s.turnWallStep = wallStep;
+}
+int tr_trail( void const * w, int i, float * out, int cap )
+{
+    // the turn points of cycle I, x and y pairs; returns how many there are
+    World const * x = static_cast< World const * >( w );
+    std::vector< tron::Coord > const & t = x->cycles[i].trail;
+    for ( int k = 0; k < int( t.size() ) && k < cap; ++k )
+    {
+        out[2 * k] = t[k].x;
+        out[2 * k + 1] = t[k].y;
+    }
+    return int( t.size() );
+}
 void tr_place( void * w, int i, float x, float y, float dx, float dy )
 {
     static_cast< World * >( w )->Place( i, x, y, dx, dy );
@@ -252,7 +271,8 @@ void sp_config( void * h, int sims, int macro, float gamma, float cVisit, float 
 
 void sp_set_ring( void * h, int agent, uint8_t * maps, float * scalars, uint8_t * mask, float * policy, uint8_t * hasPolicy,
                   float * value, float * aux, int64_t * prev, int64_t * gen, uint8_t * ready, int64_t * counter, int64_t cap,
-                  int64_t * future, uint8_t * heading, int64_t * generation, float * context )
+                  int64_t * future, uint8_t * heading, int64_t * generation, float * context,
+                  uint8_t * action, float * behaviorLogp, float * behaviorValue, int64_t * policyUpdate )
 {
     if ( agent < 0 || agent > 3 )
         return;
@@ -273,6 +293,10 @@ void sp_set_ring( void * h, int agent, uint8_t * maps, float * scalars, uint8_t 
     r.heading = heading;
     r.generation = generation;
     r.context = context;
+    r.action = action;
+    r.behaviorLogp = behaviorLogp;
+    r.behaviorValue = behaviorValue;
+    r.policyUpdate = policyUpdate;
 }
 
 void sp_start( void * h, int g, float size, int n, int const * agents, int const * learn, int rotate, unsigned long long seed )
@@ -321,6 +345,62 @@ int sp_collect( void * h, uint8_t * maps, float * scalars, uint8_t * masks, int 
 void sp_feed( void * h, float const * logits, float const * values, int batch, int64_t const * updates )
 {
     static_cast< SelfPlay * >( h )->Feed( logits, values, batch, updates );
+}
+
+// Read-only tree inspection for an isolated algorithm demonstration; never starts a search.
+char const * sp_search_tree(void * h, int gi) {
+    static thread_local std::string result;
+    auto const & sp = *static_cast<SelfPlay *>(h);
+    if (gi < 0 || gi >= int(sp.games.size()) || sp.games[gi].nodes.empty()) return "null";
+    auto const & g = sp.games[gi];
+    std::ostringstream out;
+    out << "{\"simulations\":" << g.simsDone << ",\"budget\":" << sp.cfg.sims
+        << ",\"searching\":" << (g.searching ? "true" : "false")
+        << ",\"gamma\":" << sp.cfg.gamma << ",\"macro\":" << sp.cfg.macro
+        << ",\"c_visit\":" << sp.cfg.cVisit << ",\"c_scale\":" << sp.cfg.cScale << ",\"noise\":[";
+    for (int a = 0; a < tron::kActions; ++a) {
+        if (a) out << ',';
+        out << g.gumbel[0][a];
+    }
+    out << "],\"nodes\":[";
+    for (size_t i = 0; i < g.nodes.size(); ++i) {
+        if (i) out << ',';
+        auto const & n = g.nodes[i];
+        out << "{\"id\":" << i << ",\"depth\":" << n.depth << ",\"elapsed\":" << n.elapsed
+            << ",\"evaluated\":" << (n.evaluated ? "true" : "false")
+            << ",\"terminal\":" << (n.done[0] ? "true" : "false")
+            << ",\"cutoff\":" << (n.cutoff ? "true" : "false")
+            << ",\"value\":" << (n.done[0] ? n.util[0] : n.value[0]) << ",\"actions\":[";
+        for (int a = 0; a < tron::kActions; ++a) {
+            if (a) out << ',';
+            out << "{\"legal\":" << ((n.mask[0] >> a & 1) ? "true" : "false")
+                << ",\"logit\":" << n.logits[0][a] << ",\"visits\":" << n.N[0][a]
+                << ",\"return_sum\":" << n.W[0][a] << '}';
+        }
+        out << "],\"children\":[";
+        for (size_t k = 0; k < n.kids.size(); ++k) {
+            if (k) out << ',';
+            out << "{\"id\":" << n.kids[k].second << ",\"joint_action\":" << n.kids[k].first << '}';
+        }
+        out << "]}";
+    }
+    out << "],\"path\":[";
+    for (size_t i = 0; i < g.path.size(); ++i) {
+        if (i) out << ',';
+        out << g.path[i].first;
+    }
+    if (g.pendingNode >= 0) {
+        if (!g.path.empty()) out << ',';
+        out << g.pendingNode;
+    }
+    out << "],\"candidates\":[";
+    for (size_t i = 0; i < g.cands[0].size(); ++i) {
+        if (i) out << ',';
+        out << g.cands[0][i];
+    }
+    out << "],\"chosen_action\":" << (g.searching ? -1 : g.lastChoice[0].action) << '}';
+    result = out.str();
+    return result.c_str();
 }
 
 //! Read between Collect/Feed calls, when the simulator's worker threads have all joined.

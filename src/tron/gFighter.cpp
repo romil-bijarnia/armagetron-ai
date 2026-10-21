@@ -188,6 +188,7 @@ struct Seat
 std::map< gAIPlayer const *, Seat > sg_seats;
 double sg_driftSum = 0, sg_driftMax = 0, sg_planMs = 0, sg_planMsMax = 0;
 int sg_driftCount = 0, sg_planCount = 0, sg_lateResults = 0, sg_turnSamples = 0;
+double sg_turnDriftSum = 0, sg_turnDriftMax = 0;
 
 tron::FighterConfig Config()
 {
@@ -231,11 +232,14 @@ void Physics( tron::Settings & s )
     s.rubberMinDistanceUnprepared = ph.rubberMinDistanceUnprepared;
     s.rubberMinDistancePreparation = ph.rubberMinDistancePreparation;
     s.rubberMinAdjust = ph.rubberMinAdjust;
+    s.turnRadius = ph.turnRadius;
+    s.turnRadiusMin = ph.turnRadiusMin;
+    s.turnWallStep = ph.turnWallStep;
     s.wallsLength = gCycle::WallsLength() > 0 ? gCycle::WallsLength() : 1e9f;
     s.wallsStayUp = gCycle::WallsStayUpDelay() >= 0 ? gCycle::WallsStayUpDelay() : 1e9f;
     s.explosionRadius = gCycle::ExplosionRadius();
-    // a local game runs no server-side wall prediction
-    s.predictAhead = 0;
+    // a dedicated server draws each wall a little ahead of its cycle for lag; a local game does not
+    s.predictAhead = sn_GetNetState() == nSERVER ? .175f : 0;
 }
 
 struct WallRun
@@ -349,6 +353,16 @@ bool Snapshot( tron::World & w, gCycle * self, REAL time )
         c.distance = g->GetDistance();
         c.lastTurnX = g->GetLastTurnPos().x;
         c.lastTurnY = g->GetLastTurnPos().y;
+        gSweep sweep = g->GetSweep();
+        c.arcActive = sweep.active;
+        c.arcHeading = sweep.heading;
+        c.arcTarget = sweep.target;
+        c.arcRadius = sweep.radius;
+        c.arcDropped = sweep.dropped;
+        c.axisDX = sweep.axis.x;
+        c.axisDY = sweep.axis.y;
+        c.arcDropX = sweep.dropPos.x;
+        c.arcDropY = sweep.dropPos.y;
         Trail( g, walls[ g ], c );
     }
     w.roundTotal = int( cycles.size() );
@@ -364,6 +378,8 @@ void Report()
     if ( sg_driftCount > 0 )
         std::cerr << " drift(m)=" << sg_driftSum / sg_driftCount << " max=" << sg_driftMax
                   << " samples=" << sg_driftCount << " turns=" << sg_turnSamples;
+    if ( sg_turnSamples > 0 )
+        std::cerr << " turnDrift(m)=" << sg_turnDriftSum / sg_turnSamples << " max=" << sg_turnDriftMax;
     std::cerr << "\n";
 }
 }
@@ -412,7 +428,11 @@ void gFighter::Timestep( gAIPlayer * player, REAL time )
         REAL drift = sqrt( dx * dx + dy * dy );
         // a turn executed since the forecast moves the cycle off the forecast's line by design
         if ( seat.turned )
+        {
             ++sg_turnSamples;
+            sg_turnDriftSum += drift;
+            sg_turnDriftMax = std::max< double >( sg_turnDriftMax, drift );
+        }
         else
         {
             sg_driftSum += drift;
@@ -420,7 +440,7 @@ void gFighter::Timestep( gAIPlayer * player, REAL time )
             ++sg_driftCount;
         }
         seat.forecast = false;
-        if ( ( sg_driftCount + sg_turnSamples ) % 400 == 0 )
+        if ( ( sg_driftCount + sg_turnSamples ) % 100 == 0 )
             Report();
     }
 
@@ -438,6 +458,15 @@ void gFighter::Timestep( gAIPlayer * player, REAL time )
         action = tron::Hold( action );
     int executed = gNeural::ApplyAction( cycle, action );
     seat.last = executed >= 0 ? executed : action;
+    if ( sg_fighterCheck > 1 )
+        std::cerr << "fighter " << ( player->GetName() ) << " t=" << time << " pos=" << cycle->Position().x << ","
+                  << cycle->Position().y << " dir=" << cycle->Direction().x << "," << cycle->Direction().y
+                  << " speed=" << cycle->Speed() << " act=" << action << " exec=" << executed
+                  << " sweep=" << cycle->Sweeping() << " legal=" << legal << " turns=" << cycle->GetTurns()
+                  << " pending=" << cycle->PendingTurnCount()
+                  << " lastTurn=" << cycle->GetLastTurnTime() << " own=" << cycle->LastTime()
+                  << " h=" << cycle->GetSweep().heading << " tg=" << cycle->GetSweep().target
+                  << " ax=" << cycle->GetSweep().axis.x << "," << cycle->GetSweep().axis.y << "\n";
     if ( seat.last != tron::ACT_STRAIGHT && seat.last != tron::ACT_BRAKE )
         seat.turned = true;
 

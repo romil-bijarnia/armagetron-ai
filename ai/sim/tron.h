@@ -40,6 +40,8 @@ struct Settings
     REAL frameDt = .025f, decision = .05f;
     // dedicated server wall prediction: MAX_SIMULATE_AHEAD + 2 x lazy lag (DEDICATED_FPS 40, idle factor 2)
     REAL predictAhead = .175f;
+    // a turn as a sweep (CYCLE_TURN_RADIUS, _MIN, _WALL_STEP): 0 is the classic instant turn
+    REAL turnRadius = 0, turnRadiusMin = .15f, turnWallStep = 15;
     // observation
     REAL localCell = 2;
 };
@@ -68,6 +70,10 @@ struct Cycle
     REAL deathTime = 0, deathX = 0, deathY = 0;
     int expansion = 0;  //!< explosion steps done after death (5 = finished)
     REAL x = 0, y = 0, dx = 0, dy = 1;
+    // a sweeping turn under way: heading (radians, continuous) rotating towards the target
+    bool arcActive = false;
+    REAL arcHeading = 0, arcTarget = 0, arcRadius = 0, arcDropped = 0, axisDX = 0, axisDY = 1;
+    REAL arcDropX = 0, arcDropY = 0;
     REAL verletSpeed = 20, acceleration = 0, lastTimestep = 0;
     bool braking = false;
     REAL brakingReservoir = 1, brakeUsage = 0;
@@ -149,6 +155,8 @@ private:
     void ApplyAcceleration( int i, REAL dt );
     REAL GetMaxSpaceAhead( int i, REAL maxReport );
     bool DoTurn( int i, int dir );
+    bool StartArc( int i, REAL ndx, REAL ndy );
+    void AdvanceArc( int i, REAL ts );
     void Move( int i, REAL nx, REAL ny, REAL t0, REAL t1 );
     void Kill( int i, REAL px, REAL py );
     void Explode( int i );

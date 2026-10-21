@@ -83,6 +83,15 @@ struct gCyclePhysics
     REAL rubber, rubberSpeed, rubberTime;
     REAL rubberMinDistance, rubberMinDistanceRatio, rubberMinDistanceReservoir;
     REAL rubberMinDistanceUnprepared, rubberMinDistancePreparation, rubberMinAdjust;
+    REAL turnRadius, turnRadiusMin, turnWallStep;
+};
+
+//! a sweeping turn in progress, for a look-ahead that copies the cycle
+struct gSweep
+{
+    bool active;
+    REAL heading, target, radius, dropped;
+    eCoord axis, dropPos;
 };
 
 class gCycleMovement : public eNetGameObject
@@ -117,6 +126,9 @@ public:
     bool                    CanMakeTurn             ( REAL time, int direction          ) const     ;   //!< returns whether a turn is possible at the given time
     inline  REAL            GetDistanceSinceLastTurn(                                   ) const     ;   //!< returns the distance since the last turn
     static gCyclePhysics    ExportPhysics           (                                   )           ;   //!< the current movement settings
+    bool                    Sweeping                (                                   ) const { return arcActive_; } //!< is a sweeping turn under way?
+    gSweep                  GetSweep                (                                   ) const;   //!< the sweeping turn under way
+    static REAL             TurnRadius              (                                   )           ;   //!< the CYCLE_TURN_RADIUS setting
     REAL                    GetLastTurnTimeLeft     (                                   ) const { return lastTurnTimeLeft_; }   //!< the time of the last turn left
     REAL                    GetLastTurnTimeRight    (                                   ) const { return lastTurnTimeRight_; }  //!< the time of the last turn right
     REAL                    GetTurnDelay            (                                   ) const     ;   //!< returns the time between turns in different directions
@@ -186,6 +198,9 @@ protected:
     // acceleration handling
 public:
     virtual void            AccelerationDiscontinuity ()                                            ;   //!< call when you know the acceleration makes a sharp jump now
+    bool                    StartArc                ( eCoord const & axis               )           ;   //!< begins or extends a sweeping turn towards AXIS; false if the turn is instant
+    void                    AdvanceArc              ( REAL ts                           )           ;   //!< rotates the heading along the sweep for one step
+    virtual void            ArcWall                 (                                   )           {}  //!< drops a wall point along a sweeping turn
     virtual void            CalculateAcceleration   (                                   )           ;   //!< calculate acceleration to apply later
     virtual void            ApplyAcceleration       ( REAL                  dt          )           ;   //!< apply acceleration calculated earlier
 
@@ -240,6 +255,15 @@ protected:
     gDestination*   lastDestination;            //!< the last destination that was passed
 
     eCoord          dirDrive;                   //!< the direction we are facing
+    // a turn as a sweep (CYCLE_TURN_RADIUS): the heading rotates from arcHeading_ towards
+    // arcTarget_ (radians, continuous) at speed/arcRadius_ and the wall follows the arc
+    bool            arcActive_;                 //!< a sweep is under way
+    REAL            arcHeading_;                //!< the heading now
+    REAL            arcTarget_;                 //!< the heading the sweep ends at
+    REAL            arcRadius_;                 //!< the radius of this sweep
+    REAL            arcDropped_;                //!< the heading at the last wall point
+    eCoord          arcDropPos_;                //!< where the last wall point was laid
+    eCoord          arcAxis_;                   //!< the axis the sweep ends on
     eCoord          dirSpawn;                   //!< the direction we were facing on the last spawn
     eCoord          lastDirDrive;               //!< the direction we were facing before the last turn
     REAL            acceleration;               //!< current acceleration

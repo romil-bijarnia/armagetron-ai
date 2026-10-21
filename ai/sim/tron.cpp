@@ -311,7 +311,8 @@ unsigned World::ActionMask( int i ) const
 {
     Cycle const & c = cycles[i];
     unsigned mask = ( 1u << ACT_STRAIGHT ) | ( 1u << ACT_BRAKE );
-    if ( c.lastTime >= NextTurn( i ) )
+    // a sweeping turn is taken whole: no turn until it completes (gCycleMovement::CanMakeTurn)
+    if ( c.lastTime >= NextTurn( i ) && !c.arcActive )
         mask |= ( 1u << ACT_LEFT ) | ( 1u << ACT_RIGHT ) | ( 1u << ACT_LEFT_BRAKE ) | ( 1u << ACT_RIGHT_BRAKE );
     return mask;
 }
@@ -319,7 +320,7 @@ unsigned World::ActionMask( int i ) const
 bool World::DoTurn( int i, int dir )
 {
     Cycle & c = cycles[i];
-    if ( NextTurn( i ) > c.lastTime )
+    if ( NextTurn( i ) > c.lastTime || c.arcActive )
         return false;  // the engine would queue it; the network's mask never asks for that
 
     c.refreshSpace = true;
@@ -348,14 +349,86 @@ bool World::DoTurn( int i, int dir )
         c.lastTurnRight = c.lastTime;
     else
         c.lastTurnLeft = c.lastTime;
-    c.dx = ndx;
-    c.dy = ndy;
+    if ( !StartArc( i, ndx, ndy ) )
+    {
+        c.dx = ndx;
+        c.dy = ndy;
+    }
 
     // DropWall: the current wall ends here, a new one starts
     c.trail.push_back( Coord{ c.x, c.y, c.distance, c.lastTime } );
     c.predX = c.x;
     c.predY = c.y;
     return true;
+}
+
+// gCycleMovement::StartArc
+bool World::StartArc( int i, REAL ndx, REAL ndy )
+{
+    Cycle & c = cycles[i];
+    if ( s.turnRadius <= 0 )
+        return false;
+    REAL radius = s.turnRadius;
+    REAL space = GetMaxSpaceAhead( i, radius * 2 );
+    if ( space < radius )
+        radius = space * .9f;
+    if ( !( radius >= s.turnRadiusMin ) )
+        return false;
+    REAL fromX = c.axisDX, fromY = c.axisDY;
+    if ( !c.arcActive )
+    {
+        c.arcHeading = c.arcTarget = c.arcDropped = std::atan2( c.dy, c.dx );
+        fromX = c.dx;
+        fromY = c.dy;
+        c.arcActive = true;
+    }
+    c.arcTarget += fromX * ndy - fromY * ndx > 0 ? REAL( M_PI / 2 ) : REAL( -M_PI / 2 );
+    c.axisDX = ndx;
+    c.axisDY = ndy;
+    c.arcRadius = radius;
+    c.arcDropX = c.x;
+    c.arcDropY = c.y;
+    return true;
+}
+
+// gCycleMovement::AdvanceArc; a wall point along the arc is a trail point, as a turn's is
+void World::AdvanceArc( int i, REAL ts )
+{
+    Cycle & c = cycles[i];
+    if ( !c.arcActive )
+        return;
+    REAL remaining = c.arcTarget - c.arcHeading;
+    REAL speed = c.verletSpeed > 0 ? c.verletSpeed : 0;
+    REAL maxStep = c.arcRadius > 0 ? speed * ts / c.arcRadius : std::fabs( remaining );
+    REAL step = remaining;
+    if ( step > maxStep ) step = maxStep;
+    if ( step < -maxStep ) step = -maxStep;
+    c.arcHeading += step;
+    bool done = std::fabs( c.arcTarget - c.arcHeading ) < 1e-4f;
+    if ( done )
+    {
+        c.arcHeading = c.arcTarget;
+        c.dx = c.axisDX;
+        c.dy = c.axisDY;
+        c.arcActive = false;
+    }
+    else
+    {
+        c.dx = std::cos( c.arcHeading );
+        c.dy = std::sin( c.arcHeading );
+    }
+    c.refreshSpace = true;
+    REAL ddx = c.x - c.arcDropX, ddy = c.y - c.arcDropY;
+    if ( ( done || std::fabs( c.arcHeading - c.arcDropped ) >= s.turnWallStep * REAL( M_PI / 180 ) ) &&
+         ddx * ddx + ddy * ddy > 1e-4f )
+    {
+        c.arcDropped = c.arcHeading;
+        c.arcDropX = c.x;
+        c.arcDropY = c.y;
+        c.trail.push_back( Coord{ c.x, c.y, c.distance, c.lastTime } );
+        c.predX = c.x;
+        c.predY = c.y;
+    }
 }
 
 void World::Act( int i, int action )
@@ -901,6 +974,8 @@ bool World::TimestepCore( int i, REAL currentTime, bool calcAccel )
         if ( step < mn )
             step = mn;
     }
+
+    AdvanceArc( i, ts );
 
     REAL lastX = c.x, lastY = c.y;
     REAL nx = c.x, ny = c.y;

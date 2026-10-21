@@ -341,6 +341,7 @@ public:
 
     bool DoTurn(int dir) override;
     void DropWall( bool buildNew=true );                                    //!< Drops the current wall and builds a new one
+    virtual void ArcWall();                                                  //!< drops a wall point along a sweeping turn
 
     // void Turbo(bool turbo);
 
