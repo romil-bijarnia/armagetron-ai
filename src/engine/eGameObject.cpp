@@ -33,6 +33,7 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 #include "eWall.h"
 #include "tConsole.h"
 #include "rScreen.h"
+#include "rSceneSample.h"
 
 #include "eSound.h"
 #include "eSoundMixer.h"
@@ -923,14 +924,41 @@ eGameObject *displayed_gameobject = 0;
 #endif
 
 void eGameObject::RenderAll(eGrid *grid, const eCamera *cam){
+
     //if (!sr_glOut)
     //    return;
     
+#ifndef DEDICATED
+    rSceneSample::BeginView();
+#endif
     // Opaque subparts of otherwise translucent objects must precede all normal
     // renders. Each view, including its mirror pass, gets this phase once.
     if (sr_glOut)
         for (int i=grid->gameObjects.Len()-1;i>=0;--i)
             grid->gameObjects(i)->RenderEarly(cam);
+
+#ifndef DEDICATED
+    extern bool sg_blacklightVisuals;
+    extern bool sg_MoviePack();
+    if (sr_glOut && sg_blacklightVisuals && !sg_MoviePack())
+    {
+        // All opaque bikes must exist in the optical source on the very first
+        // frame, not only after the old renderer's next-frame list reordering.
+        for (int phase=0;phase<2;++phase)
+        {
+            if (phase) rSceneSample::Capture();
+            for (int i=grid->gameObjects.Len()-1;i>=0;--i)
+            {
+                eGameObject * object=grid->gameObjects(i);
+                if (object->RendersAlpha() != (phase!=0)) continue;
+                su_FetchAndStoreSDLInput();
+                object->Render(cam);
+
+            }
+        }
+        return;
+    }
+#endif
 
     // first, we need to render all the non-alpha blended objects.
     // if we encounter non-alpha blended objects after alpha blended objects

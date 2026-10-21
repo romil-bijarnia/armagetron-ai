@@ -80,7 +80,7 @@ Target glowTarget, scratchTarget; // narrow glow, normally a quarter of the scre
 Target haloTarget, haloScratchTarget; // wide halo, half the narrow glow's resolution
 GLuint brightProgram = 0, blurProgram = 0, compositeProgram = 0;
 GLint brightTexel = -1, brightThreshold = -1, brightTaps = -1, blurStep = -1;
-GLint compositeIntensity = -1, compositeHalo = -1, compositeVignette = -1;
+GLint compositeIntensity = -1, compositeHalo = -1, compositeVignette = -1, compositeDither = -1;
 bool failed = false;             // after an error the pass stays off until the next screen mode change
 bool reported = false;           // the reason is printed once
 
@@ -147,6 +147,7 @@ char const * compositeSource =
     "uniform float intensity;\n"
     "uniform float haloStrength;\n"
     "uniform float vignette;\n"
+    "uniform float ditherStrength;\n"
     "void main()\n"
     "{\n"
     "    vec2 uv = gl_TexCoord[0].xy;\n"
@@ -167,7 +168,11 @@ char const * compositeSource =
     "    float resultPeak = max( result.r, max( result.g, result.b ) );\n"
     // The frame falls off towards its corners, the centre stays untouched.
     "    float falloff = 1.0 - vignette * smoothstep( 0.45, 1.05, length( ( uv - 0.5 ) * 2.0 ) * 0.78 );\n"
-    "    gl_FragColor = vec4( result * ( shoulder / max( resultPeak, 0.00001 ) ) * falloff, 1.0 );\n"
+    // Sub-LSB, stationary monochrome dither smooths 8-bit dark gradients after
+    // bloom without softening edges or adding temporal noise. DITHER controls it.
+    "    float noise = fract(52.9829189 * fract(dot(gl_FragCoord.xy, vec2(0.06711056, 0.00583715)))) - 0.5;\n"
+    "    vec3 outputColour = result * ( shoulder / max( resultPeak, 0.00001 ) ) * falloff;\n"
+    "    gl_FragColor = vec4(outputColour + noise * ditherStrength / 255.0, 1.0);\n"
     "}\n";
 
 // Program and framebuffer bindings are not part of glPushAttrib. Saving before
@@ -327,7 +332,7 @@ void Unload()
         glDeleteProgram( compositeProgram );
     brightProgram = blurProgram = compositeProgram = 0;
     brightTexel = brightThreshold = brightTaps = blurStep = -1;
-    compositeIntensity = compositeHalo = compositeVignette = -1;
+    compositeIntensity = compositeHalo = compositeVignette = compositeDither = -1;
     if ( sceneTexture )
         glDeleteTextures( 1, &sceneTexture );
     sceneTexture = 0;
@@ -383,6 +388,7 @@ bool Prepare( int width, int height )
         compositeIntensity = glGetUniformLocation( compositeProgram, "intensity" );
         compositeHalo = glGetUniformLocation( compositeProgram, "haloStrength" );
         compositeVignette = glGetUniformLocation( compositeProgram, "vignette" );
+        compositeDither = glGetUniformLocation( compositeProgram, "ditherStrength" );
         glUseProgram( 0 );
     }
     if ( sceneWidth != width || sceneHeight != height )
@@ -512,6 +518,7 @@ void sr_Bloom()
         glUniform1f( compositeIntensity, Clamp( sr_bloomIntensity, 0.f, 16.f ) );
         glUniform1f( compositeHalo, Clamp( sr_bloomHalo, 0.f, 2.f ) );
         glUniform1f( compositeVignette, Clamp( sr_bloomVignette, 0.f, 1.f ) );
+        glUniform1f( compositeDither, sr_dither ? 1.f : 0.f );
         glActiveTexture( GL_TEXTURE2 );
         glBindTexture( GL_TEXTURE_2D, sceneTexture );
         glActiveTexture( GL_TEXTURE1 );

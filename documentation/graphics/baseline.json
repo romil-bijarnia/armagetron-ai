@@ -1,0 +1,78 @@
+{
+  "date": "2026-10-21",
+  "checkpoint_tag": "graphics-checkpoint-2026-10-21",
+  "status": "Checkpoint with an open trail attachment defect",
+  "native_capture": {
+    "source": "installed OpenGL renderer",
+    "pixels": [
+      1920,
+      1080
+    ],
+    "format": "RGB8 SDR",
+    "camera": {
+      "START_CAM_1": 3,
+      "START_FOV_1": 65,
+      "CAMERA_FOLLOW_START_X": 4,
+      "CAMERA_FOLLOW_START_Y": -6,
+      "CAMERA_FOLLOW_START_Z": 4.5
+    },
+    "colours_0_15": {
+      "blue": [
+        0,
+        0,
+        15
+      ],
+      "amber": [
+        15,
+        9,
+        0
+      ]
+    },
+    "scope": "Isolated inspection camera; production camera unchanged"
+  },
+  "blender": {
+    "source": "Native C++ geometry export with rider",
+    "triangles": 160456,
+    "renderer": "Cycles CPU",
+    "samples": 48,
+    "pixels": [
+      1920,
+      1280
+    ],
+    "colour": [
+      1,
+      0.6,
+      0
+    ],
+    "editable": true
+  },
+  "known_issue": "Fresh cyan trail spills or jumps around the rear wheel during repeated turns; not fixed by this checkpoint",
+  "assets": {
+    "amber-native.png": {
+      "sha256": "810b3cc3f69ba8f4c9df272bd800d7afdbc27bb5f9ea5fda22c90e569d3685a0",
+      "bytes": 917824
+    },
+    "blue-native.png": {
+      "sha256": "26e82f49ff67765cc02fa36dde7ef8a7e944c4ebbe1a0ecf4ec5bc8f101fa663",
+      "bytes": 845842
+    },
+    "amber-blender.png": {
+      "sha256": "7a340ba10eda329f6647ade8f5383937264d45f0cc605243e84b98fef1be1686",
+      "bytes": 2950851
+    },
+    "lightcycle.blend": {
+      "sha256": "c1070ed2c07d7de23ea7eabeb0178d360f74091cca5205a3b2af36d193597c70",
+      "bytes": 3654479
+    },
+    "trail-turn-spill.png": {
+      "sha256": "89b64680876eb1f39cae15b7e86e8facea95b68915bcb35ed6cde8992ec84d6b",
+      "bytes": 4910732
+    }
+  },
+  "source_sha256": {
+    "src/tron/gLightcycleModel.h": "f7466407d81076252b02f4fdb3e8157b53d705fe23dce079e39927f59dc82de2",
+    "src/tron/gLightcycleMaterial.h": "84f024fb26e62fd0efde422adefa2155171a781d852371ce7de14e387a611252",
+    "src/tron/gLightColour.h": "b95fb53bec472f65244185ab1d04447cbbea09273f11524731b96dbcd9846f12",
+    "src/tron/gLightwallMaterial.h": "9b61d75112e8760154458c1cb7a2fbe2e1ca389d7816a1c3128dbed50d5dcf11"
+  }
+}

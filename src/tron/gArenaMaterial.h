@@ -34,7 +34,7 @@ private:
     void OnSelectCore() override
     {
         // Preserve narrow panel edges and rounded corners at Retina resolution.
-        int const size = kind_ == Floor ? 2048 : 1024;
+        int const size = kind_ == Floor ? 4096 : 2048;
         SDL_Surface * raw = SDL_CreateRGBSurface(SDL_SWSURFACE, size, size, 32,
                                                 0x000000ff, 0x0000ff00,
                                                 0x00ff0000, 0xff000000);
@@ -50,24 +50,27 @@ private:
                 Uint8 alpha = 255;
                 if (kind_ == Floor)
                 {
-                    // Square glass tiles, four by four per grid cell, parted by
-                    // thin seams with a small stud where four tiles meet. Each
-                    // tile is a shade apart so the floor reads as panels.
+                    // Smoked glass with recessed joints, a polished bevel and
+                    // fine etched registration marks. Circuit inlays are drawn
+                    // in world space by the floor material, above this quiet grain.
                     float const tiles = 4.f, tile = 512.f;
                     float fx = float(x) * tiles / size, fy = float(y) * tiles / size;
                     int ix = int(fx), iy = int(fy);
                     float lx = (fx - ix) * tile, ly = (fy - iy) * tile;
                     float dx = std::min(lx, tile - lx), dy = std::min(ly, tile - ly);
                     float edge = std::min(dx, dy);
-                    float seam = Line(edge, 1.6f);
-                    float shoulder = Line(edge, 7.f);
-                    float bevel = Line(std::fabs(edge - 16.f), 1.f);
-                    float stud = Line(dx, 5.f) * Line(dy, 5.f);
+                    float seam = Line(edge, 1.4f);
+                    float shoulder = Line(edge, 5.f);
+                    float bevel = Line(std::fabs(edge - 7.f), 1.8f);
+                    float stud = Line(dx, 4.f) * Line(dy, 4.f);
                     unsigned hash = unsigned(ix * 73856093) ^ unsigned(iy * 19349663);
                     hash = (hash ^ (hash >> 13)) * 1274126177u;
                     float shade = float(hash & 255u) / 255.f;
-                    intensity = .034f + .014f*shade + .46f*seam + .05f*shoulder
-                                + .022f*bevel + .30f*stud;
+                    float grain = .5f+.5f*std::sin(lx*1.7f+std::sin(ly*.047f));
+                    float tick = Line(std::fabs(dx-21.f),1.2f)*Line(dy,7.f)
+                               + Line(std::fabs(dy-21.f),1.2f)*Line(dx,7.f);
+                    intensity = .085f + .012f*shade + .004f*grain + .20f*seam
+                                + .025f*shoulder + .055f*bevel + .24f*stud + .11f*tick;
                 }
                 else if (kind_ == Trail)
                 {
@@ -80,11 +83,11 @@ private:
                     float bottom = std::exp(-(1.f - v) * 60.f);
                     float shoulder = std::exp(-v * 14.f);
                     float foot = std::exp(-(1.f - v) * 10.f);
-                    float weave = .5f + .5f * std::sin(v * 452.38934f
-                                      + .55f * std::sin(u * 6.2831853f));
+                    float weave = .5f + .5f * std::sin(v * 201.06193f
+                                      + .18f * std::sin(u * 6.2831853f));
                     float edge = std::max(top,bottom);
-                    intensity = .60f + .025f*weave + .12f*shoulder + .09f*foot + .35f*edge;
-                    float opacity = .27f + .014f*weave + .13f*shoulder + .10f*foot + .72f*edge;
+                    intensity = .70f + .012f*weave + .11f*shoulder + .07f*foot + .30f*edge;
+                    float opacity = .34f + .008f*weave + .16f*shoulder + .10f*foot + .64f*edge;
                     alpha = Uint8(std::min(1.f,opacity)*255.f+.5f);
                 }
                 else

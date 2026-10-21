@@ -230,6 +230,7 @@ public:
 
     // internal camera
     virtual eCoord CamDir()  const {return dir;}
+    virtual eCoord CamDirTarget() const {return CamDir();} //!< unsmoothed target for cameras with their own response
     virtual REAL  CamRise()  const {return 0;}
     virtual eCoord CamPos()  const {return pos;}
     virtual REAL  CamZ()     const {return z;}

@@ -32,6 +32,7 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 #include "gStuff.h"
 #include "gArenaMaterial.h"
 #include "gLightwallMaterial.h"
+#include "gLightcycleModel.h"
 #include "eGrid.h"
 #include "eWall.h"
 #include "math.h"
@@ -274,6 +275,13 @@ void gWallRim::RenderReal(const eCamera *cam){
             else backdrop = false;
         }
 
+        // Follow/death cameras can briefly cross the physical rim. The visual
+        // stadium must not put that camera inside an opaque stand: omit the
+        // near facade when viewed from outside and keep the arena in sight.
+        // This changes no wall collision and leaves shaped-map rims alone.
+        if (backdrop && cam && eCoord::F(outward,cam->CameraPos()-*p1)>.01f)
+            return;
+
         // determine height and transparency
         bool transparency = sg_bugTransparency || ( sg_bugTransparencyDemand && renderHeight_ < height );
         REAL h = transparency ? height : renderHeight_;
@@ -494,7 +502,7 @@ void gWallRim::RenderReal(const eCamera *cam){
                         (std::fabs(point.y-bounds.GetLow().y)<.01f || std::fabs(point.y-bounds.GetHigh().y)<.01f);
                 };
                 gArenaBackdrop::RenderSegment(P1.x,P1.y,P2.x,P2.y,outward.x,outward.y,
-                                              rim_wall_red,rim_wall_green,rim_wall_blue,corner(P1),corner(P2));
+                                              rim_wall_red,rim_wall_green,rim_wall_blue,corner(P1),corner(P2),se_GameTime());
             }
         }
 
@@ -1112,11 +1120,12 @@ void gNetPlayerWall::RenderList(bool list, gWallRenderMode renderMode ){
 }
 
 
-inline bool upperlinecolor(REAL r,REAL g,REAL b, REAL a){
+inline bool upperlinecolor(REAL r,REAL g,REAL b, REAL a,REAL height=1){
     if (sg_blacklightVisuals && !sg_MoviePack())
     {
         // Off/low-detail texture settings still retain coloured energy edges.
-        glTexCoord3f(0,0,-1);
+        if (gLightwallMaterial::IsActive()) glTexCoord4f(0,0,-1,height);
+        else glTexCoord3f(0,0,-1);
         // Emissive filaments keep the player's hue, including saturated red.
         glColor4f(r,g,b,a);
     }
@@ -1167,9 +1176,9 @@ static void sg_TrailFloorSpill(eCoord const & p1,eCoord const & p2,
     if (length<.00001f || height<=0)
         return;
     eCoord normal(-delta.y/length,delta.x/length);
-    REAL offsets[]={0,.12f,.32f,.62f};
-    REAL fade[]={1,.36f,.07f,0};
-    REAL strength=.17f;
+    REAL offsets[]={0,.18f,.55f,1.10f};
+    REAL fade[]={1,.40f,.08f,0};
+    REAL strength=.32f;
     bool const premultiplied=gLightwallMaterial::IsActive();
     if (!premultiplied)
     {
@@ -1185,7 +1194,8 @@ static void sg_TrailFloorSpill(eCoord const & p1,eCoord const & p2,
             eCoord inner=normal*(side*offsets[band]*height);
             eCoord outer=normal*(side*offsets[band+1]*height);
             // A stable white edge texel supplies spill, never animated caustics.
-            glTexCoord3f(.5f,0,-2);
+            if (premultiplied) glTexCoord4f(.5f,0,-2,height);
+            else glTexCoord3f(.5f,0,-2);
             glColor4f(r,g,b,alpha1*strength*fade[band]);
             glVertex3f(p1.x+inner.x,p1.y+inner.y,.006f);
             glColor4f(r,g,b,alpha2*strength*fade[band]);
@@ -1233,7 +1243,8 @@ void gNetPlayerWall::RenderNormal(const eCoord &p1,const eCoord &p2,REAL ta,REAL
             a*=alpha;
         }
     }
-    REAL h=1;
+    // Visual sheet height only; the two-dimensional collision wall is unchanged.
+    REAL h=energy ? 1.22f : 1.f;
 
 
     if (hfrac>0){
@@ -1241,13 +1252,13 @@ void gNetPlayerWall::RenderNormal(const eCoord &p1,const eCoord &p2,REAL ta,REAL
 
             BeginLines();
 
-            upperlinecolor(r,g,b,a);
+            upperlinecolor(r,g,b,a,h*hfrac);
             glVertex3f(p1.x,p1.y,h*hfrac);
-            upperlinecolor(r,g,b,a);
+            upperlinecolor(r,g,b,a,h*hfrac);
             glVertex3f(p2.x,p2.y,h*hfrac);
             if (energy)
             {
-                upperlinecolor(r,g,b,a*.82f);
+                upperlinecolor(r,g,b,a*.82f,h*hfrac);
                 glVertex3f(p1.x,p1.y,.012f*hfrac);
                 glVertex3f(p2.x,p2.y,.012f*hfrac);
             }
@@ -1272,19 +1283,23 @@ void gNetPlayerWall::RenderNormal(const eCoord &p1,const eCoord &p2,REAL ta,REAL
                 panelAlpha *= .27f;
 
             glColor4f(r,g,b,panelAlpha);
-            glTexCoord2f(ta,hfrac);
+            if (energy && gLightwallMaterial::IsActive()) glTexCoord4f(ta,1,0,h*hfrac);
+            else glTexCoord2f(ta,hfrac);
             glVertex3f(p1.x,p1.y,extrarise);
             
             glColor4f(r,g,b,panelAlpha);
-            glTexCoord2f(ta,0);
+            if (energy && gLightwallMaterial::IsActive()) glTexCoord4f(ta,0,0,h*hfrac);
+            else glTexCoord2f(ta,0);
             glVertex3f(p1.x,p1.y,extrarise + h*hfrac);
             
             glColor4f(r,g,b,panelAlpha);
-            glTexCoord2f(te,0);
+            if (energy && gLightwallMaterial::IsActive()) glTexCoord4f(te,0,0,h*hfrac);
+            else glTexCoord2f(te,0);
             glVertex3f(p2.x,p2.y,extrarise + h*hfrac);
             
             glColor4f(r,g,b,panelAlpha);
-            glTexCoord2f(te,hfrac);
+            if (energy && gLightwallMaterial::IsActive()) glTexCoord4f(te,1,0,h*hfrac);
+            else glTexCoord2f(te,hfrac);
             glVertex3f(p2.x,p2.y,extrarise);
             if (energy)
                 sg_TrailFloorSpill(p1,p2,r,g,b,a,a,hfrac);
@@ -1292,7 +1307,7 @@ void gNetPlayerWall::RenderNormal(const eCoord &p1,const eCoord &p2,REAL ta,REAL
     }
 }
 
-static inline REAL hfunc(REAL x){return 1-(x*x)/2;}
+static inline REAL hfunc(REAL x,bool energy=false){return 1-(x*x)*(energy ? .20f : .50f);}
 //static inline REAL hfunc(REAL x){return 1-(x*x);}
 static inline REAL cfunc(REAL x){return (x*x);}
 //static inline REAL afunc(REAL x){return 1-(x*x)/2;}
@@ -1344,9 +1359,37 @@ void gNetPlayerWall::RenderBegin(const eCoord &p1,const eCoord &pp2,REAL ta,REAL
         //a*=alpha;
     }
 
-    REAL h=1;
+    REAL h=energy ? 1.22f : 1.f;
 
-    eCoord ppos=cycle_->PredictPosition() - cycle_->dir*REAL(gCYCLE_LEN);
+    eCoord poseDirection=cycle_->dir;
+    REAL poseSkew=cycle_->skew;
+    REAL attachmentDistance=gCYCLE_LEN;
+    if (energy)
+    {
+        // The edge phase may precede the cycle draw. Sample the same accepted
+        // turn now so both passes attach to the rendered pose, even mid-turn.
+        cycle_->renderMotion_.Update(se_GameTime(),std::atan2(cycle_->dirDrive.y,cycle_->dirDrive.x),
+                                     cycle_->GetLastTurnTime(),cycle_->Speed());
+        poseDirection=eCoord(std::cos(cycle_->renderMotion_.Yaw()),std::sin(cycle_->renderMotion_.Yaw()));
+        poseSkew=std::tan(cycle_->renderMotion_.Bank());
+        // gCycle draws the authored model at half scale with a -1.5 X origin.
+        // The rear fender extends .08 beyond the tyre. This is a visual anchor;
+        // wall timing, distance coordinates and collision geometry stay intact.
+        attachmentDistance=.5f*sg_LightcycleScale()*
+            (1.5f-gLightcycleModel::RearAxle+gLightcycleModel::WheelRadius+.08f);
+    }
+    eCoord ppos=cycle_->PredictPosition() - poseDirection*attachmentDistance;
+    if (energy)
+        ppos+=eCoord(cycle_->renderMotion_.VisualOffsetX(),cycle_->renderMotion_.VisualOffsetY());
+    auto pointAt=[&](REAL frag)
+    {
+        REAL rat=ra+frag*(re-ra);
+        REAL blend=xfunc(rat);
+        // xfunc(1) is .6; normalize only the new material so its final sample
+        // reaches the fender instead of ending inside the enlarged rear wheel.
+        if (energy) blend/=xfunc(1);
+        return (p1+(p2-p1)*frag)*(1-blend)+ppos*blend;
+    };
 
     if( !good(ppos.x) || !good(ppos.y) ||
         !good(p1.x)   || !good(p1.y) ||
@@ -1367,12 +1410,12 @@ void gNetPlayerWall::RenderBegin(const eCoord &p1,const eCoord &pp2,REAL ta,REAL
     }
 
 
+    int const segs=energy ? 18 : 5;
+    REAL const seginv=1.f/segs;
     if ( hfrac>0 ){
         if( mode & gWallRenderMode_Lines && sg_renderBeginLines )
         {
         //REAL H=h*hfrac;
-#define segs 5
-#define seginv (1/float(segs))
             BeginLineStrip();
             
             // upperlinecolor(r,g,b,a);//a*afunc(rat));
@@ -1380,13 +1423,12 @@ void gNetPlayerWall::RenderBegin(const eCoord &p1,const eCoord &pp2,REAL ta,REAL
             for (int i=0;i<=segs;i++){
                 REAL frag=i*seginv;
                 REAL rat=ra+frag*(re-ra);
-                REAL x=(p1.x+frag*(p2.x-p1.x))*(1-xfunc(rat))+ppos.x*xfunc(rat);
-                REAL y=(p1.y+frag*(p2.y-p1.y))*(1-xfunc(rat))+ppos.y*xfunc(rat);
+                eCoord point=pointAt(frag);
 
-                REAL H=h*hfrac*hfunc(rat);
-                upperlinecolor(r,g,b,a*(energy ? .82f+.18f*afunc(rat) : afunc(rat)));
-                glVertex3f(x+H*cycle_->skew*sfunc(rat)*cycle_->dir.y,
-                           y-H*cycle_->skew*sfunc(rat)*cycle_->dir.x,
+                REAL H=h*hfrac*hfunc(rat,energy);
+                upperlinecolor(r,g,b,a*(energy ? .82f+.18f*afunc(rat) : afunc(rat)),H);
+                glVertex3f(point.x+H*poseSkew*sfunc(rat)*poseDirection.y,
+                           point.y-H*poseSkew*sfunc(rat)*poseDirection.x,
                            H);//+se_cameraZ*.005);
             }
             if (energy)
@@ -1397,10 +1439,9 @@ void gNetPlayerWall::RenderBegin(const eCoord &p1,const eCoord &pp2,REAL ta,REAL
                 {
                     REAL frag=i*seginv;
                     REAL rat=ra+frag*(re-ra);
-                    REAL x=(p1.x+frag*(p2.x-p1.x))*(1-xfunc(rat))+ppos.x*xfunc(rat);
-                    REAL y=(p1.y+frag*(p2.y-p1.y))*(1-xfunc(rat))+ppos.y*xfunc(rat);
-                    upperlinecolor(r,g,b,a*.82f*(.82f+.18f*afunc(rat)));
-                    glVertex3f(x,y,.012f*hfrac);
+                    eCoord point=pointAt(frag);
+                    upperlinecolor(r,g,b,a*.82f*(.82f+.18f*afunc(rat)),h*hfrac*hfunc(rat,energy));
+                    glVertex3f(point.x,point.y,.012f*hfrac);
                 }
             }
         }
@@ -1413,8 +1454,8 @@ void gNetPlayerWall::RenderBegin(const eCoord &p1,const eCoord &pp2,REAL ta,REAL
         for (int i=0;i<=segs;i++){
             REAL frag=i*seginv;
             REAL rat=ra+frag*(re-ra);
-            REAL x=(p1.x+frag*(p2.x-p1.x))*(1-xfunc(rat))+ppos.x*xfunc(rat);
-            REAL y=(p1.y+frag*(p2.y-p1.y))*(1-xfunc(rat))+ppos.y*xfunc(rat);
+            eCoord point=pointAt(frag);
+            REAL H=h*hfrac*hfunc(rat,energy);
 
             // bottom
             REAL alpha = a*(energy ? .82f+.18f*afunc(rat) : afunc(rat));
@@ -1424,8 +1465,9 @@ void gNetPlayerWall::RenderBegin(const eCoord &p1,const eCoord &pp2,REAL ta,REAL
                 glColor4f(r,g,b,alpha);
             else
                 glColor4f(r+cfunc(rat),g+cfunc(rat),b+cfunc(rat),alpha);
-            glTexCoord2f(ta+(te-ta)*frag,hfrac);
-            glVertex3f(x,y,0);
+            if (energy && gLightwallMaterial::IsActive()) glTexCoord4f(ta+(te-ta)*frag,1,0,H);
+            else glTexCoord2f(ta+(te-ta)*frag,hfrac);
+            glVertex3f(point.x,point.y,0);
 
             // top
             //glTexCoord2f(ta+(te-ta)*frag,hfrac*(1-hfunc(rat)));
@@ -1433,10 +1475,10 @@ void gNetPlayerWall::RenderBegin(const eCoord &p1,const eCoord &pp2,REAL ta,REAL
                 glColor4f(r,g,b,alpha);
             else
                 glColor4f(r+cfunc(rat),g+cfunc(rat),b+cfunc(rat),alpha);
-            glTexCoord2f(ta+(te-ta)*frag,0);
-            REAL H=h*hfrac*hfunc(rat);
-            glVertex3f(x+H*cycle_->skew*sfunc(rat)*cycle_->dir.y,
-                       y-H*cycle_->skew*sfunc(rat)*cycle_->dir.x,
+            if (energy && gLightwallMaterial::IsActive()) glTexCoord4f(ta+(te-ta)*frag,0,0,H);
+            else glTexCoord2f(ta+(te-ta)*frag,0);
+            glVertex3f(point.x+H*poseSkew*sfunc(rat)*poseDirection.y,
+                       point.y-H*poseSkew*sfunc(rat)*poseDirection.x,
                        H);
         }
     }
@@ -1450,8 +1492,7 @@ void gNetPlayerWall::RenderBegin(const eCoord &p1,const eCoord &pp2,REAL ta,REAL
         {
             REAL frag=i*seginv;
             REAL rat=ra+frag*(re-ra);
-            eCoord point((p1.x+frag*(p2.x-p1.x))*(1-xfunc(rat))+ppos.x*xfunc(rat),
-                         (p1.y+frag*(p2.y-p1.y))*(1-xfunc(rat))+ppos.y*xfunc(rat));
+            eCoord point=pointAt(frag);
             REAL alpha=a*(.82f+.18f*afunc(rat));
             if (i>0)
                 sg_TrailFloorSpill(previous,point,r,g,b,previousAlpha,alpha,hfrac);

@@ -80,10 +80,12 @@ int main()
         static_assert(detail::MaterialCount==10,"Update exporter material names for the native material enum");
         std::cout << std::setprecision(std::numeric_limits<float>::max_digits10);
         detail::Cache const & cache=detail::Geometry();
-        Summary body,wheel,complete;
+        Summary body,rider,wheel,complete;
         body.Add(cache.body);
+        rider.Add(cache.rider);
         wheel.Add(cache.wheel);
         complete.Add(cache.body);
+        complete.Add(cache.rider);
         complete.Add(cache.wheel,detail::Vec(model::RearAxle,0,model::WheelRadius));
         complete.Add(cache.wheel,detail::Vec(model::FrontAxle,0,model::WheelRadius));
         std::cout << "{\"schema_version\":1,\"axes\":{\"forward\":\"+X\",\"axle\":\"Y\",\"up\":\"+Z\"},"
@@ -91,10 +93,13 @@ int main()
                   << ",\"wheel_radius\":" << model::WheelRadius << "},"
                      "\"materials\":[\"Shell\",\"Armour\",\"Metal\",\"Rubber\",\"Recess\",\"Suit\",\"Visor\",\"Light\",\"SubtleLight\",\"Headlight\"],"
                      "\"summary\":{\"body\":";
-        body.Write(); std::cout << ",\"wheel\":"; wheel.Write();
+        body.Write(); std::cout << ",\"rider\":"; rider.Write();
+        std::cout << ",\"wheel\":"; wheel.Write();
         std::cout << ",\"complete\":"; complete.Write();
         std::cout << "},\"parts\":{\"body\":";
         WriteParts(cache.body);
+        std::cout << ",\"rider\":";
+        WriteParts(cache.rider);
         std::cout << ",\"wheel\":";
         WriteParts(cache.wheel);
         std::cout << "}}\n";

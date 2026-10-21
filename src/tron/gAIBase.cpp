@@ -1105,12 +1105,13 @@ static REAL rgb_ai[MAXAI_COLOR][3]={
                                        {.5,.5,.5}
                                    };
 
-// The cinematic presentation starts with warm and cool light colours. These
-// are the players' real colours, so bikes, trails, names and the minimap agree.
+// Local opponents use the warm spectrum from the Legacy reference against the
+// cyan human rider. These are the players' real colours, so bikes, walls, names
+// and the minimap agree. This palette does not affect the classic presentation.
 static REAL const rgb_lightcycle[MAXAI_COLOR][3]={
-    {1,.34,.02}, {.02,.84,1}, {.18,.40,1}, {1,.72,.02},
-    {.76,.18,1}, {.02,1,.62}, {1,.52,.04}, {1,.10,.40},
-    {.44,.28,1}, {.18,.65,1}, {.46,.94,1}, {.88,.12,.05}, {.06,.74,.58}
+    {1,.34,.02}, {1,.58,.02}, {1,.16,.015}, {1,.45,.025},
+    {.90,.23,.02}, {.90,.50,.025}, {.80,.20,.01}, {1,.65,.035},
+    {1,.40,.04}, {.80,.36,.02}, {1,.54,.035}, {.88,.14,.025}, {.95,.29,.03}
 };
 
 static nNetObjectDescriptor<gAIPlayer,Game::AIPlayerSync> gAIPlayer_init(330);
