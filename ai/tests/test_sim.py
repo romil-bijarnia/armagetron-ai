@@ -97,7 +97,8 @@ def test_self_play_macro_brakes_and_safe_kill_targets(tmp_path):
     exe = tmp_path / "selfplay_check"
     cxx = shutil.which("clang++") or shutil.which("g++")
     subprocess.run([cxx, "-O2", "-std=c++17", "-o", str(exe), str(here / "cpp/selfplay_check.cpp"),
-                    str(sim / "tron.cpp"), str(sim / "observe.cpp"), str(sim / "selfplay.cpp")], check=True)
+                    str(sim / "tron.cpp"), str(sim / "observe.cpp"), str(sim / "fighter.cpp"),
+                    str(sim / "selfplay.cpp")], check=True)
     subprocess.run([str(exe)], check=True)
 
 
