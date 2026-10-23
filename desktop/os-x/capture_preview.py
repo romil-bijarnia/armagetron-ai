@@ -24,7 +24,7 @@ import zlib
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "ai"))
-from arma_ai.engine import ArenaConfig, ENGINE_BIN, ENGINE_CONFIG, ENGINE_DATA
+from arma_ai.engine import ArenaConfig, EnginePool, ENGINE_BIN, ENGINE_CONFIG, ENGINE_DATA
 
 
 def png(path, pixels, width, height):
@@ -85,6 +85,8 @@ def main():
                     help="use the native recurrent policy for this many of the four server bots")
     ap.add_argument("--neural-model", type=Path,
                     help="explicit native policy file for a headless inference/frame-time check")
+    ap.add_argument("--turn-demo", action="store_true",
+                    help="drive one isolated bot through scripted corners and rapid reversals; no policy is loaded")
     ap.add_argument("--port", type=int, default=49534)
     args = ap.parse_args()
     if not 1 <= args.seconds <= 600:
@@ -100,6 +102,8 @@ def main():
         ap.error("video requires --readback-interval 0 to record every rendered frame")
     if not 0 <= args.neural_slots <= 4:
         ap.error("--neural-slots must be between zero and four")
+    if args.turn_demo and (args.neural_slots or args.neural_model):
+        ap.error("--turn-demo uses scripted actions and cannot load a neural policy")
     if args.neural_model and not args.neural_model.is_file():
         ap.error("--neural-model must be an existing policy file")
     encoder = shutil.which("ffmpeg") if args.video else None
@@ -120,7 +124,8 @@ def main():
     for side in ("server", "client"):
         for sub in ("config", "var", "data"):
             (root / side / sub).mkdir(parents=True, exist_ok=True)
-    server_settings = ArenaConfig(slots=args.neural_slots, builtin_ais=4 - args.neural_slots,
+    slots = 1 if args.turn_demo else args.neural_slots
+    server_settings = ArenaConfig(slots=slots, builtin_ais=4 - slots,
                                   lockstep_dt=0).settings()
     server_settings.update(SERVER_PORT=str(args.port), NEURAL_END_ROUND_WITHOUT_NEURAL="0")
     server_settings.update(dict(settings(args.server_set)))
@@ -183,14 +188,57 @@ TEXT_OUT 1
     recording = None
     recording_log = None
     recorded_frames = 0
+    scenario_pool = None
+    scenario_stop = threading.Event()
+    scenario_thread = None
+    scenario_events = []
+    scenario_errors = []
+    turn_schedule = [(2.0, 1), (3.2, 2),
+                     (4.4, 1), (4.5, 2), (4.6, 1), (4.7, 2),
+                     (5.8, 2), (5.9, 1), (6.0, 2), (6.1, 1),
+                     (8.0, 2), (8.1, 2), (9.0, 1)]
+
+    def scripted_turns():
+        # Single corners, alternating taps, then a same-direction pair with
+        # 100 ms spacing. All times are actual server game time.
+        previous_round, index = None, 0
+        try:
+            while not scenario_stop.is_set():
+                try:
+                    steps = scenario_pool.poll(timeout=2)
+                except TimeoutError:
+                    continue  # countdown and round transitions have no action steps
+                for step in steps:
+                    if step.round_id != previous_round:
+                        previous_round, index = step.round_id, 0
+                    action = 0
+                    if (index < len(turn_schedule) and step.round_time >= turn_schedule[index][0]
+                            and step.slots[0].needs_action
+                            and step.slots[0].mask & (1 << turn_schedule[index][1])):
+                        action = turn_schedule[index][1]
+                        scenario_events.append({"round": step.round_id, "time": step.round_time, "action": action,
+                                                "mask": step.slots[0].mask})
+                        index += 1
+                    scenario_pool.act(step.engine, [action])
+        except Exception as error:
+            if not scenario_stop.is_set():
+                scenario_errors.append(str(error))
 
     def interrupted(_signum, _frame):
         raise KeyboardInterrupt
 
     previous_sigterm = signal.signal(signal.SIGTERM, interrupted)
     try:
-        with (root / "server.log").open("w") as log:
-            server = subprocess.Popen([str(ENGINE_BIN), "--daemon", "--datadir", str(ENGINE_DATA),
+        if args.turn_demo:
+            scenario_pool = EnginePool([ArenaConfig(slots=1, builtin_ais=3, lockstep_dt=0,
+                                      extra=server_settings)], workdir=root / "scenario", base_port=args.port,
+                                      log_engines=True)
+            server = scenario_pool.procs[0]
+            scenario_thread = threading.Thread(target=scripted_turns, daemon=True)
+            scenario_thread.start()
+        else:
+            with (root / "server.log").open("w") as log:
+                server = subprocess.Popen([str(ENGINE_BIN), "--daemon", "--datadir", str(ENGINE_DATA),
                                        "--configdir", str(ENGINE_CONFIG), "--userconfigdir", str(root / "server/config"),
                                        "--vardir", str(root / "server/var"), "--userdatadir", str(root / "server/data")],
                                       stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT)
@@ -236,6 +284,8 @@ TEXT_OUT 1
             while time.monotonic() - started < args.seconds:
                 if client.poll() is not None:
                     raise RuntimeError(f"Preview client exited {client.returncode}")
+                if scenario_errors:
+                    raise RuntimeError(f"Turn scenario failed: {scenario_errors[0]}")
                 check_dimensions()
                 time.sleep(.2)
             if args.neural_slots and "loaded (training update " not in (root / "server.log").read_text():
@@ -256,6 +306,8 @@ TEXT_OUT 1
         while time.monotonic() - started < args.seconds:
             if client.poll() is not None:
                 raise RuntimeError(f"Preview client exited {client.returncode}; see {root / 'client.log'}")
+            if scenario_errors:
+                raise RuntimeError(f"Turn scenario failed: {scenario_errors[0]}")
             ready, _, _ = select.select([client.stdout], [], [], .2)
             if not ready:
                 continue
@@ -294,6 +346,8 @@ TEXT_OUT 1
                         capture_times[mark] = elapsed
         if not captured:
             raise RuntimeError(f"No rendered frames captured; see {root / 'client.log'}")
+        if args.turn_demo and not any(event["time"] >= 8.1 for event in scenario_events):
+            raise RuntimeError("Turn demo ended before completing rapid turns; see turn-scenario.json")
         report = {"frames": frames, "dimensions": dimensions, "elapsed_seconds": time.monotonic() - started,
                   "classic": args.classic, "hidden": True, "captures": sorted(captured),
                   "capture_times": capture_times, "requested_pixels": args.pixels,
@@ -308,6 +362,13 @@ TEXT_OUT 1
         (root / "capture.json").write_text(json.dumps(report, indent=2) + "\n")
         print(json.dumps(report))
     finally:
+        scenario_stop.set()
+        if scenario_pool is not None:
+            if scenario_thread is not None:
+                scenario_thread.join(timeout=2.5)
+            scenario_pool.close()
+            (root / "turn-scenario.json").write_text(json.dumps({"events": scenario_events,
+                                                                "errors": scenario_errors}, indent=2) + "\n")
         if recording is not None:
             if not recording.stdin.closed:
                 try:

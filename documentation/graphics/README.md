@@ -1,6 +1,9 @@
-# Graphics checkpoint
+# Graphics checkpoints
 
-The `graphics-checkpoint-2026-10-21` tag preserves the current Tron: Legacy-inspired
+The [23 October refinement](refinement-2026-10-23.md) updates the bike lighting,
+floor grid and trail attachment, with native captures and measured limitations.
+
+The `graphics-checkpoint-2026-10-21` tag preserves the earlier Tron: Legacy-inspired
 renderer, animation helpers, native Mac installer, capture utilities and Blender
 export. It is a recoverable checkpoint with known issues, not a claim that every
 visual defect has been resolved.
@@ -45,13 +48,13 @@ gameplay camera and inspection view are required for subsequent visual review.
 The game captures are RGB8 SDR. The supplied 4K HDR film is an external visual
 reference; it is not required to build or run the game.
 
-## Open regression: trail spilling or jumping at turns
+## Baseline regression: trail spilling or jumping at turns
 
 During repeated 90-degree turns, the fresh cyan sheet can appear to swing or spill
 across the bike's rear wheel and then jump to the next segment. Romil reported
 this on 21 October 2026. See the [in-game screenshot](assets/trail-turn-spill.png).
 
-This checkpoint includes the reported behaviour. It does not include a fix.
+The 21 October checkpoint includes the reported behaviour. It does not include a fix.
 The attachment interpolation in `gWall.cpp` and the shared visual pose in
 `gLightcycleMotion.h` are investigation targets, not a confirmed diagnosis.
 
@@ -84,6 +87,7 @@ Run the focused checks locally:
 ```bash
 ai/.venv/bin/python -m pytest \
   ai/tests/test_lightcycle_motion.py \
+  ai/tests/test_lightwall_attachment.py \
   ai/tests/test_camera_motion.py \
   ai/tests/test_impact_animation.py -q
 ```

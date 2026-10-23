@@ -32,6 +32,7 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 #include "gStuff.h"
 #include "gArenaMaterial.h"
 #include "gLightwallMaterial.h"
+#include "gLightwallAttachment.h"
 #include "gLightcycleModel.h"
 #include "eGrid.h"
 #include "eWall.h"
@@ -1062,7 +1063,37 @@ void gNetPlayerWall::RenderList(bool list, gWallRenderMode renderMode ){
                 }
             }
 
-            if(sg_simpleTrail)
+            if (sg_blacklightVisuals && !sg_MoviePack() && !sg_simpleTrail)
+            {
+                // Draw every settled segment at its physical coordinates. Only
+                // the segment containing the cut owns the short emitter curve;
+                // newer segments must not each pull their old corners at the bike.
+                REAL rear=.5f*sg_LightcycleScale()*
+                    (1.5f-gLightcycleModel::RearAxle+gLightcycleModel::WheelRadius+.08f);
+                REAL cut=time*SEGLEN-gLightwallAttachment::Reach(rear);
+                if (te*SEGLEN<=cut)
+                    RenderNormal(p1,p2,ta,te,r,g,b,a,renderMode);
+                else
+                {
+                    ClearDisplayList();
+                    if (ta*SEGLEN>cut || te<=ta) continue;
+                    REAL fraction=(cut/SEGLEN-ta)/(te-ta);
+                    eCoord join=p1+(p2-p1)*fraction;
+                    if (fraction>0)
+                        RenderNormal(p1,join,ta,cut/SEGLEN,r,g,b,a,renderMode);
+                    cycle_->renderMotion_.Update(se_GameTime(),std::atan2(cycle_->dirDrive.y,cycle_->dirDrive.x),
+                                                 cycle_->GetLastTurnTime(),cycle_->Speed());
+                    eCoord forward(std::cos(cycle_->renderMotion_.Yaw()),std::sin(cycle_->renderMotion_.Yaw()));
+                    eCoord emitter=cycle_->PredictPosition()-forward*rear+
+                        eCoord(cycle_->renderMotion_.VisualOffsetX(),cycle_->renderMotion_.VisualOffsetY());
+                    eCoord incoming=(p2-p1)*(1/std::max(REAL(1e-8),(p2-p1).Norm()));
+                    REAL room=std::max(REAL(0),std::min(cut-dbegin,EndPos()-cut));
+                    auto curve=gLightwallAttachment::Curve::Join({join.x,join.y},{incoming.x,incoming.y},
+                        {emitter.x,emitter.y},{forward.x,forward.y},room);
+                    RenderBegin(join,emitter,cut/SEGLEN,time,0,1,r,g,b,a,renderMode,&curve);
+                }
+            }
+            else if(sg_simpleTrail)
             {
                 if (te+gBEG_LEN_GIVEUP <= time)
                 {
@@ -1212,6 +1243,45 @@ static void sg_TrailFloorSpill(eCoord const & p1,eCoord const & p2,
     }
 }
 
+static void sg_AttachmentFloorSpill(gLightwallAttachment::Curve const & curve,
+                                   REAL r,REAL g,REAL b,REAL alpha,REAL height)
+{
+    bool const premultiplied=gLightwallMaterial::IsActive();
+    RenderEnd();
+    if (!premultiplied) glBlendFunc(GL_SRC_ALPHA,GL_ONE);
+    REAL const offsets[]={0,.18f,.55f,1.10f},fade[]={1,.40f,.08f,0};
+    // Shared edge vertices form a single continuous light footprint. Separate
+    // per-segment rectangles overlapped into a bright fan during sharp turns.
+    for (int side=-1;side<=1;side+=2)
+        for (int band=0;band<3;++band)
+        {
+            BeginQuadStrip();
+            for (int i=0;i<=18;++i)
+            {
+                double t=i/18.;
+                auto point=curve.Sample(t),tangent=curve.Tangent(t);
+                double length=std::hypot(tangent.x,tangent.y);
+                if (length<1e-7)
+                {
+                    tangent=curve.Tangent(i==0 ? .001 : .999);
+                    length=std::max(1e-7,std::hypot(tangent.x,tangent.y));
+                }
+                eCoord normal(-tangent.y/length,tangent.x/length);
+                REAL width=height*curve.SpillWidth(t);
+                if (premultiplied) glTexCoord4f(.5f,0,-2,height);
+                else glTexCoord3f(.5f,0,-2);
+                for (int edge=band;edge<=band+1;++edge)
+                {
+                    REAL offset=side*offsets[edge]*width;
+                    glColor4f(r,g,b,alpha*(1-.18f*t*t)*.32f*fade[edge]);
+                    glVertex3f(point.x+normal.x*offset,point.y+normal.y*offset,.006f);
+                }
+            }
+            RenderEnd();
+        }
+    if (!premultiplied) glBlendFunc(GL_SRC_ALPHA,GL_ONE_MINUS_SRC_ALPHA);
+}
+
 void gNetPlayerWall::RenderNormal(const eCoord &p1,const eCoord &p2,REAL ta,REAL te,REAL r,REAL g,REAL b,REAL a, gWallRenderMode mode ){
     bool const energy = sg_blacklightVisuals && !sg_MoviePack();
     REAL hfrac=1;
@@ -1316,7 +1386,7 @@ static inline REAL sfunc(REAL x){return (x*x);}
 //static inline REAL xfunc(REAL x){return (x+x*x)/2;}
 static inline REAL xfunc(REAL x){return REAL((x*.2+x*x)/2);}
 
-void gNetPlayerWall::RenderBegin(const eCoord &p1,const eCoord &pp2,REAL ta,REAL te,REAL ra,REAL re,REAL r,REAL g,REAL b,REAL a, gWallRenderMode mode ){
+void gNetPlayerWall::RenderBegin(const eCoord &p1,const eCoord &pp2,REAL ta,REAL te,REAL ra,REAL re,REAL r,REAL g,REAL b,REAL a, gWallRenderMode mode, gLightwallAttachment::Curve const * attachment ){
     if ( !cycle_ )
     {
         return;
@@ -1383,6 +1453,11 @@ void gNetPlayerWall::RenderBegin(const eCoord &p1,const eCoord &pp2,REAL ta,REAL
         ppos+=eCoord(cycle_->renderMotion_.VisualOffsetX(),cycle_->renderMotion_.VisualOffsetY());
     auto pointAt=[&](REAL frag)
     {
+        if (attachment)
+        {
+            auto point=attachment->Sample(frag);
+            return eCoord(point.x,point.y);
+        }
         REAL rat=ra+frag*(re-ra);
         REAL blend=xfunc(rat);
         // xfunc(1) is .6; normalize only the new material so its final sample
@@ -1483,7 +1558,9 @@ void gNetPlayerWall::RenderBegin(const eCoord &p1,const eCoord &pp2,REAL ta,REAL
         }
     }
 
-    if (energy && hfrac>0 && (mode & gWallRenderMode_Quads) && sg_renderBeginQuads)
+    if (attachment && hfrac>0 && (mode & gWallRenderMode_Quads) && sg_renderBeginQuads)
+        sg_AttachmentFloorSpill(*attachment,r,g,b,a,hfrac);
+    else if (energy && hfrac>0 && (mode & gWallRenderMode_Quads) && sg_renderBeginQuads)
     {
         RenderEnd();
         eCoord previous;

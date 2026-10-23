@@ -31,7 +31,7 @@ jobs:
         run: |
           set -euo pipefail
           command -v c++
-          for name in lightcycle_motion camera_motion impact_animation; do
+          for name in lightcycle_motion lightwall_attachment camera_motion impact_animation; do
             c++ -std=c++17 -O2 -Wall -Wextra -Werror \
               "ai/tests/cpp/${name}_check.cpp" -o "$RUNNER_TEMP/$name"
             "$RUNNER_TEMP/$name"
