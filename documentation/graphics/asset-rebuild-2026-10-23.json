@@ -1,0 +1,277 @@
+{
+  "date": "2026-10-23",
+  "reference": "User-supplied Tron: Legacy film clips and extracted frames; marketplace screenshot secondary",
+  "external_models_imported": false,
+  "native_mesh": {
+    "body": {
+      "vertices": 176640,
+      "triangles": 58880,
+      "bounds": [
+        [
+          -2.24696159,
+          -0.501776457,
+          0.30400002
+        ],
+        [
+          2.34480786,
+          0.501776457,
+          1.53301764
+        ]
+      ],
+      "max_normal_error": 1.78813934e-07
+    },
+    "rider": {
+      "vertices": 189720,
+      "triangles": 63240,
+      "bounds": [
+        [
+          -0.698557377,
+          -0.633301795,
+          0.283158541
+        ],
+        [
+          1.39149749,
+          0.633301795,
+          2.01648259
+        ]
+      ],
+      "max_normal_error": 1.78813934e-07
+    },
+    "wheel": {
+      "vertices": 34752,
+      "triangles": 11584,
+      "bounds": [
+        [
+          -0.721995592,
+          -0.446999997,
+          -0.721995592
+        ],
+        [
+          0.721995592,
+          0.446999997,
+          0.721995592
+        ]
+      ],
+      "max_normal_error": 1.78813934e-07
+    },
+    "complete": {
+      "vertices": 435864,
+      "triangles": 145288,
+      "bounds": [
+        [
+          -2.24696159,
+          -0.633301795,
+          -0.00199556351
+        ],
+        [
+          2.34480786,
+          0.633301795,
+          2.01648259
+        ]
+      ],
+      "max_normal_error": 1.78813934e-07
+    }
+  },
+  "source_hashes": {
+    "src/tron/gLightcycleModel.h": "955c23166baffe4cb99c5ff308c4dcb6a892fd5b5496f662a0db651f8e096c64",
+    "src/tron/gLightcycleMaterial.h": "a9f369968b89049652fe38bec5ef4e6565e6a7e855e175b0c0dffcfbc954f3e8",
+    "src/tron/gLightwallAttachment.h": "e2028e7fbffdb9998c73999ffcc5acdfd55e532aa7ade60dea9be8a0e0dc633f",
+    "src/tron/gLightwallMaterial.h": "3aa4d66fe6f3d204796a9d0e8d513eecc426de65b427285e619eae243c498222"
+  },
+  "blender_asset": "assets/film-lightcycle.blend",
+  "blender_asset_sha256": "74422ac084c31019b288ce1c457fe90cdcef4b7f85b41752c5f72e3745aeefc0",
+  "installed_executable_sha256": "2c055797bf2817920b2cebd7ee963f1acef2556aeb39981fdeb7723efe130ea2",
+  "capture_pixel_source": "native_opengl_framebuffer",
+  "capture_format": "rgb8_sdr",
+  "source_of_geometry": "gLightcycleModel::Detail::Geometry() CPU cache; one-way Blender export",
+  "performance": {
+    "conditions": "3024x1964, 4x MSAA, 240 FPS cap, no readback, no concurrent game or Blender render at dispatch",
+    "results": {
+      "before": {
+        "active_fps_windows": [
+          113.139,
+          118.932,
+          122.284,
+          127.166
+        ],
+        "active_p99_ms_windows": [
+          23.947,
+          10.024,
+          9.258,
+          10.38
+        ],
+        "mean_full_game_windows_fps": 122.794,
+        "render_errors": []
+      },
+      "after": {
+        "active_fps_windows": [
+          131.005,
+          128.532,
+          138.633,
+          135.457
+        ],
+        "active_p99_ms_windows": [
+          19.712,
+          12.634,
+          8.704,
+          8.536
+        ],
+        "mean_full_game_windows_fps": 134.20733333333334,
+        "render_errors": []
+      }
+    },
+    "limits": "One sequential pair, not deterministic fight replay. Warmup window excluded from mean. Other desktop work remains uncontrolled; no repeatable performance improvement claimed."
+  },
+  "limitations": [
+    "Rider anatomy and scene lighting still fall short of the film reference.",
+    "Controlled local-input checks are not universal proof for network correction, all maps or human play."
+  ],
+  "installed_captures": {
+    "close": {
+      "frames": 12,
+      "dimensions": [
+        1920,
+        1080
+      ],
+      "elapsed_seconds": 13.184699499979615,
+      "classic": false,
+      "hidden": true,
+      "captures": [
+        10.0
+      ],
+      "capture_times": {
+        "10.0": 10.738394333980978
+      },
+      "requested_pixels": [
+        1920,
+        1080
+      ],
+      "framebuffer_dimensions": [
+        1920,
+        1080
+      ],
+      "output_dimensions": [
+        1920,
+        1080
+      ],
+      "pixel_source": "native_opengl_framebuffer",
+      "pixel_format": "rgb8_sdr",
+      "readback_interval_seconds": 1.0,
+      "gl_limits": {
+        "texture": 16384,
+        "renderbuffer": 16384,
+        "viewport": [
+          16384,
+          16384
+        ],
+        "samples": 4
+      }
+    },
+    "normal": {
+      "frames": 1075,
+      "dimensions": [
+        1920,
+        1080
+      ],
+      "elapsed_seconds": 20.00707275001332,
+      "classic": false,
+      "hidden": true,
+      "captures": [
+        0.1
+      ],
+      "capture_times": {
+        "0.1": 1.169132333016023
+      },
+      "requested_pixels": [
+        1920,
+        1080
+      ],
+      "framebuffer_dimensions": [
+        1920,
+        1080
+      ],
+      "output_dimensions": [
+        1920,
+        1080
+      ],
+      "pixel_source": "native_opengl_framebuffer",
+      "pixel_format": "rgb8_sdr",
+      "readback_interval_seconds": 0.0,
+      "gl_limits": {
+        "texture": 16384,
+        "renderbuffer": 16384,
+        "viewport": [
+          16384,
+          16384
+        ],
+        "samples": 4
+      },
+      "local_turns": {
+        "input_events": 68,
+        "accepted_turns": 38,
+        "note": "Input events are not accepted turns; cooldown and death can reject keys."
+      },
+      "video": "/Users/romilbijarnia/Documents/armagetronad/ai/runtime.nosync/graphics-preview/gameplay-redesign-2026-10-23/installed-normal-hq.mp4",
+      "video_frames": 958,
+      "video_fps": 60
+    }
+  },
+  "local_input_oblique": {
+    "input_events": 68,
+    "accepted_turns": 39,
+    "note": "Input events are not accepted turns; cooldown and death can reject keys."
+  },
+  "delivered_images": {
+    "documentation/graphics/assets/rebuild-cyan-native.png": "637d6cf9e539b939e8ed6674c6e2f43f3e610638679e980577921984ef66da74",
+    "documentation/graphics/assets/rebuild-gameplay-native.png": "48b047f49a6839af602e0f84c5baec3e8105594e23da955956851623b48cc9dd"
+  },
+  "classic_smoke": {
+    "frames": 7,
+    "dimensions": [
+      1280,
+      720
+    ],
+    "elapsed_seconds": 8.085753082996234,
+    "classic": true,
+    "hidden": true,
+    "captures": [
+      6.0
+    ],
+    "capture_times": {
+      "6.0": 6.255578583048191
+    },
+    "requested_pixels": [
+      1280,
+      720
+    ],
+    "framebuffer_dimensions": [
+      1280,
+      720
+    ],
+    "output_dimensions": [
+      1280,
+      720
+    ],
+    "pixel_source": "native_opengl_framebuffer",
+    "pixel_format": "rgb8_sdr",
+    "readback_interval_seconds": 1.0,
+    "gl_limits": {
+      "texture": 16384,
+      "renderbuffer": 16384,
+      "viewport": [
+        16384,
+        16384
+      ],
+      "samples": 4
+    }
+  },
+  "focused_checks": {
+    "passed": 4,
+    "suites": [
+      "cycle motion",
+      "wall attachment",
+      "camera motion",
+      "impact animation"
+    ]
+  }
+}

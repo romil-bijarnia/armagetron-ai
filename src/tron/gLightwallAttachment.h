@@ -43,7 +43,7 @@ struct Curve
         return cross>1e-9 ? std::min(1.,.55*speed*speed*speed/cross) : 1.;
     }
 
-    static Curve Join(Point start,Point incoming,Point end,Point forward,double cornerRoom)
+    static Curve Join(Point start,Point incoming,Point end,Point forward,double cornerRoom,double halfWidth=.36)
     {
         double span=std::hypot(end.x-start.x,end.y-start.y);
         // The start handle vanishes at both sides of a physical corner. As
@@ -51,7 +51,25 @@ struct Curve
         // change of the wall tangent. The emitter always has a rearward handle.
         double firstLength=std::min(span*.35,std::max(0.,cornerRoom));
         double lastLength=std::min(1.2,span*.55);
-        return {start,start+incoming*firstLength,end-forward*lastLength,end};
+        Point first=start+incoming*firstLength;
+        Point fromEnd=start-end,normal{-forward.y,forward.x};
+        double ahead=fromEnd.x*forward.x+fromEnd.y*forward.y;
+        double side=fromEnd.x*normal.x+fromEnd.y*normal.y;
+        // A tightly reversed bike can leave the fixed wall beside, or ahead
+        // of, its rear tyre. An end tangent alone does not stop a cubic cutting
+        // through that tyre. Take its first handle outboard and behind the
+        // emitter before returning along the rear tangent. The transition
+        // begins before the wall reaches the tyre, avoiding a branch-time pop.
+        double route=std::max(0.,std::min(1.,(ahead+halfWidth)/(halfWidth*1.3)));
+        route=route*route*(3-2*route);
+        // Blend the routing side through the centreline as well. A hard sign
+        // switch here would itself jump the sheet during a fast reversal.
+        double sideBlend=std::max(-1.,std::min(1.,side/(halfWidth*.5)));
+        sideBlend=sideBlend*(1.5-.5*sideBlend*sideBlend);
+        Point outboard=end-forward*(halfWidth*2.2)+normal*(side+sideBlend*halfWidth*1.4);
+        first=first*(1-route)+outboard*route;
+        lastLength=std::max(lastLength,halfWidth*1.8*route);
+        return {start,first,end-forward*lastLength,end};
     }
 };
 

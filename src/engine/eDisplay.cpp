@@ -193,9 +193,9 @@ bool se_PrepareFloorReflection()
         "        float d = roundedPanel(world - center, size, min(8.0, min(size.x, size.y) * 0.25));\n"
         "        rail += inlay(d, i == 0 ? 0.11 : 0.040) * (i == 0 ? 1.0 : 0.38);\n"
         "    }\n"
-        // A quiet orthogonal grid gives distance and steering cues. Major
-        // panel seams, fine subdivisions and small junction marks have separate
-        // weights; area filtering lets them fade instead of filling the horizon.
+        // Architectural circuits sit over real-looking dark glass panels. The
+        // panel material remains visible between the lines at the gameplay
+        // camera, rather than leaving an empty black wireframe plane.
         "    vec2 layout = world - center;\n"
         "    float spacing = max(gridWorld, 4.0);\n"
         "    vec2 major = abs(mod(layout + spacing * 0.5, spacing) - spacing * 0.5);\n"
@@ -207,10 +207,24 @@ bool se_PrepareFloorReflection()
         "    junctions += inlay(major.y, 0.025) * (1.0 - smoothstep(0.40, 0.70, major.x));\n"
         "    float distanceFade = 1.0 - smoothstep(90.0, 280.0, distance);\n"
         "    float grid = panels * 0.42 + subdivisions * 0.11 + junctions * 0.35;\n"
-        "    vec3 emission = vec3(0.10, 0.42, 0.48) * (rail * 0.82 + grid) * distanceFade;\n"
-        "    surface += vec3(0.005, 0.008, 0.010) * (1.0 - panels * 0.4);\n"
+        "    vec2 panelIndex = floor((layout + spacing * 0.5) / spacing);\n"
+        "    float panelShade = fract(sin(dot(panelIndex, vec2(127.1, 311.7))) * 43758.5453);\n"
+        "    float roomLight = 1.0 - smoothstep(0.0, 1.4, length(layout / halfArena));\n"
+        "    surface = surface * 0.55 + vec3(0.055, 0.073, 0.092) * (0.85 + panelShade * 0.15);\n"
+        "    surface += vec3(0.030, 0.043, 0.055) * (0.35 + roomLight * 0.65);\n"
+        "    surface *= 1.0 - subdivisions * 0.24;\n"
+        "    float bevel = gridLines(abs(minor - vec2(0.075)), footprint, 0.035);\n"
+        "    surface += vec3(0.008, 0.014, 0.018) * bevel;\n"
+        "    vec2 circuitLayout = layout;\n"
+        "    circuitLayout.x += mod(floor((layout.y + 36.0) / 72.0), 2.0) * 40.0;\n"
+        "    vec2 cell = mod(circuitLayout + vec2(40.0, 36.0), vec2(80.0, 72.0)) - vec2(40.0, 36.0);\n"
+        "    float circuit = roundedPanel(cell, vec2(30.0, 25.0), 8.0);\n"
+        "    float inner = roundedPanel(cell, vec2(22.0, 17.0), 5.0);\n"
+        "    float routes = inlay(circuit, 0.11) + 0.30 * inlay(circuit + 0.75, 0.035);\n"
+        "    routes += 0.38 * inlay(inner, 0.045);\n"
+        "    vec3 emission = vec3(0.10, 0.42, 0.50) * (rail * 0.82 + grid * 0.46 + routes * 0.85) * distanceFade;\n"
         "    float air = 1.0 - exp(-distance * 0.003);\n"
-        "    surface = mix(surface, vec3(0.015, 0.031, 0.040), air * 0.55);\n"
+        "    surface = mix(surface, vec3(0.045, 0.065, 0.082), air * 0.55);\n"
         "    float opacity = max(1.0 - reflected, air * 0.12);\n"
         "    if (capturedReflection > 0.5) {\n"
         // A compact, normalized optical filter softens only the mirrored scene.

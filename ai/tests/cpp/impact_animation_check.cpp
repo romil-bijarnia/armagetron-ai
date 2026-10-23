@@ -34,7 +34,8 @@ int main()
     {
         auto initial=SampleRim(i,0,20,.7f);
         assert(initial.Active() && initial.pitch==0 && initial.roll==0);
-        float axle=((i/12>=2 ? 1.55f : -1.15f)-1.5f)*.7f;
+        // The authored long-shell bike's rear axle is at -1.45.
+        float axle=((i/12>=2 ? 1.55f : -1.45f)-1.5f)*.7f;
         float x=initial.along-axle,z=initial.height-.72f*.7f;
         assert(std::abs(std::hypot(x,z)-.607f*.7f)<.0001f);
         assert(std::abs(std::abs(initial.across)-.446f*.7f)<.0001f);

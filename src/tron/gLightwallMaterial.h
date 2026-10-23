@@ -25,6 +25,7 @@ class gLightwallMaterial
     {
         GLint texture=-1, time=-1, head=-1, viewport=-1;
         GLint scene=-1,depth=-1,captured=-1,depthReady=-1,inverseFrame=-1,bounds=-1,pixelScale=-1;
+        GLint emitter=-1,forward=-1,bikeScale=-1;
     };
     static GLuint & Program() { static GLuint value=0; return value; }
     static bool & Failed() { static bool value=false; return value; }
@@ -69,7 +70,9 @@ varying vec4 wallTopClip;
 varying vec3 wallEye;
 varying vec3 wallUp;
 varying float wallMirror;
+varying vec2 wallWorld;
 void main() {
+    wallWorld=gl_Vertex.xy;
     wallCoord=gl_MultiTexCoord0.xyz;
     wallColour=gl_Color;
     float height=max(gl_MultiTexCoord0.w,0.0001);
@@ -94,6 +97,9 @@ uniform float pixelScale;
 uniform vec2 referenceViewport;
 uniform vec2 inverseFrame;
 uniform vec4 sceneBounds;
+uniform vec2 rearEmitter;
+uniform vec2 bikeForward;
+uniform float bikeScale;
 varying vec3 wallCoord;
 varying vec4 wallColour;
 varying vec4 wallBottomClip;
@@ -101,6 +107,7 @@ varying vec4 wallTopClip;
 varying vec3 wallEye;
 varying vec3 wallUp;
 varying float wallMirror;
+varying vec2 wallWorld;
 float edgeCoverage(float v,float rate,float footprint) {
     float lo=max(0.0,v-footprint*0.5),hi=min(1.0,v+footprint*0.5);
     return (exp(-rate*lo)-exp(-rate*hi))/(rate*footprint);
@@ -149,7 +156,7 @@ vec4 reflection(vec3 origin,vec3 direction) {
 vec4 distantSurface(float u,float v,float footprint,float pixels,vec2 uv) {
     vec3 tint=wallColour.rgb;
     vec3 core=lightCore(tint,0.25);
-    float width=max(0.022,0.28/max(pixels,1.0));
+    float width=max(0.014,0.20/max(pixels,1.0));
     float upper=edgeCoverage(v,1.0/width,footprint);
     float lower=edgeCoverage(1.0-v,0.78/width,footprint);
     float shoulders=edgeCoverage(v,8.0,footprint)+edgeCoverage(1.0-v,5.5,footprint);
@@ -160,14 +167,24 @@ vec4 distantSurface(float u,float v,float footprint,float pixels,vec2 uv) {
     // Keep a continuous, moving membrane at gameplay distance. One upper lip
     // defines its height; the quieter foot and reflection no longer form four
     // equally bright parallel rails around a nearly invisible centre.
-    vec3 light=tint*(0.13+inside*(0.10+flow*0.075)+0.055*shoulders);
-    light+=core*(upper*0.70*mix(1.0,0.30,wallMirror)+lower*0.38);
-    light*=mix(1.0,0.48,wallMirror);
-    float alpha=wallColour.a*mix(0.30,0.20,wallMirror);
+    vec3 light=tint*(0.12+inside*(0.13+flow*0.16)+0.035*shoulders);
+    light+=core*(upper*0.48*mix(1.0,0.25,wallMirror)+lower*0.10);
+    light*=mix(1.0,0.38,wallMirror);
+    float alpha=wallColour.a*mix(0.46,0.20,wallMirror);
     vec3 scene=texture2D(sceneTexture,clamp(uv,sceneBounds.xy,sceneBounds.zw)).rgb;
-    return vec4(scene*(vec3(0.82)+tint*0.18)*alpha*sceneCaptured+boundedLight(light,tint)*wallColour.a,alpha);
+    return vec4(scene*(vec3(0.68)+tint*0.32)*alpha*sceneCaptured+boundedLight(light,tint)*wallColour.a,alpha);
 }
 void main() {
+    // Very tight local reversals can place the physical wall cut inside the
+    // drawn rear tyre. Clip just that newborn overlap, in both main/mirror
+    // passes; settled collision walls elsewhere keep their full silhouette.
+    vec2 relative=wallWorld-rearEmitter;
+    vec2 tyre=vec2(dot(relative,bikeForward)-0.80*bikeScale,
+                   dot(relative,vec2(-bikeForward.y,bikeForward.x)));
+    float tyreDistance=length(tyre/(vec2(0.73,0.46)*max(bikeScale,0.001)));
+    float fresh=wallCoord.z < -1.5 ? 1.0 : 1.0-smoothstep(2.4,3.2,headCoord-wallCoord.x);
+    float contact=mix(1.0,smoothstep(1.01,1.01+max(0.05,fwidth(tyreDistance)*0.75),tyreDistance),fresh);
+    if (contact<=0.0) discard;
     vec2 bottom=wallBottomClip.xy/max(wallBottomClip.w,0.0001);
     vec2 top=wallTopClip.xy/max(wallTopClip.w,0.0001);
     vec2 vertical=(top-bottom)*referenceViewport;
@@ -177,7 +194,7 @@ void main() {
     if (wallCoord.z < -0.5) {
         if (wallCoord.z < -1.5) {
             vec4 spill=wallColour*texture2D(energyTexture,wallCoord.xy);
-            gl_FragColor=vec4(spill.rgb*spill.a,0.0);
+            gl_FragColor=vec4(spill.rgb*spill.a*contact,0.0);
         } else discard;
         return;
     }
@@ -190,12 +207,12 @@ void main() {
     float closeDetail=smoothstep(16.0,40.0,min(ribbonPixels,sheetPixels));
     vec2 uv=gl_FragCoord.xy*inverseFrame;
     if (closeDetail<=0.0) {
-        gl_FragColor=distantSurface(u,v,footprint,min(ribbonPixels,sheetPixels),uv);
+        gl_FragColor=distantSurface(u,v,footprint,min(ribbonPixels,sheetPixels),uv)*contact;
         return;
     }
     // Preserve the optical core at normal playing distances. Its emission is
     // area-filtered once, independently of the transparency of the glass.
-    float coreWidth=max(0.028,0.85/max(ribbonPixels,1.0));
+    float coreWidth=max(0.016,0.40/max(ribbonPixels,1.0));
     float upper=edgeCoverage(v,1.0/coreWidth,footprint);
     float lower=edgeCoverage(1.0-v,0.78/coreWidth,footprint);
     float shoulder=edgeCoverage(v,8.0,footprint)+edgeCoverage(1.0-v,5.5,footprint);
@@ -261,15 +278,15 @@ void main() {
     volume+=hot*motion*(0.12*caustic+0.045*streak);
     volume+=mix(tint,hot,0.45)*motion*(0.065*fibres+0.12*wake*wakeLine);
     volume+=reflected.rgb*reflected.a*fresnel*motion*(vec3(0.65)+tint*0.35);
-    vec3 emission=hot*(upper*mix(1.0,1.25,cool)+lower*mix(0.55,0.70,cool))+tint*shoulder*0.30;
+    vec3 emission=hot*(upper*mix(0.70,0.90,cool)+lower*mix(0.18,0.25,cool))+tint*shoulder*0.18;
     emission+=volume+hot*newborn*inside*0.065;
     emission=boundedLight(emission,tint);
     vec4 closeColour=vec4(transmitted+emission*wallColour.a,alpha);
     // Subpixel glass needs an integrated light field, not two white rails plus
     // high-frequency scene fetches. Preserve its hue and broad travelling flow.
     // At 40 reference pixels and above, use the full liquid-glass field.
-    if (closeDetail>=1.0) gl_FragColor=closeColour;
-    else gl_FragColor=mix(distantSurface(u,v,footprint,min(ribbonPixels,sheetPixels),uv),closeColour,closeDetail);
+    if (closeDetail>=1.0) gl_FragColor=closeColour*contact;
+    else gl_FragColor=mix(distantSurface(u,v,footprint,min(ribbonPixels,sheetPixels),uv),closeColour,closeDetail)*contact;
 }
 )GLSL";
         GLuint vs=Compile(GL_VERTEX_SHADER,vertex), fs=Compile(GL_FRAGMENT_SHADER,fragment);
@@ -310,6 +327,9 @@ void main() {
         Uniforms().inverseFrame=glGetUniformLocation(Program(),"inverseFrame");
         Uniforms().bounds=glGetUniformLocation(Program(),"sceneBounds");
         Uniforms().pixelScale=glGetUniformLocation(Program(),"pixelScale");
+        Uniforms().emitter=glGetUniformLocation(Program(),"rearEmitter");
+        Uniforms().forward=glGetUniformLocation(Program(),"bikeForward");
+        Uniforms().bikeScale=glGetUniformLocation(Program(),"bikeScale");
         return true;
     }
 #endif
@@ -321,7 +341,7 @@ public:
     class Scope
     {
     public:
-        Scope(bool enabled,float seconds,float head)
+        Scope(bool enabled,float seconds,float head,float emitterX,float emitterY,float forwardX,float forwardY,float bikeScale)
         {
 #ifdef HAVE_GLEW
             // The caller enters before creating/calling any wall display list.
@@ -348,6 +368,9 @@ public:
             glUniform1i(Uniforms().texture,0);
             glUniform1f(Uniforms().time,clock);
             glUniform1f(Uniforms().head,distance);
+            glUniform2f(Uniforms().emitter,emitterX,emitterY);
+            glUniform2f(Uniforms().forward,forwardX,forwardY);
+            glUniform1f(Uniforms().bikeScale,bikeScale);
             rSceneSample::State const & scene=rSceneSample::Get();
             glUniform1i(Uniforms().scene,1);
             glUniform1i(Uniforms().depth,2);
@@ -375,6 +398,7 @@ public:
             ActiveState()=true;
 #else
             (void)enabled; (void)seconds; (void)head;
+            (void)emitterX; (void)emitterY; (void)forwardX; (void)forwardY; (void)bikeScale;
 #endif
         }
         ~Scope()

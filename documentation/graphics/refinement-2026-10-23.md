@@ -1,5 +1,10 @@
 # Bike, grid and trail refinement — 23 October 2026
 
+**Superseded by the [asset rebuild and local-input correction](asset-rebuild-2026-10-23.md).**
+Romil's subsequent playtest found the visual change too small and the trail jump
+still present. The spectator-controlled scenario below did not establish a fix
+for his local player. Retain it as historical evidence, not current acceptance.
+
 This pass improves the existing renderer using its native output as the visual
 baseline. It changes bike lighting, the floor pattern, the visible trail surface
 and its attachment. The existing geometry, simulation, camera preset, team setup

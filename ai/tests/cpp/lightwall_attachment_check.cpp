@@ -31,6 +31,46 @@ int main()
         }
     }
 
+    // A reversing emitter can cross the fixed wall's centreline. Changing the
+    // preferred side must not flip the first handle across the wheel in one frame.
+    for (double ahead : {0.,.3,1.0,1.8})
+    {
+        auto left=Curve::Join({ahead,-1e-7},{1,0},{0,0},{1,0},.2);
+        auto right=Curve::Join({ahead,1e-7},{1,0},{0,0},{1,0},.2);
+        for (int i=0;i<=100;++i)
+        {
+            auto a=left.Sample(i/100.),b=right.Sample(i/100.);
+            assert(std::hypot(a.x-b.x,a.y-b.y)<1e-5);
+        }
+    }
+
+    // Captured from the real SDL local-player stress run at 6.7-7.2 seconds.
+    // The former curve had the correct endpoint/tangent but cut through the
+    // rear tyre before reaching it. Coordinates are in the emitter's frame.
+    struct WheelCase { Point start,incoming; double room; };
+    WheelCase wheelCases[]={
+        {{.0222586,.304806},{.889632,.456678},.107},
+        {{.755564,.397928},{-.835956,-.548796},.299},
+        {{1.052287,.553936},{-.911463,-.411382},.363},
+        {{1.253438,.430313},{-.968757,-.248013},.382},
+        {{1.430537,.463669},{-.998320,-.057944},.330},
+        {{1.549287,.416934},{-.993158,.116775},.387}
+    };
+    for (auto const & test:wheelCases)
+    for (int side:{-1,1})
+    for (double scale:{1.,1.65/1.4})
+    {
+        auto curve=Curve::Join({test.start.x*scale,side*test.start.y*scale},
+            {test.incoming.x,side*test.incoming.y},{0,0},{1,0},test.room*scale,.36*scale);
+        near(curve.Sample(0),{test.start.x*scale,side*test.start.y*scale});
+        near(curve.Sample(1),{0,0});
+        for (int i=0;i<=200;++i)
+        {
+            Point p=curve.Sample(i/200.);
+            assert(!(p.x>.056*scale && p.x<1.1*scale && std::abs(p.y)<.33*scale));
+        }
+    }
+
     // Exercise the actual visual pose through isolated turns, rapid alternating
     // turns and successive same-direction turns, at different renderer rates.
     for (int fps : {30,60,120,240})
@@ -41,7 +81,7 @@ int main()
         gLightcycleMotion::State pose;
         Point position{0,0},direction{1,0};
         double distance=0,yaw=0,lastTurn=0;
-        constexpr double rear=2.415,speed=20;
+        constexpr double rear=3.09375,speed=20; // authored bike at LIGHTCYCLE_SCALE 1.65
         path.push_back({0,0,position,direction});
         pose.Update(0,yaw,0,speed);
         double nextTurn=1;

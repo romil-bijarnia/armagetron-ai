@@ -84,7 +84,7 @@ inline void Render(float r,float g,float b,float seconds,float speed,
         float side=bank<0 ? -1.f : 1.f;
         for (int wheel=0;wheel<2;++wheel)
         {
-            float axle=wheel ? 1.55f : -1.15f;
+            float axle=wheel ? 1.55f : -1.45f;
             BeginTriangleStrip();
             for (int i=0;i<=24;++i)
             {
@@ -114,7 +114,7 @@ inline void Render(float r,float g,float b,float seconds,float speed,
         for (int wheel=0;wheel<2;++wheel)
         {
             float progress=smooth(.015f+.04f*wheel,.50f+.04f*wheel,u);
-            float axle=wheel ? 1.55f : -1.15f;
+            float axle=wheel ? 1.55f : -1.45f;
             for (int ring=0;ring<3;++ring)
             {
                 float side=(ring-1)*.44f;
@@ -140,7 +140,7 @@ inline void Render(float r,float g,float b,float seconds,float speed,
             BeginTriangleStrip();
             for (int i=0;i<=24;++i)
             {
-                float f=i/24.f,x=-1.15f+2.70f*f*chassis;
+                float f=i/24.f,x=-1.45f+3.00f*f*chassis;
                 float bow=std::sin(f*pi)*.12f;
                 float alpha=resolve*std::min(1.f,chassis*5.f)*(.25f+.35f*(1-f));
                 colour(alpha,.25f);

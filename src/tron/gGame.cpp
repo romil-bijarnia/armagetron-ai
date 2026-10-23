@@ -803,6 +803,41 @@ static REAL lastTimeTimestep=0;
 
 #ifndef DEDICATED
 static uInputTimeMapper sg_inputTimeMapper;
+static bool sg_captureLocalTurns=false;
+static tConfItem<bool> sg_captureLocalTurnsConf("CAPTURE_LOCAL_TURNS",sg_captureLocalTurns);
+
+static void sg_CaptureLocalTurnKeys(REAL time)
+{
+#if SDL_VERSION_ATLEAST(2,0,0)
+    if (!sr_hiddenWindow || !sg_captureLocalTurns || tRecorder::IsPlayingBack()) return;
+    static int index=0;
+    static REAL previous=-100;
+    if (time<previous-.1f) index=0;
+    previous=time;
+    while (index<68)
+    {
+        REAL at=index<2 ? 2.f+index*.8f : index<26 ? 3.6f+(index-2)*.075f
+            : index<66 ? 6.5f+(index-26)*.04f : 10.f+(index-66)*.08f;
+        if (time<at) break;
+        bool right=index%2!=0 || index>=66;
+        SDL_Event event={};
+        event.type=SDL_KEYDOWN;
+        event.key.timestamp=SDL_GetTicks();
+        event.key.state=SDL_PRESSED;
+        event.key.keysym.scancode=right ? SDL_SCANCODE_RIGHT : SDL_SCANCODE_LEFT;
+        event.key.keysym.sym=right ? SDLK_RIGHT : SDLK_LEFT;
+        SDL_PushEvent(&event);
+        event.type=SDL_KEYUP;
+        event.key.state=SDL_RELEASED;
+        SDL_PushEvent(&event);
+        std::cerr << "Capture local key: index=" << index << " time=" << time
+                  << " scheduled=" << at << " right=" << right << '\n';
+        ++index;
+    }
+#else
+    (void)time;
+#endif
+}
 static Uint32 sg_inputFrameTicks = 0;
 static double sg_inputFrameSystemTime = -1;
 
@@ -4603,6 +4638,8 @@ bool gGame::GameLoop(bool input){
             state == GS_PLAY && sg_inputFrameSystemTime == tSysTimeFloat()
             && !tRecorder::IsPlayingBack() && !tLockstepActive());
         gInputFrameClock inputClock;
+
+        if (state==GS_PLAY) sg_CaptureLocalTurnKeys(gtime);
 
         SDL_Event tEvent;
 

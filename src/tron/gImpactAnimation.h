@@ -76,7 +76,7 @@ inline RimFragment SampleRim(unsigned index,float age,float speed,float modelSca
     f.angle=(sector+.5f)*(6.2831853f/12.f);
     f.radius=.607f*modelScale;
     float launch=1-std::exp(-t*4.f);
-    f.along=((front ? 1.55f : -1.15f)-1.5f)*modelScale+f.radius*std::cos(f.angle)
+    f.along=((front ? 1.55f : -1.45f)-1.5f)*modelScale+f.radius*std::cos(f.angle)
             +launch*(speed*.055f+.9f*(h-.25f));
     f.across=side*.446f*modelScale+launch*(side*(.35f+.60f*j)+.25f*(h-.5f));
     float z=.72f*modelScale+f.radius*std::sin(f.angle)+(1.1f+2.1f*k)*t-4.8f*t*t;

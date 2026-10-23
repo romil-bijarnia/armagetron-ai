@@ -204,6 +204,7 @@ public:
     REAL skew,skewDot;						// leaning to the side
     gLightcycleMotion::State renderMotion_; // model-only pose; never used by the camera
     gLightcycleMotion::AssemblyClock renderAssembly_;
+    void UpdateRenderPose();
 
     bool 				mp; 				// use moviepack or not?
 

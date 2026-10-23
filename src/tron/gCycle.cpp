@@ -4050,6 +4050,11 @@ bool gCycle::DoTurn(int d)
 
         if ( gCycleMovement::DoTurn( d ) )
         {
+#ifndef DEDICATED
+            if (sr_hiddenWindow && Player() && Player()->IsHuman() && Owner()==sn_myNetID)
+                std::cerr << "Capture accepted turn: time=" << lastTime << " direction=" << d
+                          << " turns=" << turns << '\n';
+#endif
             eSoundMixer& mixer = eSoundMixer::GetMixer();
             mixer.PushButton(CYCLE_TURN, *this, cycleTurnSoundVolume);
 
@@ -4590,6 +4595,11 @@ void gCycleWallsDisplayListManager::RenderAll( eCamera const * camera, gCycle * 
     RenderPassWithState(camera,cycle,sg_blacklightVisuals && !sg_MoviePack() ? MembranePass : AllPass);
 }
 
+void gCycle::UpdateRenderPose()
+{
+    renderMotion_.Update(se_GameTime(),std::atan2(dirDrive.y,dirDrive.x),GetLastTurnTime(),Speed());
+}
+
 void gCycleWallsDisplayListManager::RenderPassWithState( eCamera const * camera, gCycle * cycle, RenderPass pass )
 {
     bool const energy = sg_blacklightVisuals && !sg_MoviePack();
@@ -4628,8 +4638,15 @@ void gCycleWallsDisplayListManager::RenderPassWithState( eCamera const * camera,
     } state(energy);
 
     // Dynamic uniforms are set once per cycle, outside its cached wall lists.
+    if (energy)
+        cycle->UpdateRenderPose();
+    eCoord facing(std::cos(cycle->renderMotion_.Yaw()),std::sin(cycle->renderMotion_.Yaw()));
+    REAL modelScale=.5f*sg_LightcycleScale();
+    REAL rearDistance=modelScale*(1.5f-gLightcycleModel::RearAxle+gLightcycleModel::WheelRadius+.08f);
+    eCoord emitter=cycle->PredictPosition()-facing*rearDistance+
+        eCoord(cycle->renderMotion_.VisualOffsetX(),cycle->renderMotion_.VisualOffsetY());
     gLightwallMaterial::Scope flow(energy && textured,
-                                   se_GameTime(),cycle->GetDistance()/2.5f);
+        se_GameTime(),cycle->GetDistance()/2.5f,emitter.x,emitter.y,facing.x,facing.y,modelScale);
     bool const premultiplied=gLightwallMaterial::IsActive();
     static bool previousPremultiplied=premultiplied;
     if (previousPremultiplied != premultiplied)
@@ -4798,7 +4815,7 @@ void gCycle::Render(const eCamera *cam){
         REAL modelSkew = skew;
         if (blacklightCycle)
         {
-            renderMotion_.Update(se_GameTime(), std::atan2(dirDrive.y, dirDrive.x), GetLastTurnTime(), Speed());
+            UpdateRenderPose();
             modelDirection = eCoord(std::cos(renderMotion_.Yaw()), std::sin(renderMotion_.Yaw()));
             modelSkew = std::tan(renderMotion_.Bank());
         }

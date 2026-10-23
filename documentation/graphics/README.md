@@ -1,7 +1,9 @@
 # Graphics checkpoints
 
-The [23 October refinement](refinement-2026-10-23.md) updates the bike lighting,
-floor grid and trail attachment, with native captures and measured limitations.
+The [23 October asset rebuild](asset-rebuild-2026-10-23.md) replaces the open
+chassis with a continuous shell, revises the wheels and rider, and tests rapid
+turns through the real local keyboard-input path. It supersedes the earlier
+[refinement](refinement-2026-10-23.md), which Romil's playtest found insufficient.
 
 The `graphics-checkpoint-2026-10-21` tag preserves the earlier Tron: Legacy-inspired
 renderer, animation helpers, native Mac installer, capture utilities and Blender
@@ -39,7 +41,8 @@ mesh. They are not movie frames or generated substitutes for the game.
 | [Amber bike and trail](assets/amber-native.png) | Saturated warm emission and transparent wall interior |
 | [Blue bike and trail](assets/blue-native.png) | Blue rim/suit emission, without forced-white wheel cores |
 | [Blender rendering](assets/amber-blender.png) | Bike material and geometry inspection |
-| [Editable Blender scene](assets/lightcycle.blend) | Current native bike and rider, 160456 triangles |
+| [Editable Blender scene](assets/lightcycle.blend) | Preserved 21 October bike and rider, 160456 triangles |
+| [Rebuilt Blender scene](assets/film-lightcycle.blend) | 23 October authored bike and rider, 145288 triangles |
 | [Capture metadata](baseline.json) | Source hashes, colour settings and rendering context |
 
 The native colour captures use an isolated inspection camera. Their settings are
@@ -55,8 +58,10 @@ across the bike's rear wheel and then jump to the next segment. Romil reported
 this on 21 October 2026. See the [in-game screenshot](assets/trail-turn-spill.png).
 
 The 21 October checkpoint includes the reported behaviour. It does not include a fix.
-The attachment interpolation in `gWall.cpp` and the shared visual pose in
-`gLightcycleMotion.h` are investigation targets, not a confirmed diagnosis.
+The [23 October asset rebuild](asset-rebuild-2026-10-23.md) reproduces a rear-tyre
+crossing through local input, adds failing regression fixtures, and corrects the
+connection and newborn overlap. Its controlled captures are evidence for those
+cases, not a guarantee for all player, network and map conditions.
 
 A fix must keep the sheet attached to the rear of the rendered bike through a
 single turn, rapid repeated turns and reversals. Check the top/bottom edges,

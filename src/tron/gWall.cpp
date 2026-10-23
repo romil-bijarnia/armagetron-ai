@@ -932,6 +932,8 @@ void gPlayerWall::RenderList(bool list)
 
 bool sg_simpleTrail = false;
 static tConfItem< bool > sgc_simpleTrail( "SIMPLE_TRAIL", sg_simpleTrail );
+static bool sg_captureTrailDiagnostics=false;
+static tConfItem<bool> sg_captureTrailDiagnosticsConf("CAPTURE_TRAIL_DIAGNOSTICS",sg_captureTrailDiagnostics);
 
 void gNetPlayerWall::RenderList(bool list, gWallRenderMode renderMode ){
     if ( !cycle_ )
@@ -1081,15 +1083,21 @@ void gNetPlayerWall::RenderList(bool list, gWallRenderMode renderMode ){
                     eCoord join=p1+(p2-p1)*fraction;
                     if (fraction>0)
                         RenderNormal(p1,join,ta,cut/SEGLEN,r,g,b,a,renderMode);
-                    cycle_->renderMotion_.Update(se_GameTime(),std::atan2(cycle_->dirDrive.y,cycle_->dirDrive.x),
-                                                 cycle_->GetLastTurnTime(),cycle_->Speed());
+                    cycle_->UpdateRenderPose();
                     eCoord forward(std::cos(cycle_->renderMotion_.Yaw()),std::sin(cycle_->renderMotion_.Yaw()));
                     eCoord emitter=cycle_->PredictPosition()-forward*rear+
                         eCoord(cycle_->renderMotion_.VisualOffsetX(),cycle_->renderMotion_.VisualOffsetY());
                     eCoord incoming=(p2-p1)*(1/std::max(REAL(1e-8),(p2-p1).Norm()));
                     REAL room=std::max(REAL(0),std::min(cut-dbegin,EndPos()-cut));
                     auto curve=gLightwallAttachment::Curve::Join({join.x,join.y},{incoming.x,incoming.y},
-                        {emitter.x,emitter.y},{forward.x,forward.y},room);
+                        {emitter.x,emitter.y},{forward.x,forward.y},room,.2572f*sg_LightcycleScale());
+                    if (sr_hiddenWindow && sg_captureTrailDiagnostics && renderMode==gWallRenderMode_Quads
+                        && cycle_->Player() && cycle_->Player()->IsHuman() && cycle_->Owner()==sn_myNetID)
+                        std::cerr << "Capture attachment: t=" << se_GameTime() << " wall=" << this
+                                  << " cut=" << cut << " cycleDistance=" << cycle_->GetDistance()
+                                  << " start=" << join.x << ',' << join.y << " emitter=" << emitter.x << ',' << emitter.y
+                                  << " first=" << curve.first.x << ',' << curve.first.y
+                                  << " last=" << curve.last.x << ',' << curve.last.y << '\n';
                     RenderBegin(join,emitter,cut/SEGLEN,time,0,1,r,g,b,a,renderMode,&curve);
                 }
             }
@@ -1209,7 +1217,7 @@ static void sg_TrailFloorSpill(eCoord const & p1,eCoord const & p2,
     eCoord normal(-delta.y/length,delta.x/length);
     REAL offsets[]={0,.18f,.55f,1.10f};
     REAL fade[]={1,.40f,.08f,0};
-    REAL strength=.32f;
+    REAL strength=.18f;
     bool const premultiplied=gLightwallMaterial::IsActive();
     if (!premultiplied)
     {
@@ -1273,7 +1281,7 @@ static void sg_AttachmentFloorSpill(gLightwallAttachment::Curve const & curve,
                 for (int edge=band;edge<=band+1;++edge)
                 {
                     REAL offset=side*offsets[edge]*width;
-                    glColor4f(r,g,b,alpha*(1-.18f*t*t)*.32f*fade[edge]);
+                    glColor4f(r,g,b,alpha*(1-.18f*t*t)*.18f*fade[edge]);
                     glVertex3f(point.x+normal.x*offset,point.y+normal.y*offset,.006f);
                 }
             }
@@ -1438,8 +1446,7 @@ void gNetPlayerWall::RenderBegin(const eCoord &p1,const eCoord &pp2,REAL ta,REAL
     {
         // The edge phase may precede the cycle draw. Sample the same accepted
         // turn now so both passes attach to the rendered pose, even mid-turn.
-        cycle_->renderMotion_.Update(se_GameTime(),std::atan2(cycle_->dirDrive.y,cycle_->dirDrive.x),
-                                     cycle_->GetLastTurnTime(),cycle_->Speed());
+        cycle_->UpdateRenderPose();
         poseDirection=eCoord(std::cos(cycle_->renderMotion_.Yaw()),std::sin(cycle_->renderMotion_.Yaw()));
         poseSkew=std::tan(cycle_->renderMotion_.Bank());
         // gCycle draws the authored model at half scale with a -1.5 X origin.

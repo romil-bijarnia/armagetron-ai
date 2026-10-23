@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Capture the real renderer in a hidden spectator client and an isolated arena.
+"""Capture the real renderer in a hidden client and an isolated arena.
 
 Run with ai/.venv/bin/python after building the native client. This never joins
 the human match, opens a window, or loads/saves a training checkpoint.
@@ -87,6 +87,8 @@ def main():
                     help="explicit native policy file for a headless inference/frame-time check")
     ap.add_argument("--turn-demo", action="store_true",
                     help="drive one isolated bot through scripted corners and rapid reversals; no policy is loaded")
+    ap.add_argument("--local-turn-demo", action="store_true",
+                    help="send rapid SDL key taps through the hidden client's normal player-input path")
     ap.add_argument("--port", type=int, default=49534)
     args = ap.parse_args()
     if not 1 <= args.seconds <= 600:
@@ -104,6 +106,8 @@ def main():
         ap.error("--neural-slots must be between zero and four")
     if args.turn_demo and (args.neural_slots or args.neural_model):
         ap.error("--turn-demo uses scripted actions and cannot load a neural policy")
+    if args.local_turn_demo and (args.turn_demo or args.neural_slots or args.neural_model):
+        ap.error("--local-turn-demo requires an ordinary human player without a neural policy")
     if args.neural_model and not args.neural_model.is_file():
         ap.error("--neural-model must be an existing policy file")
     encoder = shutil.which("ffmpeg") if args.video else None
@@ -129,6 +133,8 @@ def main():
                                   lockstep_dt=0).settings()
     server_settings.update(SERVER_PORT=str(args.port), NEURAL_END_ROUND_WITHOUT_NEURAL="0")
     server_settings.update(dict(settings(args.server_set)))
+    if args.local_turn_demo:
+        server_settings["PLAY_WITHOUT_HUMANS"] = "0"
     if args.neural_slots:
         server_settings["NEURAL_DEBUG"] = "1"
         if args.neural_model:
@@ -165,6 +171,10 @@ TEXT_OUT 1
         config += f"FONT_TYPE 3\nFONT_FILE_CUSTOM {args.font.resolve()}\nUSE_CUSTOM_FONT 1\n"
     for key, value in settings(args.set):
         config += f"{key} {value}\n"
+    if args.local_turn_demo:
+        config += ("SPECTATOR_MODE_1 0\nCAPTURE_LOCAL_TURNS 1\nCAPTURE_TRAIL_DIAGNOSTICS 1\n"
+                   "KEYBOARD SCANCODE_LEFT PLAYER_BIND CYCLE_TURN_LEFT 1\n"
+                   "KEYBOARD SCANCODE_RIGHT PLAYER_BIND CYCLE_TURN_RIGHT 1\n")
     if args.pixels:
         # In this isolated hidden client one point is one pixel. The measured
         # drawable still must match, since drivers can reject oversized windows.
@@ -346,6 +356,20 @@ TEXT_OUT 1
                         capture_times[mark] = elapsed
         if not captured:
             raise RuntimeError(f"No rendered frames captured; see {root / 'client.log'}")
+        local_turns = None
+        if args.local_turn_demo:
+            log = (root / "client.log").read_text()
+            keys = re.findall(r"Capture local key: index=(\d+) ", log)
+            accepted = [{"time": float(t), "direction": int(d), "turns": int(n)}
+                        for t, d, n in re.findall(
+                            r"Capture accepted turn: time=([\d.e+-]+) direction=(-?\d+) turns=(\d+)", log)]
+            if "67" not in keys:
+                raise RuntimeError("Local turn demo did not complete its 68 input events; see client.log")
+            if len(accepted) < 26 or not any(event["time"] >= 6.5 for event in accepted):
+                raise RuntimeError("Local turn demo did not exercise both rapid-turn bursts; see client.log")
+            local_turns = {"input_events": len(keys), "accepted_turns": len(accepted), "events": accepted,
+                           "note": "Input events are not accepted turns; cooldown and death can reject keys."}
+            (root / "local-turns.json").write_text(json.dumps(local_turns, indent=2) + "\n")
         if args.turn_demo and not any(event["time"] >= 8.1 for event in scenario_events):
             raise RuntimeError("Turn demo ended before completing rapid turns; see turn-scenario.json")
         report = {"frames": frames, "dimensions": dimensions, "elapsed_seconds": time.monotonic() - started,
@@ -354,6 +378,8 @@ TEXT_OUT 1
                   "framebuffer_dimensions": dimensions, "output_dimensions": dimensions,
                   "pixel_source": "native_opengl_framebuffer", "pixel_format": "rgb8_sdr",
                   "readback_interval_seconds": interval, "gl_limits": gl_limits}
+        if local_turns is not None:
+            report["local_turns"] = {key: local_turns[key] for key in ("input_events", "accepted_turns", "note")}
         if recording is not None:
             recording.stdin.close()
             if recording.wait(timeout=15) != 0:
