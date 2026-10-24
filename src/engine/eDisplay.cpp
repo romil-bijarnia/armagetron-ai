@@ -193,9 +193,8 @@ bool se_PrepareFloorReflection()
         "        float d = roundedPanel(world - center, size, min(8.0, min(size.x, size.y) * 0.25));\n"
         "        rail += inlay(d, i == 0 ? 0.11 : 0.040) * (i == 0 ? 1.0 : 0.38);\n"
         "    }\n"
-        // Architectural circuits sit over real-looking dark glass panels. The
-        // panel material remains visible between the lines at the gameplay
-        // camera, rather than leaving an empty black wireframe plane.
+        // The glass between circuits stays black. Only the inlays emit;
+        // reflected objects retain their own colours in the separate pass.
         "    vec2 layout = world - center;\n"
         "    float spacing = max(gridWorld, 4.0);\n"
         "    vec2 major = abs(mod(layout + spacing * 0.5, spacing) - spacing * 0.5);\n"
@@ -209,12 +208,17 @@ bool se_PrepareFloorReflection()
         "    float grid = panels * 0.42 + subdivisions * 0.11 + junctions * 0.35;\n"
         "    vec2 panelIndex = floor((layout + spacing * 0.5) / spacing);\n"
         "    float panelShade = fract(sin(dot(panelIndex, vec2(127.1, 311.7))) * 43758.5453);\n"
+        // Broad panel variation is stable in world space. Fade it before a tile
+        // becomes subpixel, preserving a quiet surface through camera movement.
+        "    float panelResolved = 1.0 - smoothstep(spacing * 0.20, spacing * 0.65, max(footprint.x, footprint.y));\n"
+        "    panelShade = mix(0.5, panelShade, panelResolved);\n"
+        "    float roughness = 0.72 + panelShade * 0.28;\n"
         "    float roomLight = 1.0 - smoothstep(0.0, 1.4, length(layout / halfArena));\n"
-        "    surface = surface * 0.55 + vec3(0.055, 0.073, 0.092) * (0.85 + panelShade * 0.15);\n"
-        "    surface += vec3(0.030, 0.043, 0.055) * (0.35 + roomLight * 0.65);\n"
+        "    surface = surface * 0.04 + vec3(0.001, 0.002, 0.003) * (0.70 + panelShade * 0.30);\n"
+        "    surface += vec3(0.0004, 0.0007, 0.001) * roomLight;\n"
         "    surface *= 1.0 - subdivisions * 0.24;\n"
         "    float bevel = gridLines(abs(minor - vec2(0.075)), footprint, 0.035);\n"
-        "    surface += vec3(0.008, 0.014, 0.018) * bevel;\n"
+        "    surface += vec3(0.001, 0.002, 0.003) * bevel;\n"
         "    vec2 circuitLayout = layout;\n"
         "    circuitLayout.x += mod(floor((layout.y + 36.0) / 72.0), 2.0) * 40.0;\n"
         "    vec2 cell = mod(circuitLayout + vec2(40.0, 36.0), vec2(80.0, 72.0)) - vec2(40.0, 36.0);\n"
@@ -222,19 +226,22 @@ bool se_PrepareFloorReflection()
         "    float inner = roundedPanel(cell, vec2(22.0, 17.0), 5.0);\n"
         "    float routes = inlay(circuit, 0.11) + 0.30 * inlay(circuit + 0.75, 0.035);\n"
         "    routes += 0.38 * inlay(inner, 0.045);\n"
-        "    vec3 emission = vec3(0.10, 0.42, 0.50) * (rail * 0.82 + grid * 0.46 + routes * 0.85) * distanceFade;\n"
+        "    vec3 emission = vec3(0.22, 0.65, 0.76) * (rail * 0.82 + grid * 0.46 + routes * 0.85) * distanceFade;\n"
         "    float air = 1.0 - exp(-distance * 0.003);\n"
-        "    surface = mix(surface, vec3(0.045, 0.065, 0.082), air * 0.55);\n"
+        "    surface = mix(surface, vec3(0.0005, 0.001, 0.0015), air * 0.55);\n"
+        "    reflected *= 1.0 - min(reflectionSoftness, 1.0) * roughness * 0.32 * (1.0 - fresnel);\n"
         "    float opacity = max(1.0 - reflected, air * 0.12);\n"
         "    if (capturedReflection > 0.5) {\n"
         // A compact, normalized optical filter softens only the mirrored scene.
         // The real bikes, walls and HUD are drawn later at full resolution.
         "        vec2 uv = gl_FragCoord.xy * inverseFrame;\n"
-        "        float radius = reflectionSoftness * (0.65 + min(distance * 0.025, 2.0));\n"
+        "        float radius = reflectionSoftness * roughness * (2.0 + min(distance * 0.10, 5.0));\n"
         "        vec2 step = inverseFrame * radius / (inverseFrame.y * 1080.0);\n"
-        "        vec3 reflection = reflectionAt(uv) * 0.36;\n"
-        "        reflection += (reflectionAt(uv + vec2(step.x, 0.0)) + reflectionAt(uv - vec2(step.x, 0.0))) * 0.16;\n"
-        "        reflection += (reflectionAt(uv + vec2(0.0, step.y)) + reflectionAt(uv - vec2(0.0, step.y))) * 0.16;\n"
+        "        vec3 reflection = reflectionAt(uv) * 0.20;\n"
+        "        reflection += (reflectionAt(uv + vec2(step.x, 0.0)) + reflectionAt(uv - vec2(step.x, 0.0))) * 0.12;\n"
+        "        reflection += (reflectionAt(uv + vec2(0.0, step.y)) + reflectionAt(uv - vec2(0.0, step.y))) * 0.12;\n"
+        "        reflection += (reflectionAt(uv + step) + reflectionAt(uv - step)) * 0.08;\n"
+        "        reflection += (reflectionAt(uv + vec2(step.x, -step.y)) + reflectionAt(uv + vec2(-step.x, step.y))) * 0.08;\n"
         "        gl_FragColor = vec4(surface * opacity + reflection * (1.0 - opacity) + emission, 1.0);\n"
         "    } else {\n"
         "        gl_FragColor = vec4(surface * opacity + emission, opacity);\n"

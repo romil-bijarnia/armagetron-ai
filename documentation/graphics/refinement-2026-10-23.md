@@ -82,7 +82,7 @@ In particular, network correction, unusual maps, trail holes and extreme camera
 angles can expose cases beyond the scripted sequence.
 
 Local captures, commands, raw logs, before/after performance data and installation
-logs are kept under `ai/runtime/graphics-preview/refinement-2026-10-23/`.
+temporary logs were retired during the later 23 October cleanup. Selected captures and metadata remain in this documentation directory.
 The original 21 October checkpoint and its reference assets remain available.
 
 Reproduce the turn review with the installed client:

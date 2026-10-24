@@ -160,11 +160,13 @@ char const * compositeSource =
     "    if ( peak > 0.75 ) shoulder = 0.75 + 0.25 * ( 1.0 - exp( -( peak - 0.75 ) * 4.0 ) );\n"
     // Keep the brightness and chroma of bright source cores. Otherwise blue
     // halo falling on a white headlight would turn the headlight itself blue.
+    // Include the coloured shoulders of bike inlays and ribbon edges, not just
+    // near-white peaks: these surfaces must retain their own colour at overlaps.
     "    float basePeak = max( base.r, max( base.g, base.b ) );\n"
     "    shoulder = max( shoulder, basePeak );\n"
     "    vec3 mapped = colour * ( shoulder / max( peak, 0.00001 ) );\n"
     "    vec3 core = base * ( shoulder / max( basePeak, 0.00001 ) );\n"
-    "    vec3 result = mix( mapped, core, smoothstep( 0.85, 1.0, basePeak ) );\n"
+    "    vec3 result = mix( mapped, core, smoothstep( 0.55, 0.85, basePeak ) );\n"
     "    float resultPeak = max( result.r, max( result.g, result.b ) );\n"
     // The frame falls off towards its corners, the centre stays untouched.
     "    float falloff = 1.0 - vignette * smoothstep( 0.45, 1.05, length( ( uv - 0.5 ) * 2.0 ) * 0.78 );\n"

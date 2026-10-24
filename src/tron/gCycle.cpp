@@ -2312,6 +2312,24 @@ static eLegacyWavData cycle_run("moviesounds/engine.wav","sound/cyclrun.wav");
 
 namespace
 {
+#ifndef DEDICATED
+static bool sg_captureModelView=false;
+static tConfItem<bool> sg_captureModelViewConf("CAPTURE_MODEL_VIEW",sg_captureModelView);
+#endif
+void sg_ValidateCycleColours(gRealColor & body,gRealColor & trail)
+{
+    se_MakeColorValid(body.r_,body.g_,body.b_,1.0f);
+    if (sg_blacklightVisuals && !sg_MoviePack())
+        trail=body;
+    else
+        se_MakeColorValid(trail.r_,trail.g_,trail.b_,.5f);
+#ifndef DEDICATED
+    if (sr_hiddenWindow)
+        std::cerr << "Lightcycle palette: bike=" << body.r_ << ',' << body.g_ << ',' << body.b_
+                  << " trail=" << trail.r_ << ',' << trail.g_ << ',' << trail.b_ << '\n';
+#endif
+}
+
 void sg_RefreshPlayerCycleColor(ePlayerNetID *player)
 {
     gCycle *cycle=player ? dynamic_cast<gCycle *>(player->Object()) : NULL;
@@ -2322,8 +2340,7 @@ void sg_RefreshPlayerCycleColor(ePlayerNetID *player)
     gRealColor body,trail;
     player->Color(body.r_,body.g_,body.b_);
     player->TrailColor(trail.r_,trail.g_,trail.b_);
-    se_MakeColorValid(body.r_,body.g_,body.b_,1.0f);
-    se_MakeColorValid(trail.r_,trail.g_,trail.b_,.5f);
+    sg_ValidateCycleColours(body,trail);
     if (cycle->color_ == body && cycle->trailColor_ == trail)
         return;
     cycle->color_=body;
@@ -2414,8 +2431,7 @@ void gCycle::MyInitAfterCreation(){
             player->TrailColor(trailColor_.r_,trailColor_.g_,trailColor_.b_);
         }
 
-        se_MakeColorValid( color_.r_, color_.g_, color_.b_, 1.0f );
-        se_MakeColorValid( trailColor_.r_, trailColor_.g_, trailColor_.b_, .5f );
+        sg_ValidateCycleColours(color_,trailColor_);
     }
 
     // load model and texture
@@ -4642,11 +4658,12 @@ void gCycleWallsDisplayListManager::RenderPassWithState( eCamera const * camera,
         cycle->UpdateRenderPose();
     eCoord facing(std::cos(cycle->renderMotion_.Yaw()),std::sin(cycle->renderMotion_.Yaw()));
     REAL modelScale=.5f*sg_LightcycleScale();
-    REAL rearDistance=modelScale*(1.5f-gLightcycleModel::RearAxle+gLightcycleModel::WheelRadius+.08f);
+    REAL rearDistance=modelScale*(1.5f-gLightcycleModel::RearEmitterX());
     eCoord emitter=cycle->PredictPosition()-facing*rearDistance+
         eCoord(cycle->renderMotion_.VisualOffsetX(),cycle->renderMotion_.VisualOffsetY());
     gLightwallMaterial::Scope flow(energy && textured,
-        se_GameTime(),cycle->GetDistance()/2.5f,emitter.x,emitter.y,facing.x,facing.y,modelScale);
+        se_GameTime(),cycle->GetDistance()/2.5f,emitter.x,emitter.y,facing.x,facing.y,modelScale,
+        gLightcycleModel::RearAxle-gLightcycleModel::RearEmitterX(),gLightcycleModel::ModelWheelRadius(0),cycle->renderMotion_.Bank());
     bool const premultiplied=gLightwallMaterial::IsActive();
     static bool previousPremultiplied=premultiplied;
     if (previousPremultiplied != premultiplied)
@@ -4672,7 +4689,7 @@ void gCycleWallsDisplayListManager::RenderPassWithState( eCamera const * camera,
 
 namespace
 {
-void LightcycleGroundLight(gRealColor const & colour)
+void LightcycleGroundLight(gRealColor const & colour, float assembly)
 {
     RenderEnd();
     glPushAttrib(GL_ENABLE_BIT | GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT |
@@ -4690,18 +4707,46 @@ void LightcycleGroundLight(gRealColor const & colour)
     glDisable(GL_ALPHA_TEST);
     glDisable(GL_CULL_FACE);
     glEnable(GL_BLEND);
-    glBlendFunc(GL_SRC_ALPHA,GL_ONE);
+    glBlendFunc(GL_SRC_ALPHA,GL_ONE_MINUS_SRC_ALPHA);
     glDepthMask(GL_FALSE);
     glDepthFunc(GL_LEQUAL);
     glShadeModel(GL_SMOOTH);
+
+    // Fit contact occlusion to the actual axles and chassis. This replaces the
+    // old bike's rectangular shadow; it follows visual yaw without banking off
+    // the floor. Fade it with assembly so no full-bike shadow precedes the bike.
+    auto contact = [&](float x,float radiusX,float radiusY,float opacity)
+    {
+        for(int band=0;band<6;++band)
+        {
+            float inner=band/6.f,outer=(band+1)/6.f;
+            glBegin(GL_QUAD_STRIP);
+            for(int i=0;i<=40;++i)
+            {
+                float a=i*(2.f*M_PI/40.f),c=std::cos(a),s=std::sin(a);
+                auto vertex = [&](float radius)
+                {
+                    float fade=1.f-radius*radius;
+                    glColor4f(0,0,0,opacity*assembly*fade*fade);
+                    glVertex3f(x+radiusX*radius*c,radiusY*radius*s,.010f);
+                };
+                vertex(inner);vertex(outer);
+            }
+            glEnd();
+        }
+    };
+    contact(.05f,1.65f,.58f,.25f);
+    contact(gLightcycleModel::RearAxle,.52f,.58f,.64f);
+    contact(gLightcycleModel::FrontAxle,.52f,.58f,.64f);
+    glBlendFunc(GL_SRC_ALPHA,GL_ONE);
 
     // Smooth local pools, strongest at the wheels and falling to zero before
     // they reach the next cycle. They follow heading but stay on the ground
     // when the visual bike leans into a turn.
     auto pool = [&](float x,float radiusX,float radiusY,float power)
     {
-        auto energy = [power](float r)
-        { return power*std::exp(-4.f*r*r)*(1.f-r*r); };
+        auto energy = [power,assembly](float r)
+        { return power*assembly*std::exp(-4.f*r*r)*(1.f-r*r); };
         for(int band=0;band<6;++band)
         {
             float inner=band/6.f,outer=(band+1)/6.f;
@@ -4717,18 +4762,18 @@ void LightcycleGroundLight(gRealColor const & colour)
             glEnd();
         }
     };
-    pool(gLightcycleModel::RearAxle,1.25f,.95f,.38f);
-    pool(gLightcycleModel::FrontAxle,1.25f,.95f,.38f);
-    pool(.15f,1.55f,.78f,.13f);
+    pool(gLightcycleModel::RearAxle,1.25f,.95f,.055f);
+    pool(gLightcycleModel::FrontAxle,1.25f,.95f,.055f);
+    pool(.15f,1.55f,.78f,.015f);
 
     // The white nose lamps project a short, soft cone onto the polished floor.
     // This is local illumination; it does not blur the scene or HUD.
-    auto beamVertex = [](float u,float v)
+    auto beamVertex = [assembly](float u,float v)
     {
         float width=.24f+u*.90f;
         float fade=(1.f-u)*(1.f-u)*std::exp(-2.5f*u);
         fade*=std::min(1.f,u*18.f)*(1.f-v*v)*(1.f-v*v);
-        glColor4f(.68f,.88f,1.f,.42f*fade);
+        glColor4f(.68f,.88f,1.f,.12f*fade*assembly);
         glVertex3f(gLightcycleModel::FrontAxle+.62f+u*6.f,v*width,.016f);
     };
     for(int row=0;row<20;++row)
@@ -4870,7 +4915,8 @@ void gCycle::Render(const eCamera *cam){
         REAL const visualBirthAge=renderAssembly_.Sample(se_GameTime(),actualBirthAge);
         if (blacklightCycle && !blinking && visualBirthAge>=0)
         {
-            LightcycleGroundLight(color_);
+            if (!cam || cam->RenderingMain())
+                LightcycleGroundLight(color_,std::max(0.f,std::min(1.f,float(visualBirthAge/1.25f))));
             gLightcycleEffects::Render(color_.r_,color_.g_,color_.b_,se_GameTime(),Speed(),
                 GetBraking()!=0,renderMotion_.Bank(),visualBirthAge);
         }
@@ -4919,13 +4965,29 @@ void gCycle::Render(const eCamera *cam){
                 if (blacklightCycle)
                 {
                     RenderEnd();
+                    // Opt-in capture metadata permits an exact Blender camera
+                    // comparison without changing the player's camera settings.
+                    static bool modelViewReported=false;
+                    if(sr_hiddenWindow && sg_captureModelView && !modelViewReported && se_GameTime()>2
+                       && (!cam || cam->RenderingMain()) && Player() && Player()->IsHuman() && Owner()==sn_myNetID)
+                    {
+                        GLfloat view[16],projection[16];
+                        glGetFloatv(GL_MODELVIEW_MATRIX,view);glGetFloatv(GL_PROJECTION_MATRIX,projection);
+                        std::cerr << "Capture model view:";
+                        for(float value:view) std::cerr << ' ' << value;
+                        std::cerr << "\nCapture model projection:";
+                        for(float value:projection) std::cerr << ' ' << value;
+                        std::cerr << '\n';modelViewReported=true;
+                    }
                     gLightcycleMaterial::Scope material(color_.r_,color_.g_,color_.b_,
                         gLightcycleModel::RearAxle,gLightcycleModel::FrontAxle,gLightcycleModel::WheelRadius,
                         se_GameTime(),std::max(REAL(0),std::min(REAL(1),Speed()/60.f)),
                         std::max(REAL(0),std::min(REAL(1),visualBirthAge/1.25f)),cycleWorldToView);
-                    REAL wheelAngle = gLightcycleMotion::WheelAngle(GetDistance(),
-                        gLightcycleModel::WheelRadius,sg_LightcycleScale());
-                    gLightcycleModel::Render(color_.r_, color_.g_, color_.b_, wheelAngle, wheelAngle);
+                    REAL rearAngle = gLightcycleMotion::WheelAngle(GetDistance(),
+                        gLightcycleModel::ModelWheelRadius(0),sg_LightcycleScale());
+                    REAL frontAngle = gLightcycleMotion::WheelAngle(GetDistance(),
+                        gLightcycleModel::ModelWheelRadius(1),sg_LightcycleScale());
+                    gLightcycleModel::Render(color_.r_, color_.g_, color_.b_, rearAngle, frontAngle);
                 }
                 else
                 {
@@ -5145,7 +5207,7 @@ void gCycle::Render(const eCamera *cam){
 
         glEnable(GL_CULL_FACE);
 
-        if(!blinking && sr_floorDetail>rFLOOR_GRID && rTextureGroups::TextureMode[rTextureGroups::TEX_FLOOR]>0 && sr_alphaBlend){
+        if(!blacklightCycle && !blinking && sr_floorDetail>rFLOOR_GRID && rTextureGroups::TextureMode[rTextureGroups::TEX_FLOOR]>0 && sr_alphaBlend){
             glColor3f(0,0,0);
             cycle_shad.Select();
             BeginQuads();
@@ -5643,8 +5705,7 @@ gCycle::gCycle( Game::CycleSync const & sync, nSenderInfo const & sender )
         player->TrailColor(trailColor_.r_,trailColor_.g_,trailColor_.b_);
     }
 
-    se_MakeColorValid( color_.r_, color_.g_, color_.b_, 1.0f );
-    se_MakeColorValid( trailColor_.r_, trailColor_.g_, trailColor_.b_, .5f );
+    sg_ValidateCycleColours(color_,trailColor_);
 
     // set last time so that the first read_sync will not think this is old
     lastTimeAnim = lastTime = -EPS;

@@ -36,6 +36,28 @@ jobs:
               "ai/tests/cpp/${name}_check.cpp" -o "$RUNNER_TEMP/$name"
             "$RUNNER_TEMP/$name"
           done
+      - name: Validate the bundled authored asset
+        shell: bash
+        run: |
+          set -euo pipefail
+          c++ -std=c++17 -O2 -Wall -Wextra -Werror \
+            ai/tests/cpp/lightcycle_asset_check.cpp -o "$RUNNER_TEMP/lightcycle_asset"
+          "$RUNNER_TEMP/lightcycle_asset" models/lightcycle-authored.bin
+      - name: Compile and exercise the native ribbon shader
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -euo pipefail
+          clang++ -std=c++17 -O2 -framework OpenGL \
+            ai/tests/cpp/lightwall_material_check.cpp -o "$RUNNER_TEMP/lightwall_material"
+          status=0
+          "$RUNNER_TEMP/lightwall_material" \
+            src/tron/gLightwallMaterial.h src/tron/gLightColour.h || status=$?
+          if [ "$status" -eq 77 ]; then
+            echo "::notice::No accelerated OpenGL context on this runner; shader runtime check requires a graphics-capable Mac."
+          else
+            exit "$status"
+          fi
       - name: Validate capture, export and installation utilities
         shell: bash
         run: |
@@ -44,7 +66,8 @@ jobs:
             desktop/os-x/capture_preview.py \
             desktop/os-x/check_lightcycle_colours.py \
             desktop/os-x/export_lightcycle_blender.py \
-            desktop/os-x/install_native_app.py
+            desktop/os-x/install_native_app.py \
+            art/lightcycle-authored/export_game.py
           for file in desktop/os-x/build_native_app.sh script/build_and_run.sh; do
             bash -n "$file"
           done

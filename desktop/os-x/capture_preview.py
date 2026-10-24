@@ -7,6 +7,7 @@ the human match, opens a window, or loads/saves a training checkpoint.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import math
 import os
@@ -72,6 +73,8 @@ def main():
     ap.add_argument("--readback-interval", type=float, default=None, metavar="SECONDS",
                     help="minimum delay after GPU readback; defaults to 1s for --pixels stills, otherwise every frame")
     ap.add_argument("--font", type=Path, help="optional installed font to verify with the local preset")
+    ap.add_argument("--profile-config", type=Path,
+                    help="copy an existing saved user config into the isolated client before applying capture overrides")
     ap.add_argument("--set", action="append", default=[], metavar="KEY=VALUE",
                     help="override one local client setting for a controlled comparison")
     ap.add_argument("--server-set", action="append", default=[], metavar="KEY=VALUE",
@@ -180,6 +183,15 @@ TEXT_OUT 1
         # drawable still must match, since drivers can reject oversized windows.
         config += (f"LOW_DPI_WINDOW 1\nARMAGETRON_WINDOWSIZE -1\n"
                    f"ARMAGETRON_WINDOWSIZE_W {args.pixels[0]}\nARMAGETRON_WINDOWSIZE_H {args.pixels[1]}\n")
+    profile_snapshot = None
+    if args.profile_config:
+        if not args.profile_config.is_file():
+            ap.error("--profile-config must be an existing saved user configuration")
+        profile_bytes = args.profile_config.read_bytes()
+        (root / "client/config/user_3_1_utf8.cfg").write_bytes(profile_bytes)
+        profile_snapshot = {"source": str(args.profile_config.resolve()),
+                            "sha256": hashlib.sha256(profile_bytes).hexdigest(),
+                            "scope": "Copied into the isolated test profile; capture overrides follow."}
     (root / "client/config/autoexec.cfg").write_text(config)
     client_path = args.client.resolve()
     if client_path.parent.name == "MacOS" and client_path.parent.parent.name == "Contents":
@@ -307,6 +319,8 @@ TEXT_OUT 1
                       "framebuffer_dimensions": dimensions,
                       "requested_pixels": args.pixels, "gl_limits": gl_limits,
                       "seconds": time.monotonic() - started}
+            if profile_snapshot:
+                report["profile_snapshot"] = profile_snapshot
             (root / "capture.json").write_text(json.dumps(report, indent=2) + "\n")
             print(json.dumps(report))
             return
@@ -345,7 +359,10 @@ TEXT_OUT 1
                             "-f", "rawvideo", "-pixel_format", "rgb24",
                             "-video_size", f"{width}x{height}", "-framerate", "60", "-i", "pipe:0",
                             "-an", "-c:v", "libx264", "-preset", "veryfast", "-crf", "19",
-                            "-pix_fmt", "yuv420p", "-movflags", "+faststart", str(video)
+                            "-vf", "scale=out_color_matrix=bt709:out_range=tv",
+                            "-pix_fmt", "yuv420p", "-colorspace", "bt709",
+                            "-color_primaries", "bt709", "-color_trc", "bt709", "-color_range", "tv",
+                            "-movflags", "+faststart", str(video)
                         ], stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=recording_log)
                     recording.stdin.write(frame)
                     recorded_frames += 1
@@ -385,6 +402,8 @@ TEXT_OUT 1
             if recording.wait(timeout=15) != 0:
                 raise RuntimeError(f"Video encoder failed; see {root / 'video-encoder.log'}")
             report.update(video=str(args.video.resolve()), video_frames=recorded_frames, video_fps=60)
+        if profile_snapshot:
+            report["profile_snapshot"] = profile_snapshot
         (root / "capture.json").write_text(json.dumps(report, indent=2) + "\n")
         print(json.dumps(report))
     finally:

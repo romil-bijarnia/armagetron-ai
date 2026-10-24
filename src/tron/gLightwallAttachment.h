@@ -4,6 +4,8 @@
 #define ARMAGETRON_LIGHTWALL_ATTACHMENT_H
 
 #include <algorithm>
+#include <array>
+#include <cstddef>
 #include <cmath>
 
 namespace gLightwallAttachment
@@ -43,35 +45,93 @@ struct Curve
         return cross>1e-9 ? std::min(1.,.55*speed*speed*speed/cross) : 1.;
     }
 
-    static Curve Join(Point start,Point incoming,Point end,Point forward,double cornerRoom,double halfWidth=.36)
+    static Curve Join(Point start,Point incoming,Point end,Point forward,double cornerRoom)
     {
-        double span=std::hypot(end.x-start.x,end.y-start.y);
-        // The start handle vanishes at both sides of a physical corner. As
-        // the cut crosses it, the curve remains continuous despite the 90deg
-        // change of the wall tangent. The emitter always has a rearward handle.
-        double firstLength=std::min(span*.35,std::max(0.,cornerRoom));
-        double lastLength=std::min(1.2,span*.55);
-        Point first=start+incoming*firstLength;
-        Point fromEnd=start-end,normal{-forward.y,forward.x};
-        double ahead=fromEnd.x*forward.x+fromEnd.y*forward.y;
-        double side=fromEnd.x*normal.x+fromEnd.y*normal.y;
-        // A tightly reversed bike can leave the fixed wall beside, or ahead
-        // of, its rear tyre. An end tangent alone does not stop a cubic cutting
-        // through that tyre. Take its first handle outboard and behind the
-        // emitter before returning along the rear tangent. The transition
-        // begins before the wall reaches the tyre, avoiding a branch-time pop.
-        double route=std::max(0.,std::min(1.,(ahead+halfWidth)/(halfWidth*1.3)));
-        route=route*route*(3-2*route);
-        // Blend the routing side through the centreline as well. A hard sign
-        // switch here would itself jump the sheet during a fast reversal.
-        double sideBlend=std::max(-1.,std::min(1.,side/(halfWidth*.5)));
-        sideBlend=sideBlend*(1.5-.5*sideBlend*sideBlend);
-        Point outboard=end-forward*(halfWidth*2.2)+normal*(side+sideBlend*halfWidth*1.4);
-        first=first*(1-route)+outboard*route;
-        lastLength=std::max(lastLength,halfWidth*1.8*route);
-        return {start,first,end-forward*lastLength,end};
+        Point chord=end-start;
+        double span=std::hypot(chord.x,chord.y);
+        // Keep every control point ordered along the join-to-emitter chord.
+        // Routing a reversed emitter around the tyre made this connector double
+        // back, then flip its loop to the other side during alternating turns.
+        // The opaque bike and the tyre clip occlude any newborn overlap instead.
+        // A tangent that faces away from the chord shrinks continuously to zero.
+        double entering=chord.x*incoming.x+chord.y*incoming.y;
+        double leaving=chord.x*forward.x+chord.y*forward.y;
+        double firstLength=std::min({span*.35,std::max(0.,cornerRoom),std::max(0.,entering)*.45});
+        double lastLength=std::min(span*.35,std::max(0.,leaving)*.45);
+        return {start,start+incoming*firstLength,end-forward*lastLength,end};
     }
 };
+
+struct Column
+{
+    Point base;
+    double height;
+    double attachment;
+};
+
+// Every column has the same height from birth. Only a short collar at the
+// emitter fits the rear housing in the horizontal plane. A lower tip that grows
+// to full height made the ribbon rise and fall when a turn reshaped the collar.
+// World-distance weighting also avoids stretching this collar across an entire
+// connector when a rapid turn changes the connector's shape or length.
+template<std::size_t N>
+inline std::array<Column,N> UprightSheet(std::array<Point,N> const & path,
+                                       double height,double collarLength)
+{
+    static_assert(N>=2,"A ribbon requires at least two columns");
+    std::array<double,N> remaining{};
+    for(std::size_t i=N-1;i>0;--i)
+        remaining[i-1]=remaining[i]+std::hypot(path[i].x-path[i-1].x,path[i].y-path[i-1].y);
+    // Even a short connector must meet the full-height settled wall at its start.
+    double collar=std::min(std::max(0.,collarLength),remaining[0]*.5);
+    // A collapsing connection must also collapse its surface-fitting offsets.
+    // Full bank/profile offsets on an arbitrarily short span created a new flap
+    // even when the centreline itself had no loop.
+    double fit=collarLength>1e-9 ? std::max(0.,std::min(1.,remaining[0]/collarLength)) : 0;
+    fit=fit*fit*(3-2*fit);
+    std::array<Column,N> result;
+    for(std::size_t i=0;i<N;++i)
+    {
+        double blend=collar>1e-9 ? std::max(0.,std::min(1.,1-remaining[i]/collar)) : 0;
+        blend=blend*blend*(3-2*blend);
+        result[i]={path[i],height,blend*fit};
+    }
+    return result;
+}
+
+struct Vertex { double x,y,z; };
+inline Vertex UprightVertex(Column const & column,Point forward,double vertical,
+                            double rearProfileOffset=0)
+{
+    Point point=column.base+forward*(rearProfileOffset*column.attachment);
+    return {point.x,point.y,column.height*vertical};
+}
+
+// Only the short collar follows the rear stripe as the motorcycle banks. Keep
+// its height and floor edge fixed; applying roll to the whole ribbon made it flap.
+inline Vertex FittedVertex(Column const & column,Point forward,double vertical,
+                           double rearProfileOffset,double bankSlope)
+{
+    Vertex vertex=UprightVertex(column,forward,vertical,rearProfileOffset);
+    double side=vertex.z*bankSlope*column.attachment;
+    vertex.x+=forward.y*side;
+    vertex.y-=forward.x*side;
+    return vertex;
+}
+
+// Fit each horizontal row as a bounded curve in its own right. Adding a
+// profile offset after sampling the centreline could make its upper rows fold
+// even when the centreline was monotone. All rows retain the same fixed join.
+inline Curve ProfileCurve(Curve const & centre,Point forward,double height,
+                          double profileOffset,double bankSlope,double fit)
+{
+    Point handle=centre.first-centre.start;
+    double length=std::hypot(handle.x,handle.y);
+    Point incoming=length>1e-9 ? handle*(1/length) : Point{0,0};
+    Point end=centre.end+forward*(profileOffset*fit)
+        +Point{forward.y,-forward.x}*(height*bankSlope*fit);
+    return Curve::Join(centre.start,incoming,end,forward,length);
+}
 
 // Extra distance behind the rear fender where the fixed wall becomes a curve.
 // It stays inside the existing five-metre uncached wall window at normal scale.

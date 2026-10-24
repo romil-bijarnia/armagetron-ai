@@ -29,6 +29,11 @@ inline void Render(float, float, float, float, float) {}
 #include <cmath>
 #include <cstddef>
 #include <vector>
+#include <fstream>
+#include "gLightcycleAsset.h"
+#include "gLightcycleProfile.h"
+#include "rTexture.h"
+#include "tConsole.h"
 #ifdef HAVE_GLEW
 #include "rScreen.h"
 #include <map>
@@ -72,6 +77,7 @@ inline Vec Catmull(Vec const & a, Vec const & b, Vec const & c, Vec const & d, f
 struct Vertex
 {
     Vec position, normal;
+    float optical[4]={0,0,0,0};
     Vertex(Vec const & p, Vec const & n) : position(p), normal(n) {}
 };
 
@@ -161,6 +167,7 @@ struct Mesh
             {
                 glVertexPointer(3, GL_FLOAT, sizeof(Vertex), reinterpret_cast<void const *>(offsetof(Vertex, position)));
                 glNormalPointer(GL_FLOAT, sizeof(Vertex), reinterpret_cast<void const *>(offsetof(Vertex, normal)));
+                glTexCoordPointer(4, GL_FLOAT, sizeof(Vertex), reinterpret_cast<void const *>(offsetof(Vertex, optical)));
                 glDrawArrays(GL_TRIANGLES, 0, static_cast<GLsizei>(vertices.size()));
                 return;
             }
@@ -169,6 +176,7 @@ struct Mesh
         unsigned char const * first = reinterpret_cast<unsigned char const *>(vertices.data());
         glVertexPointer(3, GL_FLOAT, sizeof(Vertex), first + offsetof(Vertex, position));
         glNormalPointer(GL_FLOAT, sizeof(Vertex), first + offsetof(Vertex, normal));
+        glTexCoordPointer(4, GL_FLOAT, sizeof(Vertex), first + offsetof(Vertex, optical));
         glDrawArrays(GL_TRIANGLES, 0, static_cast<GLsizei>(vertices.size()));
     }
 };
@@ -507,6 +515,21 @@ struct Cache
         for(int side=-1;side<=1;side+=2)
         {
             float s=float(side);
+            // Recessed bearing tracks and staggered inner registers give the
+            // hub a real layered mechanism, leaving its centre open. Both sides
+            // are modelled; none of this detail is painted onto the outer rim.
+            float track=s*.28f;
+            Lathe(wheel[Metal],{{track-.026f,.477f},{track-.015f,.482f},
+                {track+.015f,.482f},{track+.026f,.477f},
+                {track+.015f,.466f},{track-.015f,.466f}},Vec(),0,2*Pi,96);
+            for(int i=0;i<24;++i)
+            {
+                float a=2*Pi*i/24;
+                Annulus(wheel[Armour],.462f,.489f,s*.20f,Vec(),a,a+.14f,4);
+                Annulus(wheel[Metal],.463f,.469f,s*.203f,Vec(),a+.015f,a+.07f,3);
+                Vec fastener(.484f*std::cos(a),s*.302f,.484f*std::sin(a));
+                Rod(wheel[Recess],fastener,fastener+Vec(0,s*.010f,0),.009f,.007f,8);
+            }
             Annulus(wheel[Shell],.492f,.550f,s*.443f,Vec(),0,2*Pi,112);
             Annulus(wheel[Light],.558f,.645f,s*.446f,Vec(),0,2*Pi,144);
             // The optical core shares the rider's hue. Using Headlight here
@@ -670,6 +693,10 @@ struct Cache
         for (Section const & section : torso)
             torsoBody.push_back({Vec(section.x,0,section.z),section.width,section.height});
         BodyVolume(rider[Suit],torsoBody);
+        // Thin fitted shoulder/back panels catch broad room light, while the
+        // joints and torso underneath retain the rough woven suit finish.
+        for(int side=-1;side<=1;side+=2)
+            BodyPanel(rider[Armour],torsoBody,.48f,.84f,side>0 ? .72f : Pi-.72f,.92f,.003f);
         std::vector<BodySection> neck={
             {Vec(.61f,0,1.64f),.092f,.075f},
             {Vec(.69f,0,1.70f),.087f,.072f},
@@ -845,6 +872,23 @@ inline void SetMaterial(Material material,float r,float g,float b)
 {
     GLfloat ambient[4]={0,0,0,1},diffuse[4]={0,0,0,1};
     GLfloat specular[4]={0,0,0,1},emission[4]={0,0,0,1};
+    // Explicit roughness, metal, coat and cloth weights. Inferring these from
+    // diffuse colour made the black suit and rubber share the fairing's sheen.
+    GLfloat finish[4]={.65f,0,0,0};
+    switch(material)
+    {
+    case Shell: finish[0]=.38f; finish[2]=.06f; break;
+    case Armour: finish[0]=.58f; finish[2]=.04f; break;
+    case Metal: finish[0]=.42f; finish[1]=.70f; break;
+    case Rubber: finish[0]=.78f; break;
+    case Recess: finish[0]=.86f; break;
+    case Suit: finish[0]=.82f; finish[3]=1; break;
+    case Visor: finish[0]=.14f; finish[2]=1; break;
+    default: break;
+    }
+#ifdef HAVE_GLEW
+    if (GLEW_VERSION_1_3) glMultiTexCoord4fv(GL_TEXTURE2,finish);
+#endif
     float shine=64;
     if(material==Light || material==SubtleLight || material==Headlight)
     {
@@ -860,12 +904,12 @@ inline void SetMaterial(Material material,float r,float g,float b)
         Vec base,highlight;
         switch(material)
         {
-        case Shell: base=Vec(.018f,.023f,.030f); highlight=Vec(.74f,.81f,.88f); shine=115; break;
-        case Armour: base=Vec(.020f,.026f,.034f); highlight=Vec(.55f,.63f,.70f); shine=90; break;
-        case Metal: base=Vec(.13f,.15f,.17f); highlight=Vec(.84f,.91f,.97f); shine=100; break;
+        case Shell: base=Vec(.0025f,.0035f,.005f); highlight=Vec(.15f,.15f,.15f); shine=80; break;
+        case Armour: base=Vec(.002f,.003f,.004f); highlight=Vec(.12f,.12f,.12f); shine=48; break;
+        case Metal: base=Vec(.006f,.009f,.012f); highlight=Vec(.06f,.08f,.10f); shine=60; break;
         case Rubber: base=Vec(.016f,.019f,.024f); highlight=Vec(.21f,.25f,.30f); shine=31; break;
         case Recess: base=Vec(.010f,.014f,.018f); highlight=Vec(.07f,.10f,.13f); shine=24; break;
-        case Suit: base=Vec(.010f,.013f,.017f); highlight=Vec(.17f,.22f,.28f); shine=48; break;
+        case Suit: base=Vec(.002f,.003f,.004f); highlight=Vec(.12f,.12f,.12f); shine=48; break;
         case Visor: base=Vec(.012f,.031f,.043f); highlight=Vec(.84f,.95f,1.f); shine=120; break;
         default: base=Vec(.04f,.05f,.06f); highlight=Vec(.4f,.4f,.4f); break;
         }
@@ -901,6 +945,92 @@ inline Cache const & Geometry()
     static Cache const cache;
     return cache;
 }
+
+struct AuthoredCache
+{
+    std::array<Parts,4> groups;
+    std::array<std::array<float,3>,2> centres;
+    std::array<std::array<float,2>,2> opticalRings;
+    bool loaded=false;
+    AuthoredCache()
+    {
+        tString path=tDirectories::Data().GetReadPath("models/lightcycle-authored.bin");
+        std::ifstream file(static_cast<char const *>(path),std::ios::in|std::ios::binary);
+        gLightcycleAsset::Asset asset;
+        if(!file || !gLightcycleAsset::Load(file,asset))
+        {
+            con << "Authored lightcycle unavailable or invalid; using built-in fallback.\n";
+            return;
+        }
+        std::size_t count=0;
+        for(unsigned group=0;group<4;++group)
+            for(unsigned material=0;material<MaterialCount;++material)
+            {
+                auto & vertices=groups[group][material].vertices;
+                vertices.reserve(asset.parts[group][material].size());
+                for(auto const & source:asset.parts[group][material])
+                {
+                    Vertex v(Vec(source.position[0],source.position[1],source.position[2]),
+                             Vec(source.normal[0],source.normal[1],source.normal[2]));
+                    std::copy(source.optical,source.optical+4,v.optical);
+                    vertices.push_back(v);
+                }
+                count+=vertices.size();
+            }
+        for(int wheel=0;wheel<2;++wheel)
+        {
+            float low=10.f,high=0.f;
+            for(auto const & vertex:groups[wheel+1][Light].vertices)
+            {
+                float radius=std::hypot(vertex.position.x,vertex.position.z);
+                low=std::min(low,radius);high=std::max(high,radius);
+            }
+            opticalRings[wheel]={{(low+high)*.5f,std::max(.001f,(high-low)*.5f)}};
+        }
+        centres=asset.centres;loaded=true;
+        if(sr_hiddenWindow) std::cerr << "Authored lightcycle loaded: " << count/3 << " triangles\n";
+    }
+};
+inline AuthoredCache const & AuthoredGeometry()
+{
+    static AuthoredCache const cache;
+    return cache;
+}
+
+inline void DrawAuthored(Parts const & parts,float r,float g,float b,float ringCentre=0,float ringHalfWidth=0)
+{
+    for(int i=0;i<MaterialCount;++i)
+        if(!parts[i].vertices.empty())
+        {
+            SetMaterial(static_cast<Material>(i),r,g,b);
+#ifdef HAVE_GLEW
+            if(GLEW_VERSION_1_3) glMultiTexCoord3f(GL_TEXTURE1,i==Suit ? 2.f : i==Shell ? 3.f : 1.f,ringCentre,ringHalfWidth);
+#endif
+            parts[i].Draw();
+        }
+}
+}
+
+inline bool AuthoredAvailable() { return Detail::AuthoredGeometry().loaded; }
+inline float RearEmitterX()
+{
+    return AuthoredAvailable() ? gLightcycleProfile::RearExtent : RearAxle-WheelRadius-.08f;
+}
+inline float ModelWheelRadius(int wheel)
+{
+    return AuthoredAvailable() ? gLightcycleProfile::Radii[wheel ? 1 : 0] : WheelRadius;
+}
+inline float RearProfileX(float height)
+{
+    if(!AuthoredAvailable()) return RearEmitterX();
+    auto const & p=gLightcycleProfile::Rear;
+    for(unsigned i=1;i<33;++i)
+        if(height<=p[i][0])
+        {
+            float t=std::max(0.f,std::min(1.f,(height-p[i-1][0])/(p[i][0]-p[i-1][0])));
+            return p[i-1][1]+t*(p[i][1]-p[i-1][1]);
+        }
+    return p[32][1];
 }
 
 inline void Render(float r,float g,float b,float rearAngle,float frontAngle)
@@ -908,7 +1038,7 @@ inline void Render(float r,float g,float b,float rearAngle,float frontAngle)
     r=std::max(0.f,std::min(1.f,r));
     g=std::max(0.f,std::min(1.f,g));
     b=std::max(0.f,std::min(1.f,b));
-    Detail::Cache const & cache=Detail::Geometry();
+    Detail::AuthoredCache const & authored=Detail::AuthoredGeometry();
 
     GLint oldMatrixMode=GL_MODELVIEW;
     glGetIntegerv(GL_MATRIX_MODE,&oldMatrixMode);
@@ -972,22 +1102,48 @@ inline void Render(float r,float g,float b,float rearAngle,float frontAngle)
 #ifdef HAVE_GLEW
     if (GLEW_VERSION_1_3) glMultiTexCoord1f(GL_TEXTURE3,0.f);
 #endif
-    Detail::Draw(cache.body,r,g,b);
-    for(int wheel=0;wheel<2;++wheel)
+    if(authored.loaded)
     {
-        glPushMatrix();
-        glTranslatef(wheel ? FrontAxle : RearAxle,0,WheelRadius);
-        glRotatef(-(wheel ? frontAngle : rearAngle)*180.f/Detail::Pi,0,1,0);
-        Detail::Draw(cache.wheel,r,g,b);
-        glPopMatrix();
-    }
-
+        static rFileTexture mask(rTextureGroups::TEX_OBJ,"textures/lightcycle_suit_mask.png");
+        mask.Select(true);
+        glEnableClientState(GL_TEXTURE_COORD_ARRAY);
+        Detail::DrawAuthored(authored.groups[0],r,g,b);
+        for(int wheel=0;wheel<2;++wheel)
+        {
+            glPushMatrix();
+            auto const & c=authored.centres[wheel];
+            glTranslatef(c[0],c[1],c[2]);
+            glRotatef(-(wheel ? frontAngle : rearAngle)*180.f/Detail::Pi,0,1,0);
+            Detail::DrawAuthored(authored.groups[wheel+1],r,g,b,authored.opticalRings[wheel][0],authored.opticalRings[wheel][1]);
+            glPopMatrix();
+        }
 #ifdef HAVE_GLEW
-    if (GLEW_VERSION_1_3) glMultiTexCoord1f(GL_TEXTURE3,1.f);
+        if (GLEW_VERSION_1_3) glMultiTexCoord1f(GL_TEXTURE3,1.f);
 #endif
-    Detail::Draw(cache.rider,r,g,b);
+        Detail::DrawAuthored(authored.groups[3],r,g,b);
+    }
+    else
+    {
+        Detail::Cache const & cache=Detail::Geometry();
 #ifdef HAVE_GLEW
-    if (GLEW_VERSION_1_3) glMultiTexCoord1f(GL_TEXTURE3,0.f);
+        if(GLEW_VERSION_1_3) glMultiTexCoord1f(GL_TEXTURE1,0.f);
+#endif
+        Detail::Draw(cache.body,r,g,b);
+        for(int wheel=0;wheel<2;++wheel)
+        {
+            glPushMatrix();
+            glTranslatef(wheel ? FrontAxle : RearAxle,0,WheelRadius);
+            glRotatef(-(wheel ? frontAngle : rearAngle)*180.f/Detail::Pi,0,1,0);
+            Detail::Draw(cache.wheel,r,g,b);
+            glPopMatrix();
+        }
+#ifdef HAVE_GLEW
+        if (GLEW_VERSION_1_3) glMultiTexCoord1f(GL_TEXTURE3,1.f);
+#endif
+        Detail::Draw(cache.rider,r,g,b);
+    }
+#ifdef HAVE_GLEW
+    if (GLEW_VERSION_1_3) { glMultiTexCoord1f(GL_TEXTURE3,0.f);glMultiTexCoord1f(GL_TEXTURE1,0.f); }
 #endif
 
     glPopMatrix();

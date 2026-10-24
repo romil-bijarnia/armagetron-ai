@@ -1,0 +1,15 @@
+# Blender backups and local diagnostic records.
+*.blend[0-9]*
+*.log
+*.json
+!game-export.json
+/renders/
+/ribbon-*/
+/turn-review-*/
+
+# One-time migration/review scripts depend on ignored local capture inputs.
+/modernise.py
+/review.py
+/smooth.py
+/repair_finish.py
+/repair_colours.py

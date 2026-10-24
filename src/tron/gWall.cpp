@@ -1065,13 +1065,16 @@ void gNetPlayerWall::RenderList(bool list, gWallRenderMode renderMode ){
                 }
             }
 
-            if (sg_blacklightVisuals && !sg_MoviePack() && !sg_simpleTrail)
+            // SIMPLE_TRAIL describes the classic growth animation. It must
+            // not bypass the stable connection fitted to the Blacklight bike:
+            // the classic one-metre cutoff ends inside this longer model.
+            if (sg_blacklightVisuals && !sg_MoviePack())
             {
                 // Draw every settled segment at its physical coordinates. Only
                 // the segment containing the cut owns the short emitter curve;
                 // newer segments must not each pull their old corners at the bike.
                 REAL rear=.5f*sg_LightcycleScale()*
-                    (1.5f-gLightcycleModel::RearAxle+gLightcycleModel::WheelRadius+.08f);
+                    (1.5f-gLightcycleModel::RearEmitterX());
                 REAL cut=time*SEGLEN-gLightwallAttachment::Reach(rear);
                 if (te*SEGLEN<=cut)
                     RenderNormal(p1,p2,ta,te,r,g,b,a,renderMode);
@@ -1090,10 +1093,11 @@ void gNetPlayerWall::RenderList(bool list, gWallRenderMode renderMode ){
                     eCoord incoming=(p2-p1)*(1/std::max(REAL(1e-8),(p2-p1).Norm()));
                     REAL room=std::max(REAL(0),std::min(cut-dbegin,EndPos()-cut));
                     auto curve=gLightwallAttachment::Curve::Join({join.x,join.y},{incoming.x,incoming.y},
-                        {emitter.x,emitter.y},{forward.x,forward.y},room,.2572f*sg_LightcycleScale());
+                        {emitter.x,emitter.y},{forward.x,forward.y},room);
                     if (sr_hiddenWindow && sg_captureTrailDiagnostics && renderMode==gWallRenderMode_Quads
                         && cycle_->Player() && cycle_->Player()->IsHuman() && cycle_->Owner()==sn_myNetID)
                         std::cerr << "Capture attachment: t=" << se_GameTime() << " wall=" << this
+                                  << " legacySimple=" << sg_simpleTrail
                                   << " cut=" << cut << " cycleDistance=" << cycle_->GetDistance()
                                   << " start=" << join.x << ',' << join.y << " emitter=" << emitter.x << ',' << emitter.y
                                   << " first=" << curve.first.x << ',' << curve.first.y
@@ -1215,9 +1219,9 @@ static void sg_TrailFloorSpill(eCoord const & p1,eCoord const & p2,
     if (length<.00001f || height<=0)
         return;
     eCoord normal(-delta.y/length,delta.x/length);
-    REAL offsets[]={0,.18f,.55f,1.10f};
+    REAL offsets[]={0,.06f,.20f,.45f};
     REAL fade[]={1,.40f,.08f,0};
-    REAL strength=.18f;
+    REAL strength=.07f;
     bool const premultiplied=gLightwallMaterial::IsActive();
     if (!premultiplied)
     {
@@ -1257,7 +1261,7 @@ static void sg_AttachmentFloorSpill(gLightwallAttachment::Curve const & curve,
     bool const premultiplied=gLightwallMaterial::IsActive();
     RenderEnd();
     if (!premultiplied) glBlendFunc(GL_SRC_ALPHA,GL_ONE);
-    REAL const offsets[]={0,.18f,.55f,1.10f},fade[]={1,.40f,.08f,0};
+    REAL const offsets[]={0,.06f,.20f,.45f},fade[]={1,.40f,.08f,0};
     // Shared edge vertices form a single continuous light footprint. Separate
     // per-segment rectangles overlapped into a bright fan during sharp turns.
     for (int side=-1;side<=1;side+=2)
@@ -1281,7 +1285,7 @@ static void sg_AttachmentFloorSpill(gLightwallAttachment::Curve const & curve,
                 for (int edge=band;edge<=band+1;++edge)
                 {
                     REAL offset=side*offsets[edge]*width;
-                    glColor4f(r,g,b,alpha*(1-.18f*t*t)*.18f*fade[edge]);
+                    glColor4f(r,g,b,alpha*(1-.18f*t*t)*.07f*fade[edge]);
                     glVertex3f(point.x+normal.x*offset,point.y+normal.y*offset,.006f);
                 }
             }
@@ -1322,7 +1326,7 @@ void gNetPlayerWall::RenderNormal(const eCoord &p1,const eCoord &p2,REAL ta,REAL
         }
     }
     // Visual sheet height only; the two-dimensional collision wall is unchanged.
-    REAL h=energy ? 1.22f : 1.f;
+    REAL h=energy ? sg_LightcycleScale()*gLightcycleModel::ModelWheelRadius(0) : 1.f;
 
 
     if (hfrac>0){
@@ -1437,10 +1441,11 @@ void gNetPlayerWall::RenderBegin(const eCoord &p1,const eCoord &pp2,REAL ta,REAL
         //a*=alpha;
     }
 
-    REAL h=energy ? 1.22f : 1.f;
+    REAL h=energy ? sg_LightcycleScale()*gLightcycleModel::ModelWheelRadius(0) : 1.f;
 
     eCoord poseDirection=cycle_->dir;
     REAL poseSkew=cycle_->skew;
+    REAL collarBank=0;
     REAL attachmentDistance=gCYCLE_LEN;
     if (energy)
     {
@@ -1448,12 +1453,15 @@ void gNetPlayerWall::RenderBegin(const eCoord &p1,const eCoord &pp2,REAL ta,REAL
         // turn now so both passes attach to the rendered pose, even mid-turn.
         cycle_->UpdateRenderPose();
         poseDirection=eCoord(std::cos(cycle_->renderMotion_.Yaw()),std::sin(cycle_->renderMotion_.Yaw()));
-        poseSkew=std::tan(cycle_->renderMotion_.Bank());
+        // A lightwall stays upright while the motorcycle banks. Inheriting its
+        // roll dragged the entire sheet's upper edge sideways during fast turns.
+        poseSkew=0;
+        collarBank=cycle_->renderMotion_.Bank();
         // gCycle draws the authored model at half scale with a -1.5 X origin.
-        // The rear fender extends .08 beyond the tyre. This is a visual anchor;
+        // Use the exported rear profile. This is a visual anchor;
         // wall timing, distance coordinates and collision geometry stay intact.
         attachmentDistance=.5f*sg_LightcycleScale()*
-            (1.5f-gLightcycleModel::RearAxle+gLightcycleModel::WheelRadius+.08f);
+            (1.5f-gLightcycleModel::RearEmitterX());
     }
     eCoord ppos=cycle_->PredictPosition() - poseDirection*attachmentDistance;
     if (energy)
@@ -1472,6 +1480,75 @@ void gNetPlayerWall::RenderBegin(const eCoord &p1,const eCoord &pp2,REAL ta,REAL
         if (energy) blend/=xfunc(1);
         return (p1+(p2-p1)*frag)*(1-blend)+ppos*blend;
     };
+    int const segs=energy ? 18 : 5;
+    REAL const seginv=1.f/segs;
+    REAL const modelScale=.5f*sg_LightcycleScale();
+    std::array<gLightwallAttachment::Point,19> path;
+    for(int i=0;i<=18;++i)
+    {
+        eCoord point=pointAt(REAL(i)/18);
+        path[i]={point.x,point.y};
+    }
+    auto columns=gLightwallAttachment::UprightSheet(path,double(h*hfrac),double(.75f*modelScale));
+    bool const fittedProfile=energy && gLightcycleModel::AuthoredAvailable();
+    auto heightAt=[&](int i)
+    {
+        return energy ? REAL(columns[i].height) : h*hfrac*hfunc(ra+i*seginv*(re-ra));
+    };
+    std::array<gLightwallAttachment::Curve,17> fittedRows;
+    if (fittedProfile && attachment)
+    {
+        for (int row=0;row<=16;++row)
+        {
+            REAL height=h*hfrac*row/16.f;
+            REAL fit=columns.back().attachment;
+            REAL profileHeight=height/(modelScale*std::cos(collarBank*fit));
+            REAL shift=modelScale*(gLightcycleModel::RearProfileX(profileHeight)-gLightcycleModel::RearEmitterX());
+            fittedRows[row]=gLightwallAttachment::ProfileCurve(*attachment,
+                {poseDirection.x,poseDirection.y},height,shift,std::tan(collarBank),fit);
+        }
+    }
+    auto vertexAt=[&](int i,REAL vertical)
+    {
+        REAL height=heightAt(i)*vertical;
+        if(energy)
+        {
+            if (fittedProfile && attachment)
+            {
+                int row=std::max(0,std::min(16,int(vertical*16+.5f)));
+                auto point=fittedRows[row].Sample(i*seginv);
+                return gLightwallAttachment::Vertex{point.x,point.y,height};
+            }
+            REAL profileHeight=height/(modelScale*std::cos(collarBank*columns[i].attachment));
+            REAL shift=fittedProfile ? modelScale*(gLightcycleModel::RearProfileX(profileHeight)-gLightcycleModel::RearEmitterX()) : 0;
+            return gLightwallAttachment::FittedVertex(columns[i],{poseDirection.x,poseDirection.y},vertical,shift,std::tan(collarBank));
+        }
+        REAL frag=i*seginv,rat=ra+frag*(re-ra);
+        eCoord point=pointAt(frag);
+        return gLightwallAttachment::Vertex{point.x+height*poseSkew*sfunc(rat)*poseDirection.y,
+            point.y-height*poseSkew*sfunc(rat)*poseDirection.x,height};
+    };
+
+    // Capture the vertices actually submitted by the game, once per frame.
+    // This diagnoses motion, rather than treating a still image as a turn test.
+    if (sr_hiddenWindow && sg_captureTrailDiagnostics && energy && attachment
+        && mode==gWallRenderMode_Quads && cycle_->Alive()
+        && cycle_->Player() && cycle_->Player()->IsHuman() && cycle_->Owner()==sn_myNetID)
+    {
+        static REAL reportedTime=-100;
+        if (reportedTime!=se_GameTime())
+        {
+            reportedTime=se_GameTime();
+            std::cerr << "Capture ribbon columns: t=" << reportedTime << " height=" << h*hfrac << " vertices=";
+            for (int i=0;i<=segs;++i)
+            {
+                auto bottom=vertexAt(i,0),top=vertexAt(i,1);
+                std::cerr << (i ? ";" : "") << bottom.x << ',' << bottom.y << ',' << bottom.z
+                          << ',' << top.x << ',' << top.y << ',' << top.z;
+            }
+            std::cerr << '\n';
+        }
+    }
 
     if( !good(ppos.x) || !good(ppos.y) ||
         !good(p1.x)   || !good(p1.y) ||
@@ -1492,8 +1569,6 @@ void gNetPlayerWall::RenderBegin(const eCoord &p1,const eCoord &pp2,REAL ta,REAL
     }
 
 
-    int const segs=energy ? 18 : 5;
-    REAL const seginv=1.f/segs;
     if ( hfrac>0 ){
         if( mode & gWallRenderMode_Lines && sg_renderBeginLines )
         {
@@ -1505,13 +1580,10 @@ void gNetPlayerWall::RenderBegin(const eCoord &p1,const eCoord &pp2,REAL ta,REAL
             for (int i=0;i<=segs;i++){
                 REAL frag=i*seginv;
                 REAL rat=ra+frag*(re-ra);
-                eCoord point=pointAt(frag);
-
-                REAL H=h*hfrac*hfunc(rat,energy);
+                REAL H=heightAt(i);
+                auto point=vertexAt(i,1);
                 upperlinecolor(r,g,b,a*(energy ? .82f+.18f*afunc(rat) : afunc(rat)),H);
-                glVertex3f(point.x+H*poseSkew*sfunc(rat)*poseDirection.y,
-                           point.y-H*poseSkew*sfunc(rat)*poseDirection.x,
-                           H);//+se_cameraZ*.005);
+                glVertex3f(point.x,point.y,point.z);
             }
             if (energy)
             {
@@ -1521,8 +1593,8 @@ void gNetPlayerWall::RenderBegin(const eCoord &p1,const eCoord &pp2,REAL ta,REAL
                 {
                     REAL frag=i*seginv;
                     REAL rat=ra+frag*(re-ra);
-                    eCoord point=pointAt(frag);
-                    upperlinecolor(r,g,b,a*.82f*(.82f+.18f*afunc(rat)),h*hfrac*hfunc(rat,energy));
+                    auto point=vertexAt(i,0);
+                    upperlinecolor(r,g,b,a*.82f*(.82f+.18f*afunc(rat)),heightAt(i));
                     glVertex3f(point.x,point.y,.012f*hfrac);
                 }
             }
@@ -1531,13 +1603,16 @@ void gNetPlayerWall::RenderBegin(const eCoord &p1,const eCoord &pp2,REAL ta,REAL
 
     if( mode & gWallRenderMode_Quads && sg_renderBeginQuads )
     {
+        int const rows=fittedProfile ? 16 : 1;
+        for(int row=0;row<rows;++row)
+        {
         BeginQuadStrip();
-
         for (int i=0;i<=segs;i++){
             REAL frag=i*seginv;
             REAL rat=ra+frag*(re-ra);
-            eCoord point=pointAt(frag);
-            REAL H=h*hfrac*hfunc(rat,energy);
+            REAL H=heightAt(i);
+            REAL low=REAL(row)/rows,high=REAL(row+1)/rows;
+            auto lower=vertexAt(i,low),upper=vertexAt(i,high);
 
             // bottom
             REAL alpha = a*(energy ? .82f+.18f*afunc(rat) : afunc(rat));
@@ -1547,9 +1622,9 @@ void gNetPlayerWall::RenderBegin(const eCoord &p1,const eCoord &pp2,REAL ta,REAL
                 glColor4f(r,g,b,alpha);
             else
                 glColor4f(r+cfunc(rat),g+cfunc(rat),b+cfunc(rat),alpha);
-            if (energy && gLightwallMaterial::IsActive()) glTexCoord4f(ta+(te-ta)*frag,1,0,H);
-            else glTexCoord2f(ta+(te-ta)*frag,hfrac);
-            glVertex3f(point.x,point.y,0);
+            if (energy && gLightwallMaterial::IsActive()) glTexCoord4f(ta+(te-ta)*frag,1-low,0,H);
+            else glTexCoord2f(ta+(te-ta)*frag,hfrac*(1-low));
+            glVertex3f(lower.x,lower.y,lower.z);
 
             // top
             //glTexCoord2f(ta+(te-ta)*frag,hfrac*(1-hfunc(rat)));
@@ -1557,16 +1632,16 @@ void gNetPlayerWall::RenderBegin(const eCoord &p1,const eCoord &pp2,REAL ta,REAL
                 glColor4f(r,g,b,alpha);
             else
                 glColor4f(r+cfunc(rat),g+cfunc(rat),b+cfunc(rat),alpha);
-            if (energy && gLightwallMaterial::IsActive()) glTexCoord4f(ta+(te-ta)*frag,0,0,H);
-            else glTexCoord2f(ta+(te-ta)*frag,0);
-            glVertex3f(point.x+H*poseSkew*sfunc(rat)*poseDirection.y,
-                       point.y-H*poseSkew*sfunc(rat)*poseDirection.x,
-                       H);
+            if (energy && gLightwallMaterial::IsActive()) glTexCoord4f(ta+(te-ta)*frag,1-high,0,H);
+            else glTexCoord2f(ta+(te-ta)*frag,hfrac*(1-high));
+            glVertex3f(upper.x,upper.y,upper.z);
+        }
+        RenderEnd();
         }
     }
 
     if (attachment && hfrac>0 && (mode & gWallRenderMode_Quads) && sg_renderBeginQuads)
-        sg_AttachmentFloorSpill(*attachment,r,g,b,a,hfrac);
+        sg_AttachmentFloorSpill(fittedProfile ? fittedRows[0] : *attachment,r,g,b,a*.25f,hfrac);
     else if (energy && hfrac>0 && (mode & gWallRenderMode_Quads) && sg_renderBeginQuads)
     {
         RenderEnd();

@@ -1,5 +1,19 @@
 # Graphics checkpoints
 
+The current version was accepted in local playtesting on 24 October 2026. See the
+[accepted checkpoint, current previews and validation](accepted-2026-10-24.md).
+
+The current editable Blender source is the user-supplied LiNk2.0 asset in
+[`art/lightcycle-authored/lightcycle.blend`](../../art/lightcycle-authored/lightcycle.blend),
+with [source credits](../../art/lightcycle-authored/CREDITS.md). Its original geometry,
+UV coordinates and rider pose are preserved beneath reversible edits. The game
+now loads its evaluated 51,744-triangle export, including the rider's repaired
+optical mask, disc clearance, black finish and flush rear light stripe. See the
+[asset workflow and verification](../../art/lightcycle-authored/README.md).
+Earlier procedural studies remain local and are not part of the maintained asset.
+The two older one-way Blender exports were removed during the 23 October cleanup;
+the native source mesh and the checkpoint captures below remain available.
+
 The [23 October asset rebuild](asset-rebuild-2026-10-23.md) replaces the open
 chassis with a continuous shell, revises the wheels and rider, and tests rapid
 turns through the real local keyboard-input path. It supersedes the earlier
@@ -20,8 +34,8 @@ display a fork-network badge for the GitLab upstream.
 - One flat playing field and the existing gameplay camera height and field of view.
 - Sculpted bikes with dark coated fairings, differentiated metal and suit finishes,
   matching bike/trail emission, and white front lamps.
-- Animated translucent walls with optical folds, scene refraction, reflected
-  detail and filtering for distant views.
+- Animated translucent ribbons with soft flowing highlights, coloured interiors,
+  narrow hot edges and filtering for distant views.
 - A lower stadium profile, seating detail, floor circuits and filtered reflections.
 - Staged bike construction, directional shell fragments and curved wheel fragments.
 - Continuous visual yaw and banking through turns, with a bounded positional
@@ -33,16 +47,16 @@ display a fork-network badge for the GitLab upstream.
 
 ## Reference artifacts
 
-These are actual native-renderer captures and a Blender export of the same source
-mesh. They are not movie frames or generated substitutes for the game.
+The older native captures below document the procedural checkpoint. Current
+authored-model captures and installation hashes are recorded in
+[the current checkpoint metadata](accepted-2026-10-24.json).
 
 | Artifact | Purpose |
 | --- | --- |
 | [Amber bike and trail](assets/amber-native.png) | Saturated warm emission and transparent wall interior |
 | [Blue bike and trail](assets/blue-native.png) | Blue rim/suit emission, without forced-white wheel cores |
 | [Blender rendering](assets/amber-blender.png) | Bike material and geometry inspection |
-| [Editable Blender scene](assets/lightcycle.blend) | Preserved 21 October bike and rider, 160456 triangles |
-| [Rebuilt Blender scene](assets/film-lightcycle.blend) | 23 October authored bike and rider, 145288 triangles |
+| [Current authored Blender model](../../art/lightcycle-authored/lightcycle.blend) | LiNk2.0 cycle and rider; the saved source for the game export |
 | [Capture metadata](baseline.json) | Source hashes, colour settings and rendering context |
 
 The native colour captures use an isolated inspection camera. Their settings are
@@ -76,7 +90,8 @@ close-up liquid-glass effect, colour consistency and collision behaviour.
    the actual C++ motion, camera and impact checks on Linux and macOS, plus syntax
    checks for the build/capture/export utilities.
 3. Capture before and after from the same renderer, resolution, colour, camera
-   and scenario. Review close and distant walls, rapid turns, construction,
+   and scenario. Use `--profile-config` to copy saved user settings into the
+   isolated capture when reproducing a profile-specific issue. Review close and distant walls, rapid turns, construction,
    impacts, reflections and blue/amber/cyan emission.
 4. Run a frame-time check without framebuffer readback or another render job.
    Record other active GPU workloads. GPU power is system-wide; use per-process
@@ -84,13 +99,15 @@ close-up liquid-glass effect, colour consistency and collision behaviour.
 5. Put the evidence and remaining defects in the PR. Tag a reviewed checkpoint
    before replacing it, and do not move an existing checkpoint tag.
 
-Automated logic checks do not establish visual quality or eliminate the open
-trail defect. Native in-game comparison remains a required review step.
+Automated checks complement native visual review. The 24 October checkpoint
+records the current motion/profile corrections and the accepted appearance.
 
 Run the focused checks locally:
 
 ```bash
 ai/.venv/bin/python -m pytest \
+  ai/tests/test_lightcycle_asset.py \
+  ai/tests/test_lightwall_material.py \
   ai/tests/test_lightcycle_motion.py \
   ai/tests/test_lightwall_attachment.py \
   ai/tests/test_camera_motion.py \
@@ -110,7 +127,7 @@ ai/.venv/bin/python desktop/os-x/capture_preview.py \
   --output ai/runtime/graphics-preview/review \
   --pixels 1920x1080 --seconds 25 --capture-at 15 --capture-at 22 \
   --set START_CAM_1=1 --set START_FOV_1=90 \
-  --set INCLUDE=blacklight-handling.cfg --set MAX_FPS=60
+  --set INCLUDE=blacklight-handling.cfg --set MAX_FPS=120
 ```
 
 To restore a checkpoint, first commit or otherwise save any current work, then

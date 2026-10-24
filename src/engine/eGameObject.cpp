@@ -33,7 +33,6 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 #include "eWall.h"
 #include "tConsole.h"
 #include "rScreen.h"
-#include "rSceneSample.h"
 
 #include "eSound.h"
 #include "eSoundMixer.h"
@@ -928,9 +927,6 @@ void eGameObject::RenderAll(eGrid *grid, const eCamera *cam){
     //if (!sr_glOut)
     //    return;
     
-#ifndef DEDICATED
-    rSceneSample::BeginView();
-#endif
     // Opaque subparts of otherwise translucent objects must precede all normal
     // renders. Each view, including its mirror pass, gets this phase once.
     if (sr_glOut)
@@ -942,11 +938,10 @@ void eGameObject::RenderAll(eGrid *grid, const eCamera *cam){
     extern bool sg_MoviePack();
     if (sr_glOut && sg_blacklightVisuals && !sg_MoviePack())
     {
-        // All opaque bikes must exist in the optical source on the very first
-        // frame, not only after the old renderer's next-frame list reordering.
+        // Opaque bikes must precede the translucent ribbons from the first
+        // frame, rather than waiting for the old renderer to reorder its list.
         for (int phase=0;phase<2;++phase)
         {
-            if (phase) rSceneSample::Capture();
             for (int i=grid->gameObjects.Len()-1;i>=0;--i)
             {
                 eGameObject * object=grid->gameObjects(i);

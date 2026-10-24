@@ -1,0 +1,58 @@
+{
+  "checkpoint_date": "2026-10-24",
+  "visual_review": "Accepted by Romil in local playtesting on 24 October 2026.",
+  "asset_source": "art/lightcycle-authored/lightcycle.blend",
+  "asset_credit": "LiNk2.0; base human credited to masterxeon1001; CC BY 3.0",
+  "source_blend_sha256": "de4eb2389ee7f6901393a9a1008a2f07d6d3f7aaad7426a9c177fa51234a397e",
+  "mesh_sha256": "f30a1256d2b721accc55d82294feef0b93867d4e822c5d80fa644cdd21996b84",
+  "mask_sha256": "38f2bbaa5e34fd85bfa95038991d9d5e2f36e5f0c59edb45b6dff1374b144ad3",
+  "triangles": 51744,
+  "installed_executable_sha256": "1e6d9aabc40bf3b7dd127745759b0034969091e04f37d892cd0cd2d576ae1cc7",
+  "full_resolution": [
+    3024,
+    1964
+  ],
+  "max_fps": 120,
+  "msaa": 4,
+  "material_check": {
+    "cases": 512,
+    "colour_bound_failures": 0,
+    "worst_premultiplied_excess": 0,
+    "worst_overlap_chroma_drift": 0.0306638,
+    "animated_pairs": 256,
+    "gl_error": 0
+  },
+  "turn_check": {
+    "centre_frames": 257,
+    "centre_folded_frames": 0,
+    "measured_frames": 257,
+    "measured_columns": 4883,
+    "edge_folded_frames": {
+      "bottom": 0,
+      "top": 0
+    },
+    "worst_reverse_step_m": {
+      "bottom": 0.0,
+      "top": 0.0
+    },
+    "top_z_range": [
+      1.06562,
+      1.06562
+    ],
+    "bottom_z_range": [
+      0.0,
+      0.0
+    ],
+    "turns": {
+      "input_events": 68,
+      "accepted_turns": 46,
+      "note": "Input events are not accepted turns; cooldown and death can reject keys."
+    },
+    "precision_note": "World vertex logs have six significant digits; edge reverse steps below 4 mm are treated as coordinate rounding."
+  },
+  "native_build": true,
+  "dedicated_build": true,
+  "focused_local_tests": "6 passed on a rendering-capable Mac",
+  "review_preview": "assets/current-ribbons.mp4",
+  "limits": "Native captures are isolated local matches with explicit camera/input overrides. HDR film reference is not bundled. Automated checks supplement visual review."
+}

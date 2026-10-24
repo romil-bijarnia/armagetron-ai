@@ -28,7 +28,7 @@ rounded circuit inlays. Animated trail glass retains refraction and optical
 folds, with quieter borders and floor spill and more colour in its distant face.
 Bloom intensity decreases from 1.15 to 0.95.
 
-The [editable Blender asset](assets/film-lightcycle.blend) contains the actual
+The now-retired Blender export contained the actual
 native geometry: 145288 triangles with linked wheel meshes and ten material
 groups. Export validation found finite positions and normals, with maximum
 normal-length error below 0.0000002. The source of truth remains
@@ -115,7 +115,8 @@ partial game window, the mean was 122.8 FPS for the preceding installed build an
 8.5–12.6 ms after. This is one short pair, not deterministic fight replay or a
 repeatable performance improvement. Other desktop work remains uncontrolled.
 
-Working captures, videos, source/export hashes, logs and test evidence are under
-`ai/runtime/graphics-preview/gameplay-redesign-2026-10-23/`. The saved user config
+Temporary working captures and exports were removed in the later 23 October
+cleanup; selected captures and metadata remain in this documentation directory.
+The saved user config
 was rewritten during a concurrent game session; installation checks use a fresh
 snapshot and preserve that version rather than restoring an older snapshot.
