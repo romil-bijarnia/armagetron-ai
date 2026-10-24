@@ -63,6 +63,8 @@ extern bool sg_moviepackInstalled; // do we have the mp on disk?
 extern bool sg_moviepackUse;       // do we use it?
 
 extern bool sg_blacklightVisuals;  // clean arena materials; rendering only
+void sg_ApplyGraphicsStyle();      // apply the saved choice after startup presets
+void sg_SelectGraphicsStyle(int const & style); // 0 = Classic, 1 = Legacy
 REAL sg_LightcycleScale();         // drawn bike size against the classic one; 1 outside the blacklight look
 
 bool sg_MoviePack();

@@ -2369,6 +2369,12 @@ screen_mode_menu		Screen Mode
 screen_mode_menu_help		Screen resolution and stuff.
 
 preferences_menu		Preferences
+graphics_style_text                     Graphics Style
+graphics_style_help                     Switch the bike, arena and light ribbons. The choice is saved; resolution and frame rate stay unchanged.
+graphics_style_classic_text             Classic
+graphics_style_classic_help             Original Armagetron bikes, grid and trails.
+graphics_style_legacy_text              TRON Legacy
+graphics_style_legacy_help              Sculpted black bikes, luminous strips and translucent light ribbons.
 preferences_menu_help		Options that depend more on your personal preferences than on performance issues.
 
 hud_menu                    HUD Options
