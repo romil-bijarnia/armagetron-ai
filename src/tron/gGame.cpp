@@ -132,6 +132,15 @@ static gTutorialBase * sg_tutorial = NULL;
 //#define CONNECTION_STRESS
 #endif
 
+namespace
+{
+void (*sg_StartupPlayerMenu)();
+}
+void sg_RegisterStartupPlayerMenu(AA_VOIDFUNC* pFunc)
+{
+    sg_StartupPlayerMenu = pFunc;
+}
+
 tCONFIG_ENUM( gGameType );
 tCONFIG_ENUM( gFinishType );
 
@@ -2308,8 +2317,6 @@ void sg_DisplayVersionInfo() {
     sg_ClientFullscreenMessage("$version_info_title", versionInfo, 1000);
 }
 
-void sg_StartupPlayerMenu();
-
 // makes a path absolute
 static std::string sg_AbsolutifyPath( tString const & in )
 {
@@ -2640,10 +2647,12 @@ void MainMenu(bool ingame){
 
     //  misc.SetCenter(.25);
 
-    uMenuItemFunction first_setup
-    (&misc,"$misc_initial_menu_title",
-     "$misc_initial_menu_help",
-     &sg_StartupPlayerMenu);
+    if (sg_StartupPlayerMenu)
+    {
+        uMenuItemFunction first_setup(&misc, "$misc_initial_menu_title",
+                                      "$misc_initial_menu_help",
+                                      sg_StartupPlayerMenu);
+    }
 
     uMenuItemFunction language
     (&misc,"$language_menu_title",

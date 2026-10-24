@@ -48,6 +48,7 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 #include "tRecorder.h"
 #include "tCommandLine.h"
 #include "tToDo.h"
+#include "eSound.h"
 #include "eAdvWall.h"
 #include "eGameObject.h"
 #include "uMenu.h"
@@ -61,6 +62,7 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 #include <fstream>
 #include <bitset>
 #include "tCrypto.h"
+#include "tDefer.h"
 
 #include "nServerInfo.h"
 #include "nSocket.h"
@@ -697,6 +699,16 @@ struct SDLSoundCleanup
 int main(int argc,char **argv){
     //std::cout << "enter\n";
     //  net_test();
+
+    // inject functions into lower levels
+    se_RegisterMoviePackFunc(&sg_MoviePack);
+    se_RegisterLegacyGraphicsFunc(&sg_LegacyGraphics);
+    sg_RegisterStartupPlayerMenu(&sg_StartupPlayerMenu);
+
+    // clean up sound data
+    auto const soundCleanup = tDefer(
+        []()
+        { eLegacyWavData::UnloadAll(); });
 
     bool dedicatedServer = false;
 

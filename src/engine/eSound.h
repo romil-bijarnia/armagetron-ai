@@ -44,10 +44,10 @@ void se_SoundMenu();
 //! locks sound while in existence.
 class eSoundLocker
 {
-    eSoundLocker( eSoundLocker const & );
+    boost::lock_guard<boost::recursive_mutex> lock_;
+
 public:
     eSoundLocker();
-    ~eSoundLocker();
 };
 
 class eAudioPos{

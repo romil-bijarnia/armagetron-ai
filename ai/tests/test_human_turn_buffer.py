@@ -2,6 +2,7 @@
 
 import shutil
 import subprocess
+import re
 from pathlib import Path
 
 import pytest
@@ -50,8 +51,10 @@ def human_input_probe(tmp_path_factory):
                    turn.rindex("    return false;")]
     # The selected tail contains the closing brace of DoTurn's else block.
     enqueue = enqueue[:enqueue.rfind("    }")]
-    dequeue_start = movement.index("    if ( !pendingTurns.empty())", movement.index(
-        "// simulate exactly to the time of the next turn if it is in reach"))
+    anchor = movement.index("// simulate exactly to the time of the next turn if it is in reach")
+    guard = re.search(r"(?m)^[ \t]*if\s*\(\s*!pendingTurns\.empty\(\)", movement[anchor:])
+    assert guard, "queued-turn guard missing from the production timestep"
+    dequeue_start = anchor + guard.start()
     dequeue_end = movement.index("    // do the rest of the timestep", dequeue_start)
     dequeue = movement[dequeue_start:dequeue_end]
 
@@ -102,6 +105,7 @@ public:
     static uActionPlayer s_brake;
     Joystick *joystick_=nullptr;
     bool alive=true;
+    bool arcActive_=false;
     unsigned short braking=0;
     REAL lastTime=0, nextTurnTime=0;
     int turnCalls=0, destinations=0, accelerationChanges=0, syncRequests=0;
@@ -177,6 +181,7 @@ public:
     "default-dispatch", "burst", "opposite", "cooldown-release", "braking",
     "bot-isolation", "classic", "existing-auto-drive", "camera-start-gates",
     "per-cycle-lifetime", "configured-cooldown",
+    "active-arc-queue",
 ])
 def test_real_human_dispatch_and_buffer_policy(human_input_probe, scenario):
     subprocess.run([str(human_input_probe), scenario], check=True, timeout=5)

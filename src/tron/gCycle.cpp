@@ -2080,12 +2080,12 @@ private:
             cycle_->displayList_.RenderEdges(camera,cycle_);
     }
 
-    virtual void Render( eCamera const * camera )
+    void Render(eCamera const* camera) override
     {
         cycle_->displayList_.RenderAll( camera, cycle_ );
     }
 
-    virtual bool Timestep( REAL currentTime )
+    bool Timestep(REAL currentTime) override
     {
         if ( !cycle_ )
         {
@@ -4342,7 +4342,8 @@ void gCycleWallsDisplayListManager::RenderAll( eCamera const * camera, gCycle * 
         while (run)
         {
             gNetPlayerWall * next = run->Next();
-            run->RenderList(true,gNetPlayerWall::gWallRenderMode_Lines);
+            if (run->BegPos() + EPS < run->EndPos())
+                run->RenderList(true, gNetPlayerWall::gWallRenderMode_Lines);
             run = next;
         }
 
@@ -4375,7 +4376,8 @@ void gCycleWallsDisplayListManager::RenderAll( eCamera const * camera, gCycle * 
     while( run )
     {
         gNetPlayerWall * next = run->Next();
-        run->RenderList( true, gNetPlayerWall::gWallRenderMode_Quads );
+        if (run->BegPos() + EPS < run->EndPos())
+            run->RenderList(true, gNetPlayerWall::gWallRenderMode_Quads);
         run = next;
     }
 

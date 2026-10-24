@@ -63,6 +63,8 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__)
     installed_client = Path("/Applications/Armagetron Advanced.app/Contents/MacOS/armagetronad")
     ap.add_argument("--client", type=Path, default=installed_client)
+    ap.add_argument("--data-dir", type=Path, help="use an explicitly staged client data directory")
+    ap.add_argument("--config-dir", type=Path, help="use an explicitly staged client configuration directory")
     ap.add_argument("--output", type=Path, required=True)
     ap.add_argument("--classic", action="store_true")
     ap.add_argument("--load-only", action="store_true", help="render without GPU readback, for concurrent latency checks")
@@ -202,6 +204,14 @@ TEXT_OUT 1
         bundle = installed_client.parent.parent
     resources = bundle / "Resources/armagetronad"
     configdir = bundle / "etc/armagetronad"
+    if args.data_dir:
+        resources = args.data_dir.resolve()
+        if not resources.is_dir():
+            ap.error("--data-dir must be an existing directory")
+    if args.config_dir:
+        configdir = args.config_dir.resolve()
+        if not configdir.is_dir():
+            ap.error("--config-dir must be an existing directory")
     processes = []
     dimensions = []
     gl_limits = {}

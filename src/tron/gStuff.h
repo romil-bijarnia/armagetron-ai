@@ -65,6 +65,7 @@ extern bool sg_moviepackUse;       // do we use it?
 
 REAL sg_LightcycleScale();         // drawn bike size against the classic one; 1 outside the blacklight look
 
+bool sg_LegacyGraphics();
 bool sg_MoviePack();
 
 #ifdef POWERPAK_DEB

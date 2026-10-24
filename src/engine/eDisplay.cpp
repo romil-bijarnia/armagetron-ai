@@ -36,8 +36,8 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 #ifndef DEDICATED
 static REAL sr_floorMirror_strength=.1;
 static tSettingItem<REAL> f_m("FLOOR_MIRROR_INT",sr_floorMirror_strength);
-static REAL sr_floorReflectionSoftness=0;
-static tSettingItem<REAL> f_soft("FLOOR_REFLECTION_SOFTNESS",sr_floorReflectionSoftness);
+static REAL sr_floorReflectionSoftness = 0;
+static tSettingItem<REAL> f_soft("FLOOR_REFLECTION_SOFTNESS", sr_floorReflectionSoftness);
 
 #include "tEventQueue.h"
 #include "uInputQueue.h"
@@ -75,9 +75,6 @@ static tSettingItem<REAL> sec_lowerSkyHeight("LOWER_SKY_HEIGHT",se_lowerSkyHeigh
 
 #ifndef DEDICATED
 
-extern bool sg_MoviePack();
-extern bool sg_blacklightVisuals;
-
 #ifdef HAVE_GLEW
 namespace
 {
@@ -90,32 +87,33 @@ bool se_floorReflectionPriorErrorReported = false;
 
 void se_UnloadFloorReflection()
 {
-    if ( se_floorReflectionProgram )
-        glDeleteProgram( se_floorReflectionProgram );
+    if (se_floorReflectionProgram)
+        glDeleteProgram(se_floorReflectionProgram);
     se_floorReflectionProgram = 0;
     se_floorReflectionFailed = false;
-    if (se_floorReflectionTexture) glDeleteTextures(1,&se_floorReflectionTexture);
-    se_floorReflectionTexture=0;
-    se_floorReflectionWidth=se_floorReflectionHeight=0;
-    se_floorReflectionCopyFailed=false;
-    se_floorReflectionPriorErrorReported=false;
+    if (se_floorReflectionTexture)
+        glDeleteTextures(1, &se_floorReflectionTexture);
+    se_floorReflectionTexture = 0;
+    se_floorReflectionWidth = se_floorReflectionHeight = 0;
+    se_floorReflectionCopyFailed = false;
+    se_floorReflectionPriorErrorReported = false;
 }
 
-static rCallbackBeforeScreenModeChange se_floorReflectionUnload( &se_UnloadFloorReflection );
+static rCallbackBeforeScreenModeChange se_floorReflectionUnload(&se_UnloadFloorReflection);
 
-GLuint se_CompileFloorShader( GLenum type, char const * source )
+GLuint se_CompileFloorShader(GLenum type, char const* source)
 {
-    GLuint shader = glCreateShader( type );
-    glShaderSource( shader, 1, &source, NULL );
-    glCompileShader( shader );
+    GLuint shader = glCreateShader(type);
+    glShaderSource(shader, 1, &source, NULL);
+    glCompileShader(shader);
     GLint compiled = GL_FALSE;
-    glGetShaderiv( shader, GL_COMPILE_STATUS, &compiled );
-    if ( !compiled )
+    glGetShaderiv(shader, GL_COMPILE_STATUS, &compiled);
+    if (!compiled)
     {
-        char message[1024]="";
-        glGetShaderInfoLog(shader,sizeof(message)-1,NULL,message);
+        char message[1024] = "";
+        glGetShaderInfoLog(shader, sizeof(message) - 1, NULL, message);
         con << "Floor material: " << message << "\n";
-        glDeleteShader( shader );
+        glDeleteShader(shader);
         return 0;
     }
     return shader;
@@ -123,11 +121,11 @@ GLuint se_CompileFloorShader( GLenum type, char const * source )
 
 bool se_PrepareFloorReflection()
 {
-    if ( se_floorReflectionFailed )
+    if (se_floorReflectionFailed)
         return false;
-    if ( se_floorReflectionProgram )
+    if (se_floorReflectionProgram)
         return true;
-    char const * vertexSource =
+    char const* vertexSource =
         "#version 120\n"
         "varying vec4 eyePosition;\n"
         "varying vec3 floorNormal;\n"
@@ -139,7 +137,7 @@ bool se_PrepareFloorReflection()
         "    gl_FrontColor = gl_Color;\n"
         "    gl_BackColor = gl_Color;\n"
         "}\n";
-    char const * fragmentSource =
+    char const* fragmentSource =
         "#version 120\n"
         "uniform sampler2D floorTexture;\n"
         "uniform sampler2D reflectedScene;\n"
@@ -247,28 +245,30 @@ bool se_PrepareFloorReflection()
         "        gl_FragColor = vec4(surface * opacity + emission, opacity);\n"
         "    }\n"
         "}\n";
-    GLuint vertex = se_CompileFloorShader( GL_VERTEX_SHADER, vertexSource );
-    GLuint fragment = se_CompileFloorShader( GL_FRAGMENT_SHADER, fragmentSource );
-    if ( vertex && fragment )
+    GLuint vertex = se_CompileFloorShader(GL_VERTEX_SHADER, vertexSource);
+    GLuint fragment = se_CompileFloorShader(GL_FRAGMENT_SHADER, fragmentSource);
+    if (vertex && fragment)
     {
         se_floorReflectionProgram = glCreateProgram();
-        glAttachShader( se_floorReflectionProgram, vertex );
-        glAttachShader( se_floorReflectionProgram, fragment );
-        glLinkProgram( se_floorReflectionProgram );
+        glAttachShader(se_floorReflectionProgram, vertex);
+        glAttachShader(se_floorReflectionProgram, fragment);
+        glLinkProgram(se_floorReflectionProgram);
         GLint linked = GL_FALSE;
-        glGetProgramiv( se_floorReflectionProgram, GL_LINK_STATUS, &linked );
-        if ( !linked )
+        glGetProgramiv(se_floorReflectionProgram, GL_LINK_STATUS, &linked);
+        if (!linked)
         {
-            char message[1024]="";
-            glGetProgramInfoLog(se_floorReflectionProgram,sizeof(message)-1,NULL,message);
+            char message[1024] = "";
+            glGetProgramInfoLog(se_floorReflectionProgram, sizeof(message) - 1, NULL, message);
             con << "Floor material link: " << message << "\n";
-            glDeleteProgram( se_floorReflectionProgram );
+            glDeleteProgram(se_floorReflectionProgram);
             se_floorReflectionProgram = 0;
         }
     }
-    if ( vertex ) glDeleteShader( vertex );
-    if ( fragment ) glDeleteShader( fragment );
-    if ( !se_floorReflectionProgram )
+    if (vertex)
+        glDeleteShader(vertex);
+    if (fragment)
+        glDeleteShader(fragment);
+    if (!se_floorReflectionProgram)
     {
         se_floorReflectionFailed = true;
         con << "Floor reflection: shaders unavailable; using the classic reflection.\n";
@@ -279,53 +279,56 @@ bool se_PrepareFloorReflection()
 // Copy the mirrored scene once for this viewport. One full-size texture is
 // reused across views; sampling is clamped so split-screen players never bleed
 // into each other's reflections. The driver's copy resolves window MSAA.
-bool se_CopyFloorReflection(GLint const * viewport)
+bool se_CopyFloorReflection(GLint const* viewport)
 {
-    if (se_floorReflectionCopyFailed || sr_screenWidth<=0 || sr_screenHeight<=0)
+    if (se_floorReflectionCopyFailed || sr_screenWidth <= 0 || sr_screenHeight <= 0)
         return false;
     // Attribute failure only to this optional copy, not to an earlier draw.
     // Preserve an actionable diagnostic rather than silently swallowing it.
-    for (int count=0;count<16;++count)
+    for (int count = 0; count < 16; ++count)
     {
-        GLenum prior=glGetError();
-        if (prior==GL_NO_ERROR) break;
+        GLenum prior = glGetError();
+        if (prior == GL_NO_ERROR)
+            break;
         if (!se_floorReflectionPriorErrorReported)
         {
             con << "Floor material: pre-existing OpenGL error " << int(prior) << " before reflection capture.\n";
-            se_floorReflectionPriorErrorReported=true;
+            se_floorReflectionPriorErrorReported = true;
         }
     }
-    if (!se_floorReflectionTexture) glGenTextures(1,&se_floorReflectionTexture);
-    glBindTexture(GL_TEXTURE_2D,se_floorReflectionTexture);
-    if (se_floorReflectionWidth!=sr_screenWidth || se_floorReflectionHeight!=sr_screenHeight)
+    if (!se_floorReflectionTexture)
+        glGenTextures(1, &se_floorReflectionTexture);
+    glBindTexture(GL_TEXTURE_2D, se_floorReflectionTexture);
+    if (se_floorReflectionWidth != sr_screenWidth || se_floorReflectionHeight != sr_screenHeight)
     {
-        GLint maximum=0;
-        glGetIntegerv(GL_MAX_TEXTURE_SIZE,&maximum);
-        if (sr_screenWidth>maximum || sr_screenHeight>maximum) return false;
-        glTexImage2D(GL_TEXTURE_2D,0,GL_RGB8,sr_screenWidth,sr_screenHeight,0,GL_RGB,GL_UNSIGNED_BYTE,NULL);
-        glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MIN_FILTER,GL_LINEAR);
-        glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MAG_FILTER,GL_LINEAR);
-        glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_WRAP_S,GL_CLAMP_TO_EDGE);
-        glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_WRAP_T,GL_CLAMP_TO_EDGE);
-        if (glGetError()!=GL_NO_ERROR)
+        GLint maximum = 0;
+        glGetIntegerv(GL_MAX_TEXTURE_SIZE, &maximum);
+        if (sr_screenWidth > maximum || sr_screenHeight > maximum)
+            return false;
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB8, sr_screenWidth, sr_screenHeight, 0, GL_RGB, GL_UNSIGNED_BYTE, NULL);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+        if (glGetError() != GL_NO_ERROR)
         {
-            se_floorReflectionCopyFailed=true;
+            se_floorReflectionCopyFailed = true;
             con << "Floor material: reflection texture allocation failed; using the unfiltered reflection.\n";
             return false;
         }
-        se_floorReflectionWidth=sr_screenWidth;
-        se_floorReflectionHeight=sr_screenHeight;
+        se_floorReflectionWidth = sr_screenWidth;
+        se_floorReflectionHeight = sr_screenHeight;
     }
-    glCopyTexSubImage2D(GL_TEXTURE_2D,0,viewport[0],viewport[1],viewport[0],viewport[1],viewport[2],viewport[3]);
-    if (glGetError()!=GL_NO_ERROR)
+    glCopyTexSubImage2D(GL_TEXTURE_2D, 0, viewport[0], viewport[1], viewport[0], viewport[1], viewport[2], viewport[3]);
+    if (glGetError() != GL_NO_ERROR)
     {
-        se_floorReflectionCopyFailed=true;
+        se_floorReflectionCopyFailed = true;
         con << "Floor material: using the unfiltered reflection.\n";
         return false;
     }
     return true;
 }
-}
+} // namespace
 #endif
 
 // The mirrored scene is already below the floor. Schlick's Fresnel response
@@ -335,51 +338,51 @@ bool se_CopyFloorReflection(GLint const * viewport)
 class se_FloorReflection
 {
 public:
-    explicit se_FloorReflection( REAL alpha )
+    explicit se_FloorReflection(REAL alpha)
     {
 #ifdef HAVE_GLEW
-        if (sr_hiddenWindow && sg_blacklightVisuals && !sg_MoviePack())
+        if (sr_hiddenWindow && se_LegacyGraphics())
         {
-            static bool reported=false;
+            static bool reported = false;
             if (!reported)
             {
-                reported=true;
+                reported = true;
                 std::cerr << "Floor material: mirror=" << sr_floorMirror << " alpha=" << alpha
                           << " grid=" << se_GridSize() << " fog=" << int(glIsEnabled(GL_FOG)) << '\n';
             }
         }
-        if ( !sg_blacklightVisuals || sg_MoviePack() || !sr_alphaBlend ||
-             !sr_floorMirror || alpha >= 1 || !GLEW_VERSION_2_0 || glIsEnabled( GL_FOG ) )
+        if (!se_LegacyGraphics() || !sr_alphaBlend ||
+            !sr_floorMirror || alpha >= 1 || !GLEW_VERSION_2_0 || glIsEnabled(GL_FOG))
             return;
         RenderEnd();
-        if ( !se_PrepareFloorReflection() )
+        if (!se_PrepareFloorReflection())
             return;
-        glGetIntegerv( GL_CURRENT_PROGRAM, &previous_ );
-        glGetIntegerv(GL_ACTIVE_TEXTURE,&previousTexture_);
+        glGetIntegerv(GL_CURRENT_PROGRAM, &previous_);
+        glGetIntegerv(GL_ACTIVE_TEXTURE, &previousTexture_);
         glPushAttrib(GL_ENABLE_BIT | GL_COLOR_BUFFER_BIT);
         glEnable(GL_BLEND);
-        glBlendFunc(GL_ONE,GL_ONE_MINUS_SRC_ALPHA);
+        glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
         glActiveTexture(GL_TEXTURE1);
-        glGetIntegerv(GL_TEXTURE_BINDING_2D,&previousReflection_);
+        glGetIntegerv(GL_TEXTURE_BINDING_2D, &previousReflection_);
         GLint viewport[4];
-        glGetIntegerv(GL_VIEWPORT,viewport);
-        bool captured=sr_floorReflectionSoftness>0 && se_CopyFloorReflection(viewport);
-        glUseProgram( se_floorReflectionProgram );
-        glUniform1i( glGetUniformLocation( se_floorReflectionProgram, "floorTexture" ), 0 );
-        glUniform1i(glGetUniformLocation(se_floorReflectionProgram,"reflectedScene"),1);
-        glUniform1f(glGetUniformLocation(se_floorReflectionProgram,"capturedReflection"),captured ? 1.f : 0.f);
-        glUniform1f(glGetUniformLocation(se_floorReflectionProgram,"reflectionSoftness"),
-                    std::max(REAL(0),std::min(REAL(2),sr_floorReflectionSoftness)));
-        glUniform2f(glGetUniformLocation(se_floorReflectionProgram,"inverseFrame"),1.f/sr_screenWidth,1.f/sr_screenHeight);
-        glUniform4f(glGetUniformLocation(se_floorReflectionProgram,"reflectionViewport"),
-                    (viewport[0]+.5f)/sr_screenWidth,(viewport[1]+.5f)/sr_screenHeight,
-                    (viewport[0]+viewport[2]-.5f)/sr_screenWidth,(viewport[1]+viewport[3]-.5f)/sr_screenHeight);
-        glUniform1f( glGetUniformLocation( se_floorReflectionProgram, "reflectance" ),
-                     std::max( REAL( 0 ), std::min( REAL( 1 ), 1 - alpha ) ) );
-        glUniform1f( glGetUniformLocation( se_floorReflectionProgram, "gridWorld" ), se_GridSize() );
-        eRectangle const & bounds = eWallRim::GetBounds();
-        glUniform4f( glGetUniformLocation( se_floorReflectionProgram, "arenaBounds" ),
-                     bounds.GetLow().x, bounds.GetLow().y, bounds.GetHigh().x, bounds.GetHigh().y );
+        glGetIntegerv(GL_VIEWPORT, viewport);
+        bool captured = sr_floorReflectionSoftness > 0 && se_CopyFloorReflection(viewport);
+        glUseProgram(se_floorReflectionProgram);
+        glUniform1i(glGetUniformLocation(se_floorReflectionProgram, "floorTexture"), 0);
+        glUniform1i(glGetUniformLocation(se_floorReflectionProgram, "reflectedScene"), 1);
+        glUniform1f(glGetUniformLocation(se_floorReflectionProgram, "capturedReflection"), captured ? 1.f : 0.f);
+        glUniform1f(glGetUniformLocation(se_floorReflectionProgram, "reflectionSoftness"),
+                    std::max(REAL(0), std::min(REAL(2), sr_floorReflectionSoftness)));
+        glUniform2f(glGetUniformLocation(se_floorReflectionProgram, "inverseFrame"), 1.f / sr_screenWidth, 1.f / sr_screenHeight);
+        glUniform4f(glGetUniformLocation(se_floorReflectionProgram, "reflectionViewport"),
+                    (viewport[0] + .5f) / sr_screenWidth, (viewport[1] + .5f) / sr_screenHeight,
+                    (viewport[0] + viewport[2] - .5f) / sr_screenWidth, (viewport[1] + viewport[3] - .5f) / sr_screenHeight);
+        glUniform1f(glGetUniformLocation(se_floorReflectionProgram, "reflectance"),
+                    std::max(REAL(0), std::min(REAL(1), 1 - alpha)));
+        glUniform1f(glGetUniformLocation(se_floorReflectionProgram, "gridWorld"), se_GridSize());
+        eRectangle const& bounds = eWallRim::GetBounds();
+        glUniform4f(glGetUniformLocation(se_floorReflectionProgram, "arenaBounds"),
+                    bounds.GetLow().x, bounds.GetLow().y, bounds.GetHigh().x, bounds.GetHigh().y);
         glActiveTexture(GL_TEXTURE0);
         active_ = true;
 #else
@@ -389,21 +392,22 @@ public:
     ~se_FloorReflection()
     {
 #ifdef HAVE_GLEW
-        if ( active_ )
+        if (active_)
         {
             RenderEnd();
-            glUseProgram( previous_ );
+            glUseProgram(previous_);
             glActiveTexture(GL_TEXTURE1);
-            glBindTexture(GL_TEXTURE_2D,previousReflection_);
+            glBindTexture(GL_TEXTURE_2D, previousReflection_);
             glPopAttrib();
             glActiveTexture(previousTexture_);
         }
 #endif
     }
+
 private:
 #ifdef HAVE_GLEW
     GLint previous_ = 0;
-    GLint previousTexture_=GL_TEXTURE0,previousReflection_=0;
+    GLint previousTexture_ = GL_TEXTURE0, previousReflection_ = 0;
     bool active_ = false;
 #endif
 };
@@ -416,7 +420,8 @@ static rFileTexture & se_Sky()
     static rFileTexture sky(rTextureGroups::TEX_FLOOR,skyPath,1,1,true);
     static rFileTexture sky_moviepack(rTextureGroups::TEX_FLOOR,skyPathMoviepack,1,1,true);
 
-    if (sg_MoviePack()){
+    if (se_MoviePack())
+    {
         // Since old movie packs usually don't include sky.png we need to
         // be nice and fall back to the default sky tecture. -k
         tString s = tDirectories::Data().GetReadPath( skyPathMoviepack );
@@ -450,7 +455,8 @@ static rFileTexture * se_UpperSky()
     static rFileTexture sky(rTextureGroups::TEX_FLOOR,skyPath,1,1,true);
     static rFileTexture sky_moviepack(rTextureGroups::TEX_FLOOR,skyPathMoviepack,1,1,true);
 
-    if (sg_MoviePack()){
+    if (se_MoviePack())
+    {
         tString s = tDirectories::Data().GetReadPath( skyPathMoviepack );
         if(s.Len() > 1)
             return &sky_moviepack;
@@ -819,7 +825,7 @@ void eGrid::display_simple( eCamera* cam, int viewer,bool floor,
             se_glFloorTexture();
             se_glFloorColor(flooralpha);
 
-            se_FloorReflection reflection( flooralpha );
+            se_FloorReflection reflection(flooralpha);
             infinity_xy_plane( cam->CameraPos(), cam->CameraDir()); 
 
             /* old way: draw every triangle

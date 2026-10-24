@@ -208,7 +208,7 @@ tResourceManager::Result tResourceManager::FetchURI(const char* URI, std::ostrea
             long http_code = 0;
             curl_easy_getinfo(handle, CURLINFO_RESPONSE_CODE, &http_code);
             // If the request failed, print an error message
-            std::cerr << "curl_easy_perform() failed: " << curl_easy_strerror(result) << std::endl;
+            con << "curl_easy_perform() failed: " << curl_easy_strerror(result) << "\n";
             return Result::ERROR_Unknown;
         }
 
@@ -292,8 +292,10 @@ static int myFetch(const char *URIs, const char *filename, const char *savepath)
         (p = strchr(r, ';')) ? 0 : (p = strchr(r, '\0'));
         n = (p[0] == '\0') ? p : (p + 1);	// next item starts after the semicolon
         // NOTE: skip semicolons, *NOT* nulls
-        while (p[-1] == ' ' && p > r) --p;			// skip spaces at the end of the item
-        if (p > r) {						// skip this for null-length items
+        while (p > r && p[-1] == ' ')
+            --p;   // skip spaces at the end of the item
+        if (p > r) // skip this for null-length items
+        {
             len = (size_t)(p - r);
             u = (char*)malloc((len + 1) * sizeof(char));
             strncpy(u, r, len);
@@ -326,6 +328,9 @@ NOTE: There must be *at least* one directory level, even if it is ./
 tString tResourceManager::locateResource(const char *file, const char *uri, bool fullPath, bool forceFetch) {
     tString filepath, a_uri = tString(), savepath, resourcepath;
     int rv;
+
+    if (!file)
+        return tString{};
 
     char * to_free = NULL; // string to delete later
 
@@ -365,12 +370,12 @@ tString tResourceManager::locateResource(const char *file, const char *uri, bool
     if (!file || file[0] == '\0') {
         con << tOutput( "$resource_no_filename" );
         free( to_free );
-        return (tString) NULL;
+        return tString{};
     }
     if (file[0] == '/' || file[0] == '\\') {
         con << tOutput( "$resource_abs_path" );
         free( to_free );
-        return (tString) NULL;
+        return tString{};
     }
 
     if( !forceFetch )
@@ -396,7 +401,7 @@ tString tResourceManager::locateResource(const char *file, const char *uri, bool
     if (savepath == "") {
         con << tOutput( "$resource_no_writepath" );
         free( to_free );
-        return (tString) NULL;
+        return tString{};
     }
 
     // Some sort of File not found
@@ -416,7 +421,7 @@ tString tResourceManager::locateResource(const char *file, const char *uri, bool
         free( to_free );
 
     if (rv)
-        return (tString) NULL;
+        return tString{};
 
     if( fullPath )
         return savepath;

@@ -72,6 +72,11 @@ REAL sg_LightcycleScale(){
 // setting item for double bind (available since version 7)
 static nSettingItemWatched<REAL> su_doubleBindTimeoutConf( "DOUBLEBIND_TIME", su_doubleBindTimeout, nConfItemVersionWatcher::Group_Cheating, 7  );
 
+bool sg_LegacyGraphics()
+{
+    return sg_blacklightVisuals && !sg_MoviePack();
+}
+
 bool sg_MoviePack(){
     return sg_moviepackInstalled && sg_moviepackUse;
 }

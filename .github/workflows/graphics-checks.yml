@@ -96,6 +96,12 @@ jobs:
         run: |
           python -m pytest \
             ai/tests/test_direct_rl.py \
+            ai/tests/test_async_brain.py \
+            ai/tests/test_human_turn_buffer.py \
+            ai/tests/test_input_timing.py \
+            ai/tests/test_engine_pipeline.py \
+            ai/tests/test_bot_roster.py \
+            ai/tests/test_fighter.py \
             ai/tests/test_teacher_checkpoint.py \
             ai/tests/test_teacher_pipeline.py \
             ai/tests/test_teach.py \
@@ -105,3 +111,29 @@ jobs:
             ai/tests/test_dashboard.py \
             ai/tests/test_live_view.py \
             -k 'not mps' -q
+
+  native-linux:
+    name: Linux ${{ matrix.configuration }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        configuration: [client_debug, server_debug]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y autoconf automake libtool pkg-config bison flex \
+            libgl1-mesa-dev libglu1-mesa-dev libpng-dev libsdl2-dev \
+            libsdl2-mixer-dev libsdl2-image-dev libboost-dev libboost-thread-dev \
+            libftgl-dev libglew-dev libprotobuf-dev protobuf-compiler \
+            libxml2-dev libcurl4-openssl-dev
+      - name: Build and run production tests
+        env:
+          JOBS: '4'
+          VERBOSE: '1'
+        run: batch/test_builds.sh "${{ matrix.configuration }}"

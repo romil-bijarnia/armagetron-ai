@@ -36,5 +36,6 @@ void tSetLockstep( double dt );               //! lockstep mode (dt > 0): every 
 bool tLockstepActive();                       //! returns whether lockstep mode is on
 void tDelay( int usecdelay );                 //! delays for the specified number of microseconds
 void tDelayForce( int usecdelay );            //! delays for the specified number of microseconds, even when playing back
+void tMockAdvanceFrame(double seconds);       //! for automated tests: pretend the given number of seconds passed
 
 #endif

@@ -140,5 +140,16 @@ int main(int argc,char **argv)
         cycle.Advance(.5);
         assert(cycle.executed.size()==2);
     }
+    else if(scenario=="active-arc-queue") {
+        cycle.nextTurnTime=.1;
+        cycle.pendingTurns.push_back(1);
+        cycle.arcActive_=true;
+        cycle.Advance(.2);
+        assert(cycle.pendingTurns.size()==1 && cycle.turnCalls==0);
+        cycle.arcActive_=false;
+        cycle.Advance(.3);
+        assert(cycle.pendingTurns.empty() && cycle.turnCalls==1);
+        assert(cycle.executed.size()==1 && cycle.executed[0].second==1);
+    }
     else return 2;
 }

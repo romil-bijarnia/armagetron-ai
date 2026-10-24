@@ -831,6 +831,17 @@ static void sn_DestroyObjectsHandler( Network::DestroyObjects const & destroy, n
 #ifdef DEBUG
         sn_BreakOnObjectID( id );
 #endif
+        // only the owner of an object is allowed to destroy it; the server
+        // (sender 0) may destroy any object
+        tRefPtr<nNetObject> const no = sn_netObjects[id];
+        if (no)
+        {
+            if (sender.SenderID() != no->Owner() && sender.SenderID() != 0)
+            {
+                Cheater(sender.SenderID());
+                return; // do not consume the rest of this message
+            }
+        }
         // see if there was a local destruction; if yes, ignore.
         if (sn_WasDeletedLocally( id ))
             continue;
@@ -842,9 +853,9 @@ static void sn_DestroyObjectsHandler( Network::DestroyObjects const & destroy, n
         info.timeout=tSysTimeFloat()+nDeletedTimeout;
 
         // notify object of pending deletion
-        if (tJUST_CONTROLLED_PTR<nNetObject> no=sn_netObjects[id])
+        if (no)
         {
-            tASSERT( !no->Owned() );
+            tASSERT(!no->Owned());
 
             no->ActionOnDelete();
             info.actionOnDeleteExecuted=true;

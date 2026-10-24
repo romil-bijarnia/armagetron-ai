@@ -353,6 +353,10 @@ public:
 
 static struct tTime timeStart;        // the time at the start of the program
 static struct tTime timeRelative;     // the time since the system start ( eventually from a playback )
+static struct tTime timeNewRelative;  // last live sample of the frame clock
+static struct tTime timeRealStart;    // wall-clock epoch, independent of training time
+static struct tTime timeRealRelative;
+static bool timeInitialized{}; // flag indicating we initialized the start time
 
 static bool st_lockstep = false;
 static double st_lockstepTime = 0;
@@ -369,9 +373,10 @@ void tAdvanceFrameSys( tTime & start, tTime & relative )
     // time.seconds -= time.seconds/10;
 
     // record starting point
-    if ( start.microseconds == 0 && start.seconds == 0 )
+    if (!timeInitialized)
     {
-        start = time;
+        timeInitialized = true;
+        timeStart = timeRealStart = time;
     }
 
     // detect and counter timer hiccups
@@ -440,10 +445,24 @@ static void st_SetRelative( tTime & t, double seconds )
 
 void tSetLockstep( double dt )
 {
+    if (!std::isfinite(dt))
+        return;
+    if (!timeInitialized)
+        tAdvanceFrame();
     if ( dt > 0 && !st_lockstep )
     {
         // continue from the current frame time so game time does not jump
         st_lockstepTime = timeRelative.seconds + timeRelative.microseconds * 1E-6;
+    }
+    else if (dt <= 0 && st_lockstep)
+    {
+        // Resume from the simulated frame, without moving the independent clock
+        // used for inference deadlines, networking and throughput measurement.
+        tRealSysTimeFloat();
+        tTime now;
+        GetTime(now);
+        timeStart = now - timeRelative;
+        timeNewRelative = timeRelative;
     }
     st_lockstep = dt > 0;
     st_lockstepDT = dt;
@@ -454,6 +473,32 @@ bool tLockstepActive()
     return st_lockstep;
 }
 
+void tMockAdvanceFrame(double seconds)
+{
+    tASSERT(seconds >= 0 && std::isfinite(seconds));
+    if (!(seconds >= 0) || !std::isfinite(seconds))
+        return;
+
+    if (!timeInitialized)
+        tAdvanceFrame(); // this initializes timeStart
+
+    tTime advance;
+    st_SetRelative(advance, seconds);
+    timeRealStart = timeRealStart - advance;
+    timeRealRelative = timeRealRelative + advance;
+    if (st_lockstep)
+    {
+        // A mocked interval is explicit; do not replace it with one fixed step.
+        st_lockstepTime += seconds;
+        st_SetRelative(timeRelative, st_lockstepTime);
+    }
+    else
+    {
+        timeStart = timeStart - advance;
+        timeNewRelative = timeNewRelative + advance;
+        tAdvanceFrame();
+    }
+}
 
 void tAdvanceFrame( int usecdelay )
 {
@@ -470,7 +515,6 @@ void tAdvanceFrame( int usecdelay )
     if ( usecdelay > 0 )
         tDelay( usecdelay );
 
-    static tTime timeNewRelative;
     tAdvanceFrameSys( timeStart, timeNewRelative );
 
     // try to fetch time from playback
@@ -573,12 +617,9 @@ double tSysTimeFloat ()
     return ( timeRelative.seconds + timeRelative.microseconds*1E-6 ) * st_timeFactor;
 }
 
-static struct tTime timeRealStart;    // the real time at the start of the program
-static struct tTime timeRealRelative; // the time since the system start
-
 double tRealSysTimeFloat ()
 {
     // get real time from real OS
-    tAdvanceFrameSys( timeRealStart, timeRealRelative );
+    tAdvanceFrameSys(timeRealStart, timeRealRelative);
     return ( timeRealRelative.seconds + timeRealRelative.microseconds*1E-6 ) * st_timeFactor;
 }

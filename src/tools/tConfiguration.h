@@ -321,27 +321,35 @@ public:
     typedef typename tTypeToConfig< T >::DUMMYREQUIRED DUMMYREQUIRED;
 
     // read without conversion
-    static void DoRead(std::istream &s, T & value, int )
+    static void DoRead(std::istream& s, T& value, int) noexcept
     {
         s >> value;
     }
 
     // read with conversion
-    static void DoRead(std::istream &s, T & value, int * )
+    static void DoRead(std::istream& s, T& value, int*) noexcept
     {
         typename tTypeToConfig< T >::TOSTREAM dummy;
         s >> dummy;
         value = static_cast< T >( dummy );
     }
 
+    /// @brief Reads a value, with conversion if required
+    /// @param s stream to read from
+    /// @param value value to read to
+    static void DoRead(std::istream& s, T& value) noexcept
+    {
+        DoRead(s, value, DUMMYREQUIRED());
+    }
+
     // write without conversion
-    static void DoWrite(std::ostream &s, T const & value, int )
+    static void DoWrite(std::ostream& s, T const& value, int) noexcept
     {
         s << value;
     }
 
     // write with conversion
-    static void DoWrite(std::ostream &s, T const & value, int * )
+    static void DoWrite(std::ostream& s, T const& value, int*) noexcept
     {
         s << static_cast< typename tTypeToConfig< T >::TOSTREAM >( value );
     }
@@ -375,13 +383,21 @@ public:
         return target;
     }
 
+    /// @brief Writes a value, with conversion if required
+    /// @param s stream to write to
+    /// @param value value to write
+    static void DoWrite(std::ostream& s, T const& value) noexcept
+    {
+        DoWrite(s, value, DUMMYREQUIRED());
+    }
+
     virtual void ReadVal(std::istream &s){
         // eat whitepsace
         int c= EatWhitespace(s);
 
         T dummy( *target );
         if (c!='\n' && s && !s.eof() && s.good()){
-            DoRead( s, dummy, DUMMYREQUIRED() );
+            DoRead(s, dummy);
             if (!s.good() && !s.eof() )
             {
                 tOutput o;
@@ -419,7 +435,7 @@ public:
     }
 
     virtual void WriteVal(std::ostream &s){
-        DoWrite( s, *target, DUMMYREQUIRED() );
+        DoWrite(s, *target);
     }
 };
 
@@ -508,4 +524,3 @@ struct tConfigMigration
 extern bool st_FirstUse;
 
 #endif
-

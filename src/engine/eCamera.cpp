@@ -62,10 +62,6 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 #include "eSoundMixer.h"
 #include "rViewport.h"
 
-#ifndef DEDICATED
-extern bool sg_blacklightVisuals;
-extern bool sg_MoviePack();
-#endif
 
 // camera visibility settings
 static REAL se_hitCacheSpeed = 1; // the speed the hit cache for external visibility targets recovers from hits
@@ -2109,8 +2105,7 @@ void eCamera::Timestep(REAL ts){
 
             eCoord cycleDir = CenterCamDir();
 #ifndef DEDICATED
-            if (sg_blacklightVisuals && !sg_MoviePack() && effectiveMode == CAMERA_CUSTOM
-                && newmode == CAMERA_CUSTOM)
+            if (se_LegacyGraphics() && effectiveMode == CAMERA_CUSTOM && newmode == CAMERA_CUSTOM)
             {
                 eCoord previousDirection = Center() ? Center()->LastDirection() : dir;
                 if (Center()) cycleDir=Center()->CamDirTarget();

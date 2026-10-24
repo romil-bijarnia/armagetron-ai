@@ -152,8 +152,9 @@ eGameObject::~eGameObject(){
 void eGameObject::InteractWith(eGameObject *,REAL,int){}
 
 // what happens if we pass eWall w?
-eGameObject::ePassEdgeResult eGameObject::PassEdge(const eWall *w,REAL,REAL,int){
-    if (w)
+eGameObject::ePassEdgeResult eGameObject::PassEdge(const eWall* w, REAL time, REAL alpha, int recursion)
+{
+    if (EdgeIsDangerous(w, time, alpha))
     {
         Kill();
         return eAbort;
@@ -934,9 +935,7 @@ void eGameObject::RenderAll(eGrid *grid, const eCamera *cam){
             grid->gameObjects(i)->RenderEarly(cam);
 
 #ifndef DEDICATED
-    extern bool sg_blacklightVisuals;
-    extern bool sg_MoviePack();
-    if (sr_glOut && sg_blacklightVisuals && !sg_MoviePack())
+    if (sr_glOut && se_LegacyGraphics())
     {
         // Opaque bikes must precede the translucent ribbons from the first
         // frame, rather than waiting for the old renderer to reorder its list.
