@@ -831,7 +831,6 @@ int main(int argc,char **argv){
         // made the files' values fail with "unknown command" and left the walls endless
         gCycle::PrivateSettings();
         st_LoadConfig();
-        sg_ApplyGraphicsStyle();
 
         // migrate user configuration from previous versions
         if(sn_configurationSavedInVersion != st_programVersion)

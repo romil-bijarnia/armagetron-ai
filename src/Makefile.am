@@ -195,6 +195,10 @@ libtron_a_SOURCES +=\
 	tron/gWinZone.h            tron/gWinZone.cpp
 endif
 
+libtron_a_SOURCES += tron/gGraphicsStyle.cpp tron/gGraphicsStyle.h \
+    tron/gCycleVisuals.cpp tron/gCycleVisuals.h \
+    tron/gLightcycleModel.cpp tron/gArenaBackdrop.cpp tron/gLightcycleEffects.cpp
+
 libui_a_SOURCES=ui/uInput.cpp ui/uInput.h ui/uInputQueue.cpp ui/uInputQueue.h ui/uInputTime.h ui/uMenu.cpp ui/uMenu.h
 
 if OS_X_TOOLKIT
