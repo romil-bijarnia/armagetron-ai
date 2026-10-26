@@ -260,9 +260,9 @@ def _process_role(command: str, run_dir: Path, *, heartbeat_pid: bool = False) -
     except ValueError:
         return None
     names = {Path(a).name for a in args}
-    teacher = "arma-teach" in names or "arma_ai.teach" in args
+    teacher = "arma-teach" in names or "arma_ai.teach" in args or "arma_ai.native_train" in args
     imitation = bool({"imitate", "arma-imitate"} & names) or "arma_ai.imitate" in args
-    supervised = "trainctl" in names and "_supervise" in args
+    supervised = "trainctl" in names and bool({"_supervise", "_supervise_bots"} & set(args))
     if not (teacher or imitation or supervised):
         return None
     # A fresh heartbeat is written by this run's trainer and identifies its exact PID.
@@ -320,6 +320,12 @@ def training_status(run_dir: Path, progress: dict, recs: list[dict]) -> Training
                       "validating": "Checking held-out teacher lives.", "stopping": "Saving the current V4 checkpoint."}
             return TrainingStatus(labels.get(phase, "IMITATING"), detail.get(phase, "Imitation heartbeat is live."),
                                   True, True, method)
+        if method == "native_rl":
+            labels = {"starting": "STARTING", "collecting": "PLAYING BOTS",
+                      "learning": "TRAINING", "stopping": "SAVING"}
+            return TrainingStatus(labels.get(phase, "TRAINING"),
+                                  str(progress.get("stage", "Learning from native bot matches.")),
+                                  True, True, method)
         labels = {"starting": "STARTING", "warming_up": "WARMING UP", "learning": "TRAINING",
                   "stopping": "SAVING"}
         detail = {"starting": "Loading the trainer and preparing self-play.",
@@ -330,7 +336,8 @@ def training_status(run_dir: Path, progress: dict, recs: list[dict]) -> Training
     roles = {_process_role(command, run_dir) for command in processes.values()}
     trainers = [command for command in processes.values() if _process_role(command, run_dir) == "trainer"]
     if trainers:
-        method = "imitate" if any(_imitation_process(command) for command in trainers) else "teach"
+        method = ("imitate" if any(_imitation_process(command) for command in trainers) else
+                  "native_rl" if any("arma_ai.native_train" in command for command in trainers) else "teach")
     if "trainer" in roles:
         if progress:
             return TrainingStatus("STARTING", "Trainer process is live; waiting for its current heartbeat.", True, method=method)
@@ -547,7 +554,7 @@ def build(run_dir: Path, recs: list[dict], width: int = 160, height: int = 48,
     started = progress.get("started_at")
     if not _finite(started):
         started = process_started(progress.get("pid")) if status.running else None
-    if width < 76 or height < 22 or (status.method or progress.get("trainer")) == "imitate":
+    if width < 76 or height < 22 or (status.method or progress.get("trainer")) in ("imitate", "native_rl"):
         from .cli_progress import build as compact_view
         return Layout(compact_view(run_dir, progress, recs, status, width=width, height=height,
                                    now=now, started=started))

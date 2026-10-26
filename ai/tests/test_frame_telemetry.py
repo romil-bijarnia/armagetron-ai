@@ -40,6 +40,7 @@ constexpr int SDL_GL_MULTISAMPLEBUFFERS=1, SDL_GL_MULTISAMPLESAMPLES=2;
 struct SDL_DisplayMode { int refresh_rate=120; };
 int *sr_screen=nullptr;
 bool sr_hiddenWindow=false, s_videoout=false;
+double s_videooutInterval=0;
 int sr_screenWidth=100, sr_screenHeight=100, sr_maxFPS=240, sr_floorMirror=2;
 double clockNow=10;
 int ioOpens=0, sdlQueries=0;

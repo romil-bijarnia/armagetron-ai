@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "armagetron-ai"
 version = "0.1.0"
-description = "Self-play deep reinforcement learning agent for Armagetron Advanced"
+description = "Neural fighter training and evaluation for Armagetron Advanced"
 requires-python = ">=3.11"
 dependencies = [
   "numpy>=2.0,<3",

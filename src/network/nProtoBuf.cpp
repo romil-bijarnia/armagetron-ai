@@ -361,7 +361,7 @@ int nProtoBufMessageBase::OnWrite( WriteArguments & arguments ) const
 
         // dump into plain stringstream
         std::stringstream rw;
-        workProtoBuf.SerializeToOstream( &rw );
+        (void)workProtoBuf.SerializeToOstream( &rw );
 
         // write header data
         header.len = rw.str().size();
@@ -429,7 +429,7 @@ void nProtoBufMessageBase::OnRead( unsigned char const * & buffer, unsigned char
         
         if ( inCache )
         {
-            work.ParsePartialFromArray( payload, header.len );
+            (void)work.ParsePartialFromArray( payload, header.len );
             DiscardUnknownFields(work);
             
 #ifdef DEBUG_STRINGS
@@ -446,7 +446,7 @@ void nProtoBufMessageBase::OnRead( unsigned char const * & buffer, unsigned char
         else
         {
             // just read directly
-            out.ParsePartialFromArray( payload, header.len );
+            (void)out.ParsePartialFromArray( payload, header.len );
 
             DiscardUnknownFields(out);
         }

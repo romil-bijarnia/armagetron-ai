@@ -79,3 +79,4 @@ The network layer uses a message descriptor system (`nDescriptor`) for registeri
 - Dependencies: `-iquote @srcdir@/network`
 - `armagetronad_main_master` uses `network/master.cpp` as entry point
 - `nNetObject` uses CRTP pattern via `nNOInitialisator<T>` for type registration
+- Legacy Protobuf serialization/parsing calls explicitly discard unused boolean results so newer `nodiscard` annotations do not break strict builds; this preserves the existing handling and wire format.

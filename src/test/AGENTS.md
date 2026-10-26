@@ -121,6 +121,8 @@ Tests are compiled as separate programs that link against the relevant project l
 
 `gGraphicsStyle_test.cpp` and `gCycleVisuals_test.cpp` cover preference persistence and live resource switching. Motion, ribbon, asset and impact tests cover the renderer helpers. `tSysTime_test.cpp` checks lockstep exit continuity, wall-clock independence and compatibility with the upstream mock clock. Existing Python AI/input checks remain under `ai/tests/`.
 
+The memory-allocation stress test marks its object-padding fields `[[maybe_unused]]` to retain their layout without Clang unused-field warnings.
+
 ## Notes from Humans
 ### MAIN GUARDRAIL: The AI Agents keep out of this section.
 

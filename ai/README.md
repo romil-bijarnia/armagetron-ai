@@ -2,7 +2,7 @@
 
 Blacklight is our AI for Armagetron Advanced, with a policy that can run inside the game without Python.
 
-The trainer (`arma-teach`) uses direct self-play reinforcement learning in the C++ simulator in `sim/`, an adaptive exploiter and a learner on the GPU. Blacklight chooses its own moves; there is no search teacher. The simulator has recorded-engine parity tests; the real-engine ladder measures the deployed policy. The implemented combat architecture is documented in [docs/V4.md](docs/V4.md).
+`./blacklight train` continues the existing model with reinforcement learning against scripted bots in the native game. Blacklight chooses its own moves and learns from complete match outcomes. The separate `arma-teach` simulator trainer remains available for explicitly requested self-play experiments. The implemented combat architecture is documented in [docs/V4.md](docs/V4.md).
 
 ## What the network sees
 
@@ -18,13 +18,59 @@ Install the Python environment once, from this folder. If the repository sits in
 uv venv --python 3.13 ~/.venvs/armagetron-ai && ln -s ~/.venvs/armagetron-ai .venv && uv sync
 ```
 
-## Training
+## Native bot training
 
-Training resumes the current V4 checkpoint. From this directory:
+From this directory:
 
 ```bash
-./blacklight train          # the laptop stays usable
-./blacklight train full     # the whole machine
+./blacklight train          # bot-only RL; two engines, background resource budget
+./blacklight train full     # bot-only RL; eight engines, uncapped work
+./blacklight watch          # live compact progress; Ctrl-C only closes this view
+./blacklight status
+./blacklight stop           # finish the current learning update, save and stop
+```
+
+The native monitor is a compact status block. Its bar describes the current batch,
+the win rate names its recent-game window, and session games, elapsed time,
+throughput and checkpoint age are separate. Continuous training has no overall
+completion percentage. Restarting the monitor reloads display changes without
+stopping the trainer.
+
+The six custom profiles below are the opponents. Each match has exactly one
+neural-controlled player; all opponents use the native scripted controller.
+Duels and four-player matches vary across small, medium and full-size arenas.
+No self-play opponent or teacher action label enters this mode.
+
+The learner samples its own legal controls, records their probabilities and
+recurrent histories, and trains the policy and outcome-value prediction from
+completed lives. Wins return +1, deaths -1 and surviving timeouts 0, discounted
+back over the life. Auxiliary prediction heads retain their existing weights;
+this first native mode does not invent auxiliary labels from unavailable data.
+Engines finish their collection batch before the model changes, and partial lives
+are discarded when stopping. Initial time-zero controls ignored by the engine are
+excluded from learning.
+
+Training resumes `runs/blacklight/latest.pt`. Before the first native session,
+`snapshots/before-native-bots-uXXXXXXXX.pt` preserves its starting checkpoint.
+Saves occur every 60 seconds when learning has advanced and on a clean stop;
+failed updates do not overwrite the last saved checkpoint. Native sessions resume
+their optimizer state, and changing training objectives resets optimizer moments
+while retaining the learned network. The same exclusive writer lock protects all
+training methods.
+
+Background mode uses low process priority and a 35% work/rest target. Full mode
+keeps the Mac awake. `--engines`, `--lr` and the other options in
+`./blacklight train --help` override the presets. Reported match outcomes are
+training results; independent real-engine evaluation still establishes strength.
+
+## Simulator training (optional)
+
+The older simulator workflow uses self-play, Hunter and an exploiter. It is
+separate from the native-bot command above and resumes the same checkpoint:
+
+```bash
+./trainctl background      # simulator self-play, background resource budget
+./trainctl full            # simulator self-play, whole machine
 ```
 
 `./blacklight` alone lists the rest: `stop`, `status`, `watch`, `dash`, `log`,
@@ -171,6 +217,11 @@ teachers and four to the other styles, split equally between duels and four-play
 games. Opponent styles vary too. The catalog is in `arma_ai/bot_profiles.py`.
 These are candidates, not an established ranking of the best configurations.
 The default remains `--bot-pool stock` until fighting qualification selects a recipe.
+
+All six custom training profiles use search range 20, with reaction, emergency
+handling, close-combat, pathfinding, enemy handling and trace detection at 10.
+Wall-following settings, opening timings and starting modes retain each profile's
+distinct settings.
 
 The engine loads a private catalog and applies exact per-role names before cycles
 spawn. It rejects unknown or incomplete rosters instead of silently falling back

@@ -97,7 +97,7 @@ TEST_CASE("Memory: Allocation and Deallocation")
     // Classes from original file
     class test_base
     {
-        int x;
+        [[maybe_unused]] int x;
 
     public:
         virtual ~test_base() {}
@@ -106,7 +106,7 @@ TEST_CASE("Memory: Allocation and Deallocation")
 
     class test_derived : public test_base
     {
-        int y;
+        [[maybe_unused]] int y;
 
     public:
         virtual ~test_derived() {}

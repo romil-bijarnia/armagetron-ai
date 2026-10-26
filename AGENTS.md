@@ -10,6 +10,12 @@ Armagetron Advanced is a free, open-source multiplayer 3D game based on the clas
 
 This checkout combines upstream `trunk` with the custom AI and Legacy graphics. `main` is the fork default branch; use task branches for integration. Keep the full game separate from the graphics-only upstream proposal. Run the canonical build matrix and the existing AI/native runtime checks before updating the installed app.
 
+The six custom training bot profiles in `ai/arma_ai/bot_profiles.py` use search range 20, with reaction, emergency handling, close-combat, pathfinding, enemy handling and trace detection at 10. Preserve the exact stock baselines and separate held-out profiles when adjusting these training candidates.
+
+`ai/blacklight train` defaults to native scripted-bot RL via `ai/arma_ai/native_train.py`; it resumes the one Blacklight checkpoint. Preserve save/stop, recurrent input history and exclusive writer locking. The separate `arma-teach` simulator uses self-play and must be requested explicitly.
+
+Keep native training progress compact. Label current-batch work, the recent results window and whole-session totals separately; continuous training has no overall completion percentage.
+
 ## Details
 
 Armagetron Advanced began as a clone of the classic Tron arcade game and has evolved into a feature-rich multiplayer experience with 3D graphics, network play, AI opponents, and extensive customization. The project was started by Manuel Moos and has been developed by a community of contributors over many years.

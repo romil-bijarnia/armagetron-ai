@@ -8,6 +8,7 @@ from pathlib import Path
 
 from rich.console import Console, Group
 from rich.live import Live
+from rich.progress_bar import ProgressBar
 from rich.table import Table
 from rich.text import Text
 
@@ -43,6 +44,14 @@ def number(value, decimals: int = 4) -> str:
 
 def nonnegative(value) -> bool:
     return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value) and value >= 0
+
+
+def native_scores(progress: dict):
+    counts = [int(progress[key]) if nonnegative(progress.get(key)) else 0
+              for key in ("wins", "draws", "losses")]
+    count = sum(counts)
+    percent = 100 * counts[0] / count if count else None
+    return count, percent, f"{counts[0]}W / {counts[1]}D / {counts[2]}L"
 
 
 def progress_rows(label: str, completed: float, total: float, width: int, *, detail: str | None = None,
@@ -98,6 +107,17 @@ def report_lines(progress: dict, records: list[dict], status, *, width: int, now
     The match scores carry their counts; losses describe the learning objectives."""
     def line(value: str, style: str = DIM) -> Text:
         return Text(value, style=style, no_wrap=True, overflow="ellipsis")
+
+    if progress.get("trainer") == "native_rl":
+        count, percent, score = native_scores(progress)
+        matches = (f"Last {count} games · {percent:.1f}% wins · {score}" if count else
+                   "Awaiting the first completed bot match")
+        matches += f" · this run {progress.get('session_games', 0)} games"
+        details = [f"+{progress.get('session_updates', 0):,} updates",
+                   f"saved u{progress.get('saved_update', 0):,}"]
+        if status.running and status.fresh:
+            details.append(f"{progress.get('sps', 0):.1f} decisions/s")
+        return [line(matches, "default"), line(" · ".join(details))]
 
     history = eligible_records(records, progress)
     if not history:
@@ -214,11 +234,104 @@ def build_imitation(run_dir: Path, progress: dict, status, *, width: int, height
     return Group(bounded)
 
 
+def build_native(run_dir: Path, progress: dict, status, *, width: int, height: int, now: float):
+    """A bounded status block: recent results and this run never share a denominator."""
+    width = max(20, min(width, 104))
+    live = status.running and status.fresh
+    cfg = progress.get("config", {})
+    state = "RUNNING" if live else status.label
+    title = Text.assemble(("Blacklight", "bold"), (" · native bot RL", ACCENT),
+                          (f"   {state}", ACCENT if live else WARNING if state in ("STALE", "FAILED") else DIM))
+    update, added = progress.get("update"), progress.get("session_updates")
+    identity = Text(f"Update {update:,}" if nonnegative(update) else "Waiting for trainer", style="bold")
+    if nonnegative(added):
+        identity.append(f"  (+{added:,} this run)", style=DIM)
+    settings = (f"{str(cfg.get('mode', 'background')).capitalize()} · "
+                f"{str(cfg.get('device', 'mps')).upper()} · {cfg.get('engines', '?')} engines")
+    rows = [title, identity]
+    if width < 78:
+        rows.append(Text(settings, style=DIM))
+    else:
+        identity.append(" · " + settings, style=DIM)
+        rows.append(Text(""))
+    phase = progress.get("phase")
+    label = "Playing batch" if phase == "collecting" else "Learning batch" if phase == "learning" else "Activity"
+    units = "games" if phase == "collecting" else "updates"
+    done, total = progress.get("completed"), progress.get("total")
+    if live and nonnegative(done) and nonnegative(total) and total > 0:
+        activity = Table.grid(padding=(0, 1), expand=False)
+        activity.add_column(width=15, no_wrap=True)
+        bar_width = min(30, max(6, width - 48))
+        activity.add_column(width=bar_width, no_wrap=True)
+        activity.add_column(no_wrap=True)
+        count = f"{done:,.0f}/{total:,.0f} {units}"
+        if width < 58:
+            rows.append(Text(f"{label} · {count}", style=ACCENT))
+            rows.append(ProgressBar(total=total, completed=min(done, total), width=min(30, width),
+                                    complete_style=ACCENT, finished_style=ACCENT, style=TRACK))
+        else:
+            activity.add_row(Text(label, style=ACCENT),
+                             ProgressBar(total=total, completed=min(done, total), width=bar_width,
+                                         complete_style=ACCENT, finished_style=ACCENT, style=TRACK),
+                             Text(count, style=DIM))
+            rows.append(activity)
+    else:
+        rows.append(Text(str(progress.get("stage") or status.detail), style=DIM))
+
+    count, percent, score = native_scores(progress)
+    recent = Text(f"Last {count} games".ljust(16) if count else "Recent results  ", style=DIM)
+    if count:
+        recent.append(f"{percent:.1f}% wins", style="bold " + ACCENT)
+        if width >= 58:
+            recent.append(f" · {score}", style="default")
+    else:
+        recent.append("Awaiting first completed game")
+    rows.append(recent)
+    if count and width < 58:
+        rows.append(Text("                " + score, style=DIM))
+    session = Text(f"This run        {progress.get('session_games', 0):,} games", style="default")
+    began = progress.get("started_at")
+    ended = now if status.running else progress.get("time", now)
+    ended = min(now, ended) if nonnegative(ended) else now
+    elapsed = max(0, ended - began) if nonnegative(began) else None
+    if elapsed is not None:
+        session.append(f" · {duration(elapsed)}" + (" elapsed" if width >= 58 else ""), style=DIM)
+        if live and elapsed >= 60 and width >= 78:
+            session.append(f" · {progress.get('session_games', 0) * 3600 / elapsed:.0f} games/h", style=DIM)
+    rows.append(session)
+    rate = f"{progress['sps']:.1f} decisions/s" if live and nonnegative(progress.get("sps")) else "No live rate"
+    throughput = Text("Throughput      " + rate, style=DIM)
+    rows.append(throughput)
+    saved = progress.get("saved_update")
+    checkpoint = Text("Checkpoint      ", style=DIM)
+    checkpoint.append(f"u{saved:,}" if nonnegative(saved) else "Awaiting first save", style="default")
+    if nonnegative(progress.get("saved_at")):
+        checkpoint.append(" · " + age(progress["saved_at"], now), style=DIM)
+    rows.append(checkpoint)
+    footer = Text("Ctrl-C closes view · ./blacklight stop saves and stops" if width >= 60 else
+                  "Ctrl-C: view · stop: save & stop", style=DIM)
+    table = Table.grid()
+    table.add_column(width=width, no_wrap=True, overflow="ellipsis")
+    budget = max(1, height)
+    if len(rows) + 1 > budget:
+        rows = [row for row in rows if not isinstance(row, Text) or row.plain]
+    if len(rows) + 1 > budget:
+        rows = [row for row in rows if row is not throughput]
+    if len(rows) + 1 > budget:
+        rows = rows[:max(0, budget - 2)] + ([checkpoint] if budget > 1 else [])
+    for row in rows + [footer]:
+        table.add_row(row)
+    return Group(table)
+
+
 def build(run_dir: Path, progress: dict, records: list[dict], status, *, width: int = 110,
           height: int = 30, now: float | None = None, started: float | None = None,
           changed_at: float = 0) -> Group:
     """Stable, bounded rows; logged results always carry their own update and age."""
     now = time.time() if now is None else now
+    if (getattr(status, "method", None) or progress.get("trainer")) == "native_rl":
+        current = progress if progress.get("trainer") == "native_rl" else {}
+        return build_native(run_dir, current, status, width=width, height=height, now=now)
     if (getattr(status, "method", None) or progress.get("trainer")) == "imitate":
         current = progress if progress.get("trainer") == "imitate" else {}
         return build_imitation(run_dir, current, status, width=width, height=height, now=now, started=started)
@@ -432,8 +545,9 @@ def inline_activity(progress: dict, status) -> dict:
            "saved_update": current.get("saved_update"), "completed": None, "total": None}
     if not status.running or not status.fresh:
         return out
-    if current.get("trainer") == "imitate":
-        return {**out, "stage": str(current.get("stage") or "Preparing imitation"),
+    if current.get("trainer") in ("imitate", "native_rl"):
+        fallback = "Preparing native bot RL" if current.get("trainer") == "native_rl" else "Preparing imitation"
+        return {**out, "stage": str(current.get("stage") or fallback),
                 "completed": current.get("completed"), "total": current.get("total")}
     phase = current.get("phase")
     if phase in ("starting", "warming_up"):
@@ -478,6 +592,9 @@ def run(run_dir: Path, console: Console, *, once: bool = False) -> None:
             started = (progress.get("started_at") or process_started(pid)) if status.running else None
 
     def frame():
+        if (getattr(status, "method", None) or progress.get("trainer")) == "native_rl":
+            return build_native(run_dir, progress, status, width=console.width,
+                                height=max(6, console.height - 2), now=time.time())
         info = inline_activity(progress, status)
         now = time.time()
         # Imitation reports elsewhere; otherwise the last RL report rides under the activity line.
@@ -502,7 +619,8 @@ def run(run_dir: Path, console: Console, *, once: bool = False) -> None:
     identity = ["Blacklight", mode]
     if cfg.get("device"):
         identity.append(str(cfg["device"]).upper())
-    console.print(" · ".join(identity), highlight=False)
+    if method != "native_rl":
+        console.print(" · ".join(identity), highlight=False)
     checkpoint = run_dir / "latest.pt"
     project = Path(__file__).resolve().parent.parent
     try:
@@ -510,8 +628,9 @@ def run(run_dir: Path, console: Console, *, once: bool = False) -> None:
                       else checkpoint.relative_to(project))
     except ValueError:
         pass
-    console.print(f"Checkpoint: {checkpoint}", style=DIM, highlight=False)
-    console.print("Ctrl-C closes this view. stop saves and stops training.", style=DIM, highlight=False)
+    if method != "native_rl":
+        console.print(f"Checkpoint: {checkpoint}", style=DIM, highlight=False)
+        console.print("Ctrl-C closes this view. stop saves and stops training.", style=DIM, highlight=False)
     if once or not console.is_terminal:
         console.print(frame())
         return

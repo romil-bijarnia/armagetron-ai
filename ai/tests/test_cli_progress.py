@@ -10,6 +10,47 @@ from rich.console import Console
 from arma_ai.cli_progress import build, report_lines
 
 
+@pytest.mark.parametrize("width", [36, 60, 104, 180])
+@pytest.mark.parametrize("phase,done,total,units", [("collecting", 1, 2, "games"),
+                                                ("learning", 35, 91, "updates")])
+def test_native_view_separates_recent_results_session_totals_and_batch_work(tmp_path, width, phase, done, total, units):
+    now = 30_000
+    progress = {"trainer": "native_rl", "phase": phase, "time": now,
+                "started_at": now - 23_465, "completed": done, "total": total,
+                "update": 27_840, "session_updates": 15_982, "session_games": 449,
+                "wins": 68, "draws": 6, "losses": 126, "sps": 10.8,
+                "saved_update": 27_784, "saved_at": now - 40,
+                "config": {"mode": "background", "device": "mps", "engines": 2}}
+    status = SimpleNamespace(method="native_rl", running=True, fresh=True, label="TRAINING", detail="")
+    stream = io.StringIO()
+    Console(file=stream, width=width).print(build(tmp_path, progress, [], status, width=width, height=14, now=now))
+    text = stream.getvalue()
+    assert "Last 200 games" in text and "34.0% wins" in text
+    assert "68W / 6D / 126L" in text and "449 games" in text
+    assert f"{done}/{total} {units}" in text
+    assert "50%" not in text and "38%" not in text
+    assert "Checkpoint" in text and "27,784" in text
+    assert len(text.splitlines()) <= 14
+    assert all(len(line) <= min(width, 104) for line in text.splitlines())
+
+
+def test_native_recent_window_and_speed_do_not_invent_missing_or_stale_measurements(tmp_path):
+    stopped = SimpleNamespace(method="native_rl", running=False, fresh=False, label="STOPPED", detail="Stopped")
+    progress = {"trainer": "native_rl", "wins": 1, "draws": 0, "losses": 49,
+                "session_games": 50, "sps": 999, "completed": 1, "total": 2,
+                "phase": "collecting", "stage": "Blacklight saved", "started_at": 20, "time": 120}
+    stream = io.StringIO()
+    Console(file=stream, width=104).print(build(tmp_path, progress, [], stopped, now=220))
+    text = stream.getvalue()
+    assert "Last 50 games" in text and "2.0% wins" in text
+    assert "999" not in text and "No live rate" in text and "━" not in text
+    assert "1:40 elapsed" in text and "3:20 elapsed" not in text
+    stream = io.StringIO()
+    Console(file=stream, width=104).print(build(tmp_path, {"trainer": "native_rl"}, [], stopped, now=120))
+    assert "Awaiting first completed game" in stream.getvalue()
+    assert "0.0%" not in stream.getvalue()
+
+
 def test_report_lines_show_gain_match_counts_and_live_rates():
     record = {"trainer": "teach", "update": 11300, "time": 100, "search_kl": .176, "pg": .276, "vf": .374,
               "ent": .33, "value_explained": .26, "win_vs_hunter": 0., "win_exploiter": 1.,

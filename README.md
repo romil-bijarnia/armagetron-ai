@@ -1,18 +1,30 @@
 # Armagetron AI
 
-Armagetron Advanced with a V4 combat policy trained through direct self-play reinforcement learning.
+Armagetron Advanced with Blacklight, a V4 combat policy trained through reinforcement learning against native scripted bots.
 
-The engine's neural bridge (`src/tron/gNeural.cpp`) controls AI cycles through normal steering and braking commands. The `ai/` folder contains the single supported network (`PolicyNet` in `arma_ai/model.py`), the GPU learner, a C++ self-play simulator, evaluation tools, and a play server for racing the trained policy from the normal game client.
+The engine's neural bridge (`src/tron/gNeural.cpp`) controls AI cycles through normal steering and braking commands. The `ai/` folder contains the single supported network (`PolicyNet` in `arma_ai/model.py`), the native-bot GPU learner, an optional C++ self-play simulator, evaluation tools, and a play server for racing the trained policy from the normal game client.
 
-Training mixes ordinary rounds with varied close encounters. Simulator behavior is checked against recorded engine rounds; fixed-opponent evaluation uses the real dedicated engine. Exported V4 weights also run directly in the game's C++ inference code.
+Native training mixes duels and four-player matches across arena sizes, using six configured scripted opponents. Blacklight chooses its own actions and learns from complete match outcomes. The simulator remains a separate self-play option. Fixed-opponent evaluation uses the real dedicated engine, and exported V4 weights also run directly in the game's C++ inference code.
 
 ## Getting started
 
-Build the dedicated server with the bridge, then train or play. The details, including the full configure line, are in [ai/README.md](ai/README.md).
+Build the dedicated server with the bridge, then train or play. Native-bot training
+requires an existing checkpoint at `ai/runs/blacklight/latest.pt`; training
+checkpoints and local run data are not included in Git. Setup details, including
+the full configure line and separate simulator workflow, are in
+[ai/README.md](ai/README.md).
 
 ```bash
-cd ai && uv run arma-background
+cd ai
+./blacklight train
 ```
+
+Training preserves a starting backup, saves during learning and on stop, and keeps
+one resumed brain.
+Use `./blacklight watch` for compact progress and `./blacklight stop` to save and
+stop. The native monitor separates current-batch work, recent match results and
+session totals. See [ai/README.md](ai/README.md) for setup and the separate simulator
+workflow.
 
 ```bash
 cd ai && uv run arma-play

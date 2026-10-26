@@ -96,6 +96,12 @@ jobs:
         run: |
           python -m pytest \
             ai/tests/test_direct_rl.py \
+            ai/tests/test_native_train.py \
+            ai/tests/test_bot_profiles.py \
+            ai/tests/test_blacklight_script.py \
+            ai/tests/test_control.py \
+            ai/tests/test_imitation_controls.py \
+            ai/tests/test_frame_telemetry.py \
             ai/tests/test_async_brain.py \
             ai/tests/test_human_turn_buffer.py \
             ai/tests/test_input_timing.py \

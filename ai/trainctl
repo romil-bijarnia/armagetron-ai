@@ -1,6 +1,7 @@
 #!/bin/sh
 # trainctl: start, stop and watch Armagetron AI training from any terminal.
 #
+#   ./trainctl bots [flags]        native bot RL; --mode background (default) or full
 #   ./trainctl background [flags]  96 parallel arenas, 4 simulation workers, batch 256, low priority;
 #                                  actor and learner each rest to target 35% work / total time
 #   ./trainctl full [flags]        256 parallel arenas, simulation workers for all CPU cores, batch 512;
@@ -33,7 +34,7 @@ cmd="${1:-help}"
 
 watch=auto
 case "$cmd" in
-background | full | start | gentle)
+background | full | start | gentle | bots)
     # Remove only our own option while preserving each trainer argument and its quoting.
     remaining=$#
     while [ "$remaining" -gt 0 ]; do
@@ -56,6 +57,13 @@ for a in "$@"; do
     case "$a" in --run=*) run="${a#--run=}" ;; esac
     prev="$a"
 done
+if [ "$cmd" = bots ]; then
+    for arg in "$@"; do
+        case "$arg" in
+            --help | -h) exec uv run -q python -m arma_ai.native_train --help ;;
+        esac
+    done
+fi
 mkdir -p "$run"
 pidfile="$run/trainctl.pid"
 imitation_pidfile="$run/imitation.pid"
@@ -83,14 +91,14 @@ imitation_pid() {
         *) return 1 ;;
     esac
 }
-trainer_pids() { { pgrep -f 'bin/arma-teach|[[:space:]]-m[[:space:]]+arma_ai\.teach([[:space:]]|$)'; imitation_pid; } | sort -nu; }
+trainer_pids() { { pgrep -f 'bin/arma-teach|[[:space:]]-m[[:space:]]+arma_ai\.(teach|native_train)([[:space:]]|$)'; imitation_pid; } | sort -nu; }
 imitation_progress() {
     [ -f "$run/progress.json" ] && grep -q '"trainer"[[:space:]]*:[[:space:]]*"imitate"' "$run/progress.json"
 }
 stamp() { date '+%Y-%m-%d %H:%M:%S'; }
 
 case "$cmd" in
-background | full | start | gentle)
+background | full | start | gentle | bots)
     if running; then
         echo "already training in $run"
         watch_if_terminal
@@ -103,7 +111,7 @@ background | full | start | gentle)
     command -v uv >/dev/null || { echo "uv not found on PATH"; exit 1; }
     rm -f "$stopflag"
     mode=full
-    case "$cmd" in background | gentle) mode=background ;; esac
+    case "$cmd" in background | gentle | bots) mode=background ;; esac
     prev=""
     for a in "$@"; do
         [ "$prev" = "--mode" ] && mode="$a"
@@ -116,14 +124,37 @@ background | full | start | gentle)
     esac
     # The Python parser supplies the preset; arguments after it override every default.
     set -- --mode "$mode" "$@"
-    if [ "$mode" = background ]; then
-        nohup nice -n 15 "$self" _supervise "$@" </dev/null >> "$log" 2>&1 &
+    supervise=_supervise
+    [ "$cmd" = bots ] && supervise=_supervise_bots
+    if [ "$cmd" = bots ]; then
+        # A separate session survives terminals and command runners that clean up
+        # the invoking process group. Arguments remain literal, including run paths.
+        python3 - "$self" "$supervise" "$mode" "$log" "$pidfile" "$@" <<'PY' || exit $?
+import subprocess
+import sys
+from pathlib import Path
+
+script, supervise, mode, log, pidfile, *arguments = sys.argv[1:]
+command = [script, supervise, *arguments]
+command = (["nice", "-n", "15"] if mode == "background" else ["caffeinate", "-i"]) + command
+with open(log, "ab", buffering=0) as output:
+    process = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=output,
+                               stderr=subprocess.STDOUT, start_new_session=True)
+Path(pidfile).write_text(str(process.pid) + "\n")
+PY
+    elif [ "$mode" = background ]; then
+        nohup nice -n 15 "$self" "$supervise" "$@" </dev/null >> "$log" 2>&1 &
+        echo $! > "$pidfile"
     else
-        nohup caffeinate -i "$self" _supervise "$@" </dev/null >> "$log" 2>&1 &
+        nohup caffeinate -i "$self" "$supervise" "$@" </dev/null >> "$log" 2>&1 &
+        echo $! > "$pidfile"
     fi
-    echo $! > "$pidfile"
     echo "training started (${mode:-$cmd}) in $run"
-    echo "optional viewer:  brain --no-open --checkpoint \"$run/latest.pt\""
+    if [ "$cmd" = bots ]; then
+        echo "native scripted bots only; watch progress with: ./blacklight watch"
+    else
+        echo "optional viewer:  brain --no-open --checkpoint \"$run/latest.pt\""
+    fi
     echo "stop it:  stop --run \"$run\""
     watch_if_terminal
     ;;
@@ -137,12 +168,14 @@ imitate)
     exec uv run -q arma-imitate "$@"
     ;;
 
-_supervise)
+_supervise | _supervise_bots)
     quick=0
     first=1
     while :; do
         started=$(date +%s)
-        if [ "$first" = 1 ]; then
+        if [ "$cmd" = _supervise_bots ]; then
+            uv run python -m arma_ai.native_train "$@"
+        elif [ "$first" = 1 ]; then
             uv run arma-teach "$@"
         else
             uv run arma-teach "$@" --resume true  # a restart always continues from the checkpoint
@@ -196,7 +229,7 @@ status)
     else
         echo "not training"
     fi
-    if [ -n "$imitation" ] || imitation_progress; then
+    if [ -n "$imitation" ] || imitation_progress || { [ -f "$run/progress.json" ] && grep -q '"trainer"[[:space:]]*:[[:space:]]*"native_rl"' "$run/progress.json"; }; then
         progress --once
     fi
     [ -f "$log" ] && grep '^u[0-9]' "$log" | tail -1

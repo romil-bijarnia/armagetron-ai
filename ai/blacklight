@@ -1,8 +1,8 @@
 #!/bin/sh
 # blacklight: Blacklight's training, in plain words, from this directory.
 #
-#   ./blacklight train          start training; the laptop stays usable (96 arenas, low priority)
-#   ./blacklight train full     start training with the whole machine; the Mac is kept awake
+#   ./blacklight train          learn against native game bots; laptop stays usable
+#   ./blacklight train full     native bot RL with more engines; Mac kept awake
 #   ./blacklight stop           save the checkpoint and stop
 #   ./blacklight status         is it running, the latest numbers, when it last saved
 #   ./blacklight watch          reopen the training console (Ctrl-C closes it, not training)
@@ -12,7 +12,7 @@
 #   ./blacklight show           watch it play a match, drawn in the terminal
 #   ./blacklight brain          the live brain page in the browser
 #
-# Extra flags go to the trainer, e.g. ./blacklight train --combat-prob 0.7. Everything runs
+# Extra flags go to the trainer, e.g. ./blacklight train --engines 4. Everything runs
 # through ./trainctl, which keeps its own, longer command list.
 
 set -u
@@ -27,7 +27,7 @@ train)
     case "${1:-}" in
     full | background) mode=$1; shift ;;
     esac
-    exec ./trainctl "$mode" "$@"
+    exec ./trainctl bots --mode "$mode" "$@"
     ;;
 stop | status | watch | log | ladder | show | brain | imitate)
     exec ./trainctl "$cmd" "$@"
